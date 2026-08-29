@@ -75,6 +75,8 @@ class KeyboardService : InputMethodService() {
     private var pendingVertical = 0
     /** How long we have waited for that reflection, so an impossible move cannot wedge us. */
     private var chaseWaitTicks = 0
+    /** Caret offset when the outstanding vertical arrows were sent, to tell moved from stuck. */
+    private var pendingFromOffset = -1
     /** The caret cannot go further vertically -- the end of the text -- so stop trying. */
     private var verticalStuck = false
 
@@ -470,7 +472,9 @@ class KeyboardService : InputMethodService() {
     override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
         if (DEBUG_GESTURES) android.util.Log.d(
             TAG,
-            "anchor sel=[${info.selectionStart},${info.selectionEnd}] insH=${info.insertionMarkerHorizontal}",
+            "anchor sel=[${info.selectionStart},${info.selectionEnd}] " +
+                "insH=${info.insertionMarkerHorizontal} insT=${info.insertionMarkerTop} " +
+                "markerY=$markerCenterY",
         )
         val point = caretPoint(info) ?: return
         val previousX = caretX
@@ -486,12 +490,24 @@ class KeyboardService : InputMethodService() {
                 val advance = abs(point[0] - previousX) / abs(pendingHorizontal)
                 if (advance > 1f && advance < 200f) charWidth = advance
             }
-            // If a vertical push produced no movement we are at the end of the text. Stop
-            // pushing, so the horizontal chase can still run while the marker sits beyond it.
-            if (pendingVertical != 0 && abs(point[1] - previousTop) < 1f) verticalStuck = true
+            // Whether a vertical push achieved anything must be judged by the caret's *offset*,
+            // not its position on screen. When the view scrolls it deliberately holds the caret
+            // still on screen, so screen position says "did not move" for the one case where it
+            // moved the most -- which latched vertical movement off during every scroll.
+            if (pendingVertical != 0 && pendingFromOffset >= 0) {
+                verticalStuck = info.selectionStart == pendingFromOffset
+            }
+
+            // Deliberately no attempt to move the marker with the scrolling text. Doing so
+            // changes the very error that caused the scroll, and the two fight: measured on
+            // device the view scrolled up and down by one line repeatedly, with the caret
+            // offset unchanged. Leaving the marker fixed on screen gives the behaviour that is
+            // actually wanted -- the caret moves within the visible text, and only pushes the
+            // view when it reaches the edge.
         }
         pendingHorizontal = 0
         pendingVertical = 0
+        pendingFromOffset = -1
 
         caretX = point[0]
         caretTop = point[1]
@@ -534,6 +550,7 @@ class KeyboardService : InputMethodService() {
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
         if (lines != 0 && !verticalStuck) {
             val step = if (lines > 0) 1 else -1
+            if (pendingFromOffset < 0) pendingFromOffset = caretOffset
             repeat(abs(lines)) {
                 sendArrow(
                     if (step > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,

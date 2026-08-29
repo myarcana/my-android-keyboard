@@ -161,6 +161,25 @@ is silently a no-op — so it is detected by observation: if a vertical push pro
 the caret is at the end and the push is latched off, so that horizontal steering can still run
 while the marker sits beyond it.
 
+## 10a. Scrolling: judge movement by offset, never by screen position **[platform]**
+
+When a view scrolls to follow the caret it deliberately holds the caret *still on screen* and
+moves the text instead. So the caret's screen position reports "did not move" for precisely the
+case where it moved the most. Any test of the form "did the caret go anywhere?" must therefore
+compare the **text offset**, not the reported y.
+
+Getting this wrong latched vertical movement off during every scroll, which is why cursor
+movement misbehaved near the bottom of a long document.
+
+There is a tempting follow-on that does *not* work: detecting the scroll and moving the marker
+by the same amount, so it stays over the text it was over. It oscillates. The marker's position
+is what generates the error that causes the scroll, so moving it in response changes that error
+and the two fight — measured on device, the view scrolled up and down by one line repeatedly
+with the caret offset unchanged.
+
+Leaving the marker fixed on screen gives the behaviour that is actually wanted: the caret moves
+freely within the visible text, and only pushes the view once it reaches the edge.
+
 ## 11. Drawing outside the keyboard **[platform]**
 
 An IME cannot draw inside the target app's text field, but it can place a `PopupWindow`
