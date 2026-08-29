@@ -94,8 +94,17 @@ class KeyboardService : InputMethodService() {
     private var selectionLineTop = Float.NaN
     private var selectionAppliedChars = 0
     private var selectionPrevInsH = Float.NaN
-    /** Set when the moving end has run out of line; cleared when the finger comes back. */
-    private var selectionBlocked = false
+    /**
+     * Which direction the moving end has run out of line in: +1 stuck at a line end, -1 stuck
+     * at a line start, 0 free. Directional, because a block incurred going one way must only be
+     * cleared by movement back the other way.
+     */
+    private var selectionBlockedDir = 0
+    /** A line change is in flight; wait for the app to report it before steering again. */
+    private var selectionAwaitingLine = false
+    /** Position collapsed onto for a line change, to tell the arrow's result from its echo. */
+    private var selectionPreStepEnd = -1
+    private var selectionWaitTicks = 0
     /** Last reported selection spans, so steering can run on a pan as well as on an update. */
     private var lastSelStart = -1
     private var lastSelEnd = -1
@@ -288,8 +297,9 @@ class KeyboardService : InputMethodService() {
             // Steer on the pan as well as on cursor updates: CURSOR_UPDATE_MONITOR only fires
             // when the cursor actually moves, so waiting for one would deadlock -- no movement,
             // no update, no movement.
-            extendSelection(dy)
-            steerSelection()
+            // Steering in the same tick as a line change would act on stale positions and
+            // undo the arrow key, which is why selections could not cross a paragraph break.
+            if (!extendSelection(dy) && !selectionAwaitingLine) steerSelection()
         } else {
             chaseCaret()
         }
@@ -303,14 +313,24 @@ class KeyboardService : InputMethodService() {
      * To move a line the selection is briefly collapsed onto the moving end so a plain arrow
      * key acts on it, and is re-applied once the new position is reported.
      */
-    private fun extendSelection(dy: Float) {
-        val lh = lineHeight.takeIf { it > 1f } ?: return
+    private fun extendSelection(dy: Float): Boolean {
+        val lh = lineHeight.takeIf { it > 1f } ?: return false
         selectionBankY += dy
+        // One line change at a time. Collapsing again before the previous arrow has been
+        // reported would collapse onto a stale position and undo it, losing the step.
+        if (selectionAwaitingLine) {
+            if (DEBUG_GESTURES) android.util.Log.d(TAG, "vert deferred, bank=$selectionBankY")
+            return false
+        }
         var moved = false
-        while (abs(selectionBankY) >= lh) {
+        // Round to the nearest line rather than waiting for a whole one, so the marker never
+        // leads the selection by more than half a line. Strict, because at exactly half a line
+        // a non-strict test would step back and forth forever.
+        while (abs(selectionBankY) > lh / 2f) {
             val step = if (selectionBankY > 0) 1 else -1
             selectionBankY -= step * lh
             if (!moved) {
+                selectionPreStepEnd = selectionMovingEnd
                 currentInputConnection?.setSelection(selectionMovingEnd, selectionMovingEnd)
                 moved = true
             }
@@ -319,10 +339,18 @@ class KeyboardService : InputMethodService() {
                 0,
             )
         }
+        if (DEBUG_GESTURES) android.util.Log.d(
+            TAG,
+            "vert dy=$dy bank=$selectionBankY lh=$lh moved=$moved await=$selectionAwaitingLine " +
+                "moving=$selectionMovingEnd",
+        )
         if (moved) {
             selectionLineTop = Float.NaN // the line is about to change; re-learn it
-            selectionBlocked = false
+            selectionBlockedDir = 0 // a new line means a new set of edges
+            selectionAwaitingLine = true
+            selectionWaitTicks = 0
         }
+        return moved
     }
 
     /**
@@ -350,10 +378,29 @@ class KeyboardService : InputMethodService() {
             // Collapsed: either the drag has not moved yet, or we collapsed deliberately to
             // change line. Adopt the position and carry on steering -- returning here would
             // mean the selection could never grow in the first place.
+            if (selectionAwaitingLine) {
+                // setSelection and sendKeyEvent take different routes to the editor and are not
+                // ordered, so the collapse is echoed back before the arrow has been applied.
+                // Re-applying on that echo would overwrite the arrow and the line change would
+                // be silently lost -- which is exactly what stopped selections crossing a
+                // paragraph break. Wait for a position that is actually different.
+                if (selStart == selectionPreStepEnd && selectionWaitTicks < 4) {
+                    selectionWaitTicks++
+                    return
+                }
+                selectionAwaitingLine = false
+            }
             selectionMovingEnd = selStart
             selectionPrevMovingEnd = selStart
             selectionLineTop = insT
+            // Re-apply the selection around the new position. This must not wait on a
+            // horizontal correction being needed: a purely vertical drag produces no horizontal
+            // error, so the selection would stay collapsed and never appear at all.
+            if (selectionMovingEnd != selectionAnchor) {
+                ic.setSelection(selectionMovingEnd, selectionAnchor)
+            }
         } else {
+            selectionAwaitingLine = false
             selectionMovingEnd = selStart // reversed, so the start span is the dragged end
 
             // The line changed without us asking: the moving end wrapped past the end of its
@@ -361,8 +408,9 @@ class KeyboardService : InputMethodService() {
             if (!selectionLineTop.isNaN() && abs(insT - selectionLineTop) > 1f &&
                 selectionPrevMovingEnd >= 0
             ) {
-                selectionBlocked = true
+                selectionBlockedDir = if (selectionAppliedChars > 0) 1 else -1
                 selectionMovingEnd = selectionPrevMovingEnd
+                selectionAppliedChars = 0
                 ic.setSelection(selectionMovingEnd, selectionAnchor)
                 return
             }
@@ -380,16 +428,18 @@ class KeyboardService : InputMethodService() {
         if (DEBUG_GESTURES) android.util.Log.d(
             TAG,
             "steer sel=[$selStart,$selEnd] insH=$insH markerX=$markerX err=$error " +
-                "cw=${effectiveCharWidth()} chars=$chars blocked=$selectionBlocked " +
+                "cw=${effectiveCharWidth()} chars=$chars blocked=$selectionBlockedDir " +
                 "anchor=$selectionAnchor moving=$selectionMovingEnd",
         )
-        if (selectionBlocked) {
-            // Only resume once the finger has come back past the stuck position.
-            if (chars >= 0) {
+        if (selectionBlockedDir != 0) {
+            // Only movement back the other way releases it. Comparing against zero alone would
+            // strand a selection blocked at the start of a line, since it can only ever be
+            // freed by moving right.
+            if (chars == 0 || (chars > 0) == (selectionBlockedDir > 0)) {
                 selectionAppliedChars = 0
                 return
             }
-            selectionBlocked = false
+            selectionBlockedDir = 0
         }
         if (chars == 0) {
             selectionAppliedChars = 0
@@ -598,7 +648,8 @@ class KeyboardService : InputMethodService() {
         selectionBankY = 0f
         selectionAppliedChars = 0
         selectionPrevInsH = Float.NaN
-        selectionBlocked = false
+        selectionBlockedDir = 0
+        selectionAwaitingLine = false
     }
 
     /** Leaves the selection in place, normalised to the conventional order. */

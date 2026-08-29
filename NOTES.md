@@ -143,6 +143,21 @@ Note that arrow keys will not work with a reversed selection: shift+arrow moves
 `SELECTION_END`, which is the anchor in that arrangement. Move the dragged end with
 `setSelection` instead, and collapse briefly if you need a line-aware vertical step.
 
+### setSelection and sendKeyEvent are not ordered relative to each other
+
+They reach the editor by different routes, so a key event sent immediately after a
+`setSelection` can be applied *before* it, and the position echoed back to
+`onUpdateCursorAnchorInfo` may be the state before the key was handled.
+
+This bites any "collapse the selection, then press an arrow" sequence: the echo of the
+collapse arrives first, and code that re-applies its own state on that echo silently overwrites
+the arrow's result. Here it stopped selections crossing paragraph breaks -- every vertical step
+was undone the instant it happened, and the symptom was simply that nothing moved.
+
+The fix is to treat a report identical to the pre-step position as "not yet applied" and keep
+waiting, with a small tick budget so a genuinely impossible move (the end of the text) does not
+wait forever. See `selectionPreStepEnd` in `KeyboardService`.
+
 ### CURSOR_UPDATE_MONITOR only fires when the cursor actually moves
 
 This bites in two separate ways, both of which cost real time here.
