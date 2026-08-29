@@ -376,6 +376,44 @@ class TouchFsmTest {
     }
 
     @Test
+    fun `granular offset is unclamped and grows well past a single step`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        var last = 0f
+        var x = space.centerX
+        for (i in 1..12) {
+            x += stepX
+            last = f.onMove(x, space.centerY, 600L + i * 10).only<GestureOutput.CursorProgress>().offsetX
+        }
+        // twelve steps of travel: the caret may have stopped at a line end, this must not
+        assertEquals(12f, last, 0.1f)
+    }
+
+    @Test
+    fun `granular offset moves freely in both axes at once`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        val stepY = config.trackpadStepYRatio * geometry.keyHeight
+        val out = f.onMove(space.centerX + stepX * 4f, space.centerY - stepY * 3f, 700)
+        val p = out.only<GestureOutput.CursorProgress>()
+        assertEquals(4f, p.offsetX, 0.05f)
+        assertEquals(-3f, p.offsetY, 0.05f)
+    }
+
+    @Test
+    fun `granular offset resets for each new drag`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        f.onMove(space.centerX + stepX * 5f, space.centerY, 700)
+        f.onUp(space.centerX + stepX * 5f, space.centerY, 800)
+
+        f.onDown(space.centerX, space.centerY, 1000)
+        f.onLongPressTimeout(1000 + config.longPressMs)
+        val out = f.onMove(space.centerX + stepX, space.centerY, 1600)
+        assertEquals(1f, out.only<GestureOutput.CursorProgress>().offsetX, 0.05f)
+    }
+
+    @Test
     fun `tapping again during trackpad mode starts a selection`() {
         val (f, _) = trackpadFsm()
         val out = f.onSecondaryTap()

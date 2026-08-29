@@ -59,11 +59,19 @@ sealed interface GestureOutput {
     data object SelectionStarted : GestureOutput
 
     /**
-     * Sub-step position of the finger, as a signed fraction of one step in each axis.
-     * The caret can only sit between characters, but the finger is somewhere continuous in
-     * between; this is what drives the granular position indicator.
+     * Where the finger is, for the granular cursor.
+     *
+     * [fractionX]/[fractionY] are the sub-step residual, within +/-0.5 of the nearest caret
+     * position. [offsetX]/[offsetY] are the *total unclamped* displacement since the trackpad
+     * started, in step units, and are free to grow without limit -- the caret stops at the end
+     * of a line, but the granular cursor carries on.
      */
-    data class CursorProgress(val fractionX: Float, val fractionY: Float) : GestureOutput
+    data class CursorProgress(
+        val fractionX: Float,
+        val fractionY: Float,
+        val offsetX: Float,
+        val offsetY: Float,
+    ) : GestureOutput
     data object TrackpadEnded : GestureOutput
 
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
@@ -94,6 +102,9 @@ class TouchFsm(
     private var trackpadAnchor: PathPoint? = null
     private var residualX = 0f
     private var residualY = 0f
+    /** Total unclamped finger travel since the trackpad started, in step units. */
+    private var offsetX = 0f
+    private var offsetY = 0f
 
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
@@ -124,6 +135,8 @@ class TouchFsm(
                 trackpadAnchor = path.last()
                 residualX = 0f
                 residualY = 0f
+                offsetX = 0f
+                offsetY = 0f
                 listOf(GestureOutput.TrackpadStarted)
             }
             key.key.accents.isNotEmpty() -> {
@@ -222,8 +235,12 @@ class TouchFsm(
 
     private fun onMoveWhileTrackpad(x: Float, y: Float): List<GestureOutput> {
         val anchor = trackpadAnchor ?: return emptyList()
-        residualX += x - anchor.x
-        residualY += y - anchor.y
+        val dx = x - anchor.x
+        val dy = y - anchor.y
+        residualX += dx
+        residualY += dy
+        offsetX += dx / trackpadStepX
+        offsetY += dy / trackpadStepY
         trackpadAnchor = PathPoint(x, y, anchor.t)
 
         // Round to the NEAREST boundary rather than truncating: step once the finger is more
@@ -247,6 +264,8 @@ class TouchFsm(
         out += GestureOutput.CursorProgress(
             residualX / trackpadStepX,
             residualY / trackpadStepY,
+            offsetX,
+            offsetY,
         )
         return out
     }
@@ -308,6 +327,8 @@ class TouchFsm(
         trackpadAnchor = null
         residualX = 0f
         residualY = 0f
+        offsetX = 0f
+        offsetY = 0f
     }
 
     /** Keys the glide path passed through, nearest-centre per sample, de-duplicated. */

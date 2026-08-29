@@ -46,26 +46,24 @@ class KeyboardService : InputMethodService() {
     private var indicator: CursorIndicatorView? = null
     private var indicatorPopup: PopupWindow? = null
     private var trackpadActive = false
-    private var progressX = 0f
-    private var progressY = 0f
+
+    /** Total unclamped finger travel for this drag, in step units. */
+    private var offsetX = 0f
+    private var offsetY = 0f
 
     /** Caret position last reported by the app, in screen coordinates. */
     private var caretX = Float.NaN
     private var caretTop = 0f
     private var caretBottom = 0f
 
-    /**
-     * Where we believe the caret is *now*.
-     *
-     * CursorAnchorInfo arrives a frame or so after the arrow key is sent. Without predicting the
-     * move, the marker briefly recomputes from the pre-move caret and visibly jumps backwards,
-     * then forwards again when the real position lands.
-     */
-    private var predictedX = Float.NaN
-    private var predictedTop = Float.NaN
+    /** Where the caret was when this drag began: the granular cursor's origin. */
+    private var startX = Float.NaN
+    private var startTop = Float.NaN
 
     /** Learned from how far the caret actually jumps per step in the current field. */
     private var charWidth = 0f
+    /** Held fixed for the duration of a drag, so refining the estimate cannot jolt the marker. */
+    private var dragCharWidth = 0f
     private var lineHeight = 0f
 
     override fun onCreateInputView(): View =
@@ -109,8 +107,8 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.SelectionStarted -> beginSelection()
                 GestureOutput.TrackpadStarted -> startTrackpad()
                 is GestureOutput.CursorProgress -> {
-                    progressX = out.fractionX
-                    progressY = out.fractionY
+                    offsetX = out.offsetX
+                    offsetY = out.offsetY
                     updateIndicator()
                 }
                 GestureOutput.TrackpadEnded -> {
@@ -182,24 +180,19 @@ class KeyboardService : InputMethodService() {
      */
     private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
         val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
-        val step = if (dx > 0) 1 else -1
         repeat(abs(dx)) {
-            // A move refused at a line edge must not move the prediction either.
             if (!atLineEdge(forward = dx > 0)) {
                 sendArrow(
                     if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                     meta,
                 )
-                if (!predictedX.isNaN()) predictedX += step * effectiveCharWidth()
             }
         }
-        val vstep = if (dy > 0) 1 else -1
         repeat(abs(dy)) {
             sendArrow(
                 if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
                 meta,
             )
-            if (!predictedTop.isNaN()) predictedTop += vstep * lineHeight
         }
     }
 
@@ -263,18 +256,18 @@ class KeyboardService : InputMethodService() {
     private fun startTrackpad() {
         trackpadActive = true
         currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
-        progressX = 0f
-        progressY = 0f
+        offsetX = 0f
+        offsetY = 0f
         caretX = Float.NaN
-        predictedX = Float.NaN
-        predictedTop = Float.NaN
+        startX = Float.NaN
+        startTop = Float.NaN
         updateIndicator()
     }
 
     private fun stopTrackpad() {
         trackpadActive = false
-        predictedX = Float.NaN
-        predictedTop = Float.NaN
+        startX = Float.NaN
+        startTop = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
         indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
     }
@@ -295,9 +288,14 @@ class KeyboardService : InputMethodService() {
         caretBottom = point[3]
         (caretBottom - caretTop).takeIf { it > 1f }?.let { lineHeight = it }
 
-        // Correct the prediction against the truth now that it has arrived.
-        predictedX = caretX
-        predictedTop = caretTop
+        // Seed the granular cursor at the caret, once, at the start of the drag. It is free
+        // thereafter, so nothing that happens to the caret can jolt it.
+        if (trackpadActive && startX.isNaN()) {
+            startX = caretX
+            startTop = caretTop
+            dragCharWidth = charWidth.takeIf { it > 0f }
+                ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.45f
+        }
         updateIndicator()
     }
 
@@ -313,20 +311,24 @@ class KeyboardService : InputMethodService() {
     }
 
     /**
-     * Positions the marker at the interpolated caret position.
+     * Places the granular cursor at the free 2D position the finger has travelled to.
+     *
+     * It is deliberately *not* derived from where the caret currently is. The caret stops at
+     * the end of a line and cannot leave the text at all; the granular cursor carries on in
+     * both axes, so it can sit well past the end of a short line. Because it never re-anchors
+     * to the caret, nothing the caret does can make it jump.
      *
      * Shown lazily: CursorAnchorInfo arrives asynchronously and is not available at the instant
-     * the trackpad starts, so this waits for it rather than treating a missing caret as a reason
-     * to tear the popup down -- doing that dismissed it permanently a few milliseconds before
-     * the position arrived.
+     * the trackpad starts, so this waits for it rather than treating a missing caret as a
+     * reason to tear the popup down.
      */
     private fun updateIndicator() {
         if (!trackpadActive) return
         val kv = keyboardView ?: return
-        if (predictedX.isNaN() || predictedTop.isNaN()) return
+        if (startX.isNaN() || startTop.isNaN()) return
 
-        val cw = effectiveCharWidth()
         val lh = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
+        val cw = dragCharWidth.takeIf { it > 0f } ?: (lh * 0.45f)
 
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
         view.lineHeightPx = lh.roundToInt()
@@ -345,10 +347,12 @@ class KeyboardService : InputMethodService() {
         val originX = onScreen[0] - inWindow[0]
         val originY = onScreen[1] - inWindow[1]
 
-        val screenWidth = resources.displayMetrics.widthPixels
-        val screenX = (predictedX + progressX * cw - view.measuredWidth / 2f)
-            .coerceIn(0f, (screenWidth - view.measuredWidth).toFloat())
-        val screenY = predictedTop + progressY * lh
+        // Clamped only to the display, so it stays visible -- not to the text or the line.
+        val metrics = resources.displayMetrics
+        val screenX = (startX + offsetX * cw - view.measuredWidth / 2f)
+            .coerceIn(0f, (metrics.widthPixels - view.measuredWidth).toFloat())
+        val screenY = (startTop + offsetY * lh)
+            .coerceIn(0f, (metrics.heightPixels - view.measuredHeight).toFloat())
 
         val x = screenX.roundToInt() - originX
         val y = screenY.roundToInt() - originY
