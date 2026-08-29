@@ -28,8 +28,8 @@ data class GestureConfig(
      * Vertical is deliberately higher -- a line is a much longer journey than a character, and
      * there is less room to move vertically on a keyboard than horizontally.
      */
-    val trackpadGainX: Float = 0.55f,
-    val trackpadGainY: Float = 1.2f,
+    val trackpadGainX: Float = 0.78f,
+    val trackpadGainY: Float = 1.45f,
 
     /**
      * Pointer acceleration. Below [trackpadSlowSpeed] the gain is untouched, so slow movement

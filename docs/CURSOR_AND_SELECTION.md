@@ -231,6 +231,10 @@ a long line.
   travel — only its magnitude. There is a test for this.
 - Speed resets when a drag begins, so one flick cannot leak acceleration into the next drag.
 
+The base gains are `trackpadGainX` 0.78 and `trackpadGainY` 1.45 — the multiplier the curve
+leaves untouched at low speed, and therefore what fine positioning actually feels like. They
+were raised from 0.55 / 1.2, which was accurate but tiring to use over any distance.
+
 Tuned values live in `GestureConfig`; measured on device, a 100px sample at ~100ms intervals
 produces multipliers ramping 1.0 → 1.04 → 1.19 → 1.30 as the average builds.
 
