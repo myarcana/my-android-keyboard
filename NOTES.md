@@ -227,6 +227,27 @@ That broadcast is a debug-only stand-in for the second finger of the selection g
 adb cannot send. It is registered only when `BuildConfig.DEBUG`, so it never exists in a
 release build.
 
+### The gesture must start on the space bar, x 421..826
+
+Three separate test runs were wasted starting the drag at x=300 or x=350, which is the
+microphone key. The press then becomes a glide rather than a trackpad, the caret never moves,
+and it reads exactly like the feature being broken -- once badly enough that a good change was
+reverted on the strength of it. On this device (1080px wide) the space bar spans **x 421 to 826**;
+450 is a safe start. The row is y 2079..2198.
+
+Derive it rather than guess:
+
+```sh
+python3 -c "
+w=1080.0; scale=w/360; ku=30.67*scale; gap=4.96*scale; margin=4.33*scale
+units=[1.5,1.25,1.25,4.4,2.5]   # 123, globe, mic, space, return
+content=sum(units)*ku+(len(units)-1)*gap
+x=margin+((w-2*margin)-content)/2
+for i,u in enumerate(units):
+    if i==3: print(f'space x: {x:.0f}..{x+u*ku:.0f}')
+    x+=u*ku+gap"
+```
+
 ### Driving gestures from adb
 
 `adb shell input swipe` is useless for testing a long-press-then-drag: it interpolates
