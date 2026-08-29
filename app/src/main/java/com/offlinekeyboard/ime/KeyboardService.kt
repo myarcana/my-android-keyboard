@@ -299,14 +299,7 @@ class KeyboardService : InputMethodService() {
         val charWidth = charWidthEstimate.takeIf { it > 0f } ?: (lineHeight * 0.45f)
 
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
-        view.label = "${(progressX * 100).roundToInt()}% \u00b7 ${(progressY * 100).roundToInt()}%"
-        view.measure(
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-        )
-        // Hang the pill below the caret when there is no room above it, so it never covers the
-        // app's toolbar when editing on the first line.
-        view.pointsUp = (top - view.measuredHeight) < 0f
+        view.lineHeightPx = lineHeight.roundToInt()
         view.measure(
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
@@ -322,17 +315,21 @@ class KeyboardService : InputMethodService() {
         val originX = onScreen[0] - inWindow[0]
         val originY = onScreen[1] - inWindow[1]
 
-        val screenWidth = resources.displayMetrics.widthPixels
-        val screenX = (caretX + progressX * charWidth - view.measuredWidth / 2f)
-            .coerceIn(0f, (screenWidth - view.measuredWidth).toFloat())
-        val screenY = if (view.pointsUp) {
-            bottom + progressY * lineHeight
-        } else {
-            top + progressY * lineHeight - view.measuredHeight
-        }
+        // The marker sits *at* the interpolated position: half its width left of it, and its
+        // top at the interpolated line offset, so the bar spans that line like a caret.
+        val screenX = caretX + progressX * charWidth - view.measuredWidth / 2f
+        val screenY = top + progressY * lineHeight
 
         val x = screenX.roundToInt() - originX
         val y = screenY.roundToInt() - originY
+
+        if (DEBUG_GESTURES) android.util.Log.d(
+            TAG,
+            "marker caret=(${caretX.roundToInt()},${top.roundToInt()}..${bottom.roundToInt()}) " +
+                "origin=($originX,$originY) size=${view.measuredWidth}x${view.measuredHeight} " +
+                "charW=${charWidth.roundToInt()} progress=($progressX,$progressY) " +
+                "screen=(${screenX.roundToInt()},${screenY.roundToInt()}) posted=($x,$y)",
+        )
 
         val popup = indicatorPopup ?: PopupWindow(view).apply {
             isTouchable = false
@@ -343,6 +340,14 @@ class KeyboardService : InputMethodService() {
             setBackgroundDrawable(null)
             indicatorPopup = this
         }
+        if (DEBUG_GESTURES) android.util.Log.d(
+            TAG,
+            "indicator caretScreen=(${caretX.roundToInt()},${top.roundToInt()}..${bottom.roundToInt()}) " +
+                "origin=($originX,$originY) pill=${view.measuredWidth}x${view.measuredHeight} " +
+                "charW=${charWidth.roundToInt()} progress=($progressX,$progressY) " +
+                "screen=(${screenX.roundToInt()},${screenY.roundToInt()}) posted=($x,$y) " +
+                "showing=${indicatorPopup?.isShowing}",
+        )
         runCatching {
             if (popup.isShowing) {
                 popup.update(x, y, -1, -1)
