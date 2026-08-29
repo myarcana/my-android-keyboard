@@ -95,6 +95,8 @@ class GestureBankReplayTest {
             return Harness(true, "")
         }
         println("  REPLAY DISAGREES with the device on ${mismatches.size} samples:")
+        println("    (a gesture sitting exactly on a threshold can disagree through the 0.1px")
+        println("     coordinate rounding alone -- check the numbers before assuming drift)")
         mismatches.take(10).forEach { (record, onDevice, replayed) ->
             println("    ${record.id}  ${record.promptId}  device=$onDevice replay=$replayed")
         }
@@ -133,11 +135,21 @@ class GestureBankReplayTest {
         val tied: List<GestureConfig>,
     )
 
-    // Starts well below anything sane on purpose. A sweep that settles against the edge of its
-    // own grid has not found an optimum, it has found the edge -- so the grid has to be wide
-    // enough for the answer to sit inside it, and the tap samples are what stop it running away
-    // downward.
-    private val flickGrid = steps(0.10f, 0.85f, 0.05f)
+    /**
+     * The flick threshold, as a fraction of key height.
+     *
+     * The floor is not arbitrary and is not a grid artifact: Android's own touch slop is 8dp,
+     * and a key is 40dp tall, so 0.20 *is* touch slop. Below that the platform still considers
+     * the finger stationary, and a keyboard that has already decided you flicked while the OS
+     * says you have not yet moved is not tunable, it is broken.
+     *
+     * This matters because the drilled taps do not push back as hard as real typing does. A tap
+     * made while a drill is watching is a careful tap; the ones that will actually collide with
+     * this threshold are the sloppy ones in the middle of a sentence, and no bank collected by
+     * asking gets those. The platform's number stands in for the evidence that is hard to
+     * collect, which is exactly what a principled bound is for.
+     */
+    private val flickGrid = steps(0.20f, 0.85f, 0.05f)
     private val dominanceGrid = steps(0.75f, 3.0f, 0.25f)
     private val glideGrid = steps(0.8f, 2.6f, 0.2f)
     private val promoteGrid = steps(1.2f, 4.2f, 0.2f)
@@ -248,7 +260,7 @@ class GestureBankReplayTest {
             }
             println("  %-20s %s".format(name, cells))
         }
-        row("flickDistanceRatio", steps(0.10f, 0.85f, 0.1f)) { best.copy(flickDistanceRatio = it) }
+        row("flickDistanceRatio", steps(0.20f, 0.85f, 0.1f)) { best.copy(flickDistanceRatio = it) }
         row("verticalDominance", steps(0.75f, 3.0f, 0.25f)) { best.copy(verticalDominance = it) }
         row("glideDistanceRatio", steps(0.8f, 2.6f, 0.3f)) { best.copy(glideDistanceRatio = it) }
         row("flickToGlideRatio", steps(1.2f, 4.2f, 0.5f)) { best.copy(flickToGlideRatio = it) }
