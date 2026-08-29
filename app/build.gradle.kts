@@ -12,7 +12,7 @@ android {
         minSdk = 29
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0-phase0"
+        versionName = "0.2.0-phase1"
 
         // Phone + emulator. Native engines land in Phase 2/3/4.
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }

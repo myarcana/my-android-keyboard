@@ -91,4 +91,44 @@ object IosLayouts {
             )
         },
     )
+
+    private fun bottomRow(modeLabel: String, modeId: String) = Row(
+        listOf(
+            Key(modeId, modeLabel, widthUnits = 1.5f, type = KeyType.MODE_SWITCH),
+            Key("globe", "", widthUnits = 1.25f, type = KeyType.GLOBE),
+            Key("mic", "", widthUnits = 1.25f, type = KeyType.MIC),
+            Key("space", " ", widthUnits = 4.4f, type = KeyType.SPACE),
+            Key("return", "\n", widthUnits = 2.5f, type = KeyType.RETURN),
+        ),
+    )
+
+    /** The iOS "123" plane. */
+    val NUMBERS = Layout(
+        id = "numbers",
+        rows = listOf(
+            Row("1234567890".map { c(it.toString()) }),
+            Row(listOf("-", "/", ":", ";", "(", ")", "$", "&", "@", "\"").map { c(it) }),
+            Row(
+                listOf(Key("mode_symbols", "#+=", widthUnits = 1.5f, type = KeyType.MODE_SWITCH)) +
+                    listOf(".", ",", "?", "!", "'").map { c(it) } +
+                    listOf(Key("backspace", "", widthUnits = 1.5f, type = KeyType.BACKSPACE)),
+            ),
+            bottomRow("ABC", "mode_abc"),
+        ),
+    )
+
+    /** The iOS "#+=" plane. */
+    val SYMBOLS = Layout(
+        id = "symbols",
+        rows = listOf(
+            Row(listOf("[", "]", "{", "}", "#", "%", "^", "*", "+", "=").map { c(it) }),
+            Row(listOf("_", "\\", "|", "~", "<", ">", "\u20ac", "\u00a3", "\u00a5", "\u2022").map { c(it) }),
+            Row(
+                listOf(Key("mode_numbers", "123", widthUnits = 1.5f, type = KeyType.MODE_SWITCH)) +
+                    listOf(".", ",", "?", "!", "'").map { c(it) } +
+                    listOf(Key("backspace", "", widthUnits = 1.5f, type = KeyType.BACKSPACE)),
+            ),
+            bottomRow("ABC", "mode_abc"),
+        ),
+    )
 }
