@@ -39,6 +39,18 @@ Clamping instead — refusing to go past a line's bounds, refusing to let the ma
 the caret cannot follow, refusing a step that would leave the visual row — has nothing to get
 stuck or released at the wrong moment.
 
+### Never act on a stale reading more than once
+
+Every arrow in a burst is computed from a single reading of the caret's position, so a long
+burst is dead reckoning: a row edge reached part way through it is not noticed until the whole
+burst has been sent. Tracing a real gesture showed **837 arrow keys for 73 touch events** — the
+caret leaving a row mid-burst, landing on the far side of the wrap, and restarting an enormous
+error from there, forever.
+
+Bursts are capped at 4 steps. Converging over several short rounds costs nothing, because each
+arrow produces its own position report to steer from, and it means no single decision can carry
+the caret past a boundary it cannot see.
+
 ### Round to nearest, and compare strictly
 
 Stepping only after a *whole* unit of travel lets the marker lead the caret by a full character

@@ -326,6 +326,14 @@ class KeyboardView @JvmOverloads constructor(
                 for (i in 0 until event.pointerCount) {
                     val id = event.getPointerId(i)
                     pointers[id]?.let { fsm ->
+                        if (fsm.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD ||
+                            fsm.state == com.offlinekeyboard.ime.gesture.GestureState.SELECTING
+                        ) {
+                            android.util.Log.d(
+                                "TP",
+                                "FINGER t=${event.eventTime} p=$id x=${event.getX(i)} y=${event.getY(i)}",
+                            )
+                        }
                         emit(fsm.onMove(event.getX(i), event.getY(i), event.eventTime))
                     }
                 }

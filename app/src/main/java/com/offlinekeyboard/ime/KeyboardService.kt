@@ -231,7 +231,10 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitAccent -> commit(out.text)
                 GestureOutput.SelectionStarted -> beginSelection()
                 GestureOutput.TrackpadStarted -> startTrackpad()
-                is GestureOutput.TrackpadPan -> panMarker(out.dx, out.dy)
+                is GestureOutput.TrackpadPan -> {
+                    trace("PAN dx=${out.dx} dy=${out.dy}")
+                    panMarker(out.dx, out.dy)
+                }
                 GestureOutput.TrackpadEnded -> {
                     endSelection()
                     stopTrackpad()
@@ -301,7 +304,13 @@ class KeyboardService : InputMethodService() {
      */
     // --- the granular cursor leads; the caret follows -------------------------------------
 
+    /** One line per event, so a whole gesture can be reconstructed exactly from logcat. */
+    private fun trace(message: String) {
+        if (DEBUG_GESTURES) android.util.Log.d("TP", message)
+    }
+
     private fun startTrackpad() {
+        trace("=== TRACKPAD START selecting=$extendingSelection ===")
         trackpadActive = true
         // IMMEDIATE as well as MONITOR. MONITOR alone only delivers when the cursor *moves*,
         // so a second trackpad gesture with no editing in between would never receive a seed
@@ -322,6 +331,7 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun stopTrackpad() {
+        trace("=== TRACKPAD END ===")
         trackpadActive = false
         scrollPinned = false
         handler.removeCallbacks(edgeScrollTick)
@@ -343,6 +353,7 @@ class KeyboardService : InputMethodService() {
         val effectiveDy = if (verticalStuckDir != 0 && (dy > 0f) == (verticalStuckDir > 0)) 0f else dy
         markerX = (markerX + dx).coerceIn(0f, metrics.widthPixels.toFloat())
         markerCenterY = (markerCenterY + effectiveDy).coerceIn(0f, metrics.heightPixels.toFloat())
+        trace("MARK x=$markerX y=$markerCenterY vStuck=$verticalStuckDir")
         updateIndicator()
         updateEdgeScroll()
         if (extendingSelection) {
@@ -523,6 +534,11 @@ class KeyboardService : InputMethodService() {
                 "insH=${info.insertionMarkerHorizontal} insT=${info.insertionMarkerTop} " +
                 "markerY=$markerCenterY",
         )
+        trace(
+            "CARET sel=[${info.selectionStart},${info.selectionEnd}] " +
+                "x=${info.insertionMarkerHorizontal} top=${info.insertionMarkerTop} " +
+                "markX=$markerX markY=$markerCenterY editorR=$editorRight",
+        )
         val point = caretPoint(info) ?: return
         val previousX = caretX
         val previousTop = caretTop
@@ -677,6 +693,7 @@ class KeyboardService : InputMethodService() {
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
+        if (lines != 0) trace("VMOVE lines=$lines vStuck=$verticalStuckDir")
         // While parked past an edge the repeating scroll owns vertical movement; an
         // error-driven step here would race it and overshoot.
         val stuckThisWay = verticalStuckDir != 0 && (lines > 0) == (verticalStuckDir > 0)
@@ -695,7 +712,33 @@ class KeyboardService : InputMethodService() {
 
         // Deadband of half a character stops the caret dithering around the marker.
         val advance = effectiveCharWidth()
-        val chars = ((markerX - caretX) / advance).roundToInt().coerceIn(-24, 24)
+        // Deliberately a small cap. Every arrow in a burst is computed from one reading of
+        // caretX, so a long burst is dead reckoning across a stale position -- and a row edge
+        // reached part way through it is not noticed until the whole burst has been sent. A
+        // trace of the real gesture showed 837 arrows for 73 touch events, the caret crossing
+        // wraps mid-burst and restarting the error from the far side each time. Converging over
+        // several short rounds costs nothing, because each arrow produces its own position
+        // report to steer from.
+        var chars = ((markerX - caretX) / advance).roundToInt().coerceIn(-4, 4)
+
+        // Clamp the whole burst to what fits before the edge of the visual row.
+        //
+        // caretX is only refreshed between rounds, so checking it per arrow only ever guards
+        // the first of them: the rest of a 24-step burst sail across the wrap on a stale
+        // position. Measured from a trace of the real gesture -- 837 arrows for 73 touch events
+        // -- the caret was leaving a row at x=642 with 19 steps of ~25px queued behind it,
+        // landing past the editor's 1080px edge and restarting the error from the far left of
+        // the next row. That is the thrash.
+        if (chars > 0 && !editorRight.isNaN()) {
+            chars = chars.coerceAtMost(((editorRight - caretX) / advance).toInt())
+        } else if (chars < 0) {
+            chars = chars.coerceAtLeast(-((caretX - editorLeft) / advance).toInt())
+        }
+        trace(
+            "DECIDE lines=$lines chars=$chars vStuck=$verticalStuckDir " +
+                "caretX=$caretX caretTop=$caretTop " +
+                "rowEdgeR=${atRowEdge(true)} rowEdgeL=${atRowEdge(false)}",
+        )
         if (chars == 0) return
         val step = if (chars > 0) 1 else -1
         repeat(abs(chars)) {
@@ -756,6 +799,15 @@ class KeyboardService : InputMethodService() {
 
     /** sendDownUpKeyEvents cannot carry a meta state, so build the events by hand. */
     private fun sendArrow(keyCode: Int, meta: Int) {
+        trace(
+            "ARROW " + when (keyCode) {
+                KeyEvent.KEYCODE_DPAD_LEFT -> "LEFT"
+                KeyEvent.KEYCODE_DPAD_RIGHT -> "RIGHT"
+                KeyEvent.KEYCODE_DPAD_UP -> "UP"
+                KeyEvent.KEYCODE_DPAD_DOWN -> "DOWN"
+                else -> "$keyCode"
+            } + if (meta != 0) " +shift" else "",
+        )
         val ic = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, meta))
@@ -825,6 +877,7 @@ class KeyboardService : InputMethodService() {
      * it be stored reversed so the app reports the dragged end -- see [steerSelection].
      */
     private fun beginSelection() {
+        trace("=== SELECTION START ===")
         if (extendingSelection) return
         // CursorAnchorInfo is asynchronous and may not have arrived yet, so fall back to
         // asking the editor directly rather than refusing to start.
