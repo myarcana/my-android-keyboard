@@ -86,22 +86,16 @@ private val ICON_KEYS = setOf(
 )
 
 /**
- * Time constant of the exponential the flick glyphs chase the finger with, in milliseconds.
+ * How quickly a released key's glyphs settle back, as an exponential time constant in
+ * milliseconds.
  *
- * The animation cannot simply be drawn at the finger's position. A flick commits after 0.20 of a
- * key height -- 24px on the target phone, chosen because it is Android's own touch slop and the
- * gesture bank showed nothing between a tap and a flick to separate them any better. A fast
- * finger crosses that in three or four move events, so glyphs pinned straight to it would jump
- * rather than move. Chasing the finger instead gives both readings honestly: a deliberate drag
- * tracks the thumb, and a quick flick still gets a full ~120ms of movement to be seen.
+ * This is the *only* part of the flick that is animated on a clock. While the finger is down the
+ * glyphs are pinned to it and move exactly as far as it does -- no easing, no lag, no duration --
+ * because the symbol is meant to be the thing being dragged rather than a clip being played. A
+ * timed curve is needed for one moment only: after the lift, when there is no finger left to
+ * follow and the key has to put itself back together.
  */
-private const val FLICK_TIME_CONSTANT_MS = 40f
-
-/**
- * Progress at which the departing letter has faded out completely -- before the symbol lands, so
- * the two are never stacked on top of each other in the middle of the key.
- */
-private const val PRIMARY_FADE_AT = 0.75f
+private const val FLICK_SETTLE_MS = 40f
 
 class KeyboardView @JvmOverloads constructor(
     context: Context,
@@ -160,8 +154,8 @@ class KeyboardView @JvmOverloads constructor(
     private var highlightedKeyId: String? = null
 
     /**
-     * In-flight flick animations, by key id -- rather than by pointer, so a key still springing
-     * back after the finger has lifted goes on animating with no pointer to drive it.
+     * Keys mid-flick, by key id -- rather than by pointer, so a key still settling back after the
+     * finger has lifted keeps its place with no pointer left to hold it.
      */
     private val flicks = mutableMapOf<String, Flick>()
     private var lastFrameNanos = 0L
@@ -296,6 +290,16 @@ class KeyboardView @JvmOverloads constructor(
         }
     }
 
+    /**
+     * Progress at which the letter has faded out entirely -- which is exactly the point the flick
+     * arms at, so the fade is not decoration. A key showing no letter is a key that will type its
+     * symbol if you let go, and one showing a letter again is one that will type the letter. The
+     * commit point can then be felt without being explained, and the two cannot drift apart
+     * because both come from the same pair of ratios.
+     */
+    private val letterGoneAt: Float
+        get() = config.flickDistanceRatio / config.flickTravelRatio
+
     private fun candidateCellWidth(g: LayoutGeometry): Float = g.stripHeight
 
     private fun visibleCandidateCount(g: LayoutGeometry): Int =
@@ -360,7 +364,7 @@ class KeyboardView @JvmOverloads constructor(
         if (text.isNotBlank()) {
             label.color = t.text
             label.textSize = primarySize * (1f - 0.26f * flick)
-            label.alpha = (255f * (1f - flick / PRIMARY_FADE_AT).coerceIn(0f, 1f)).toInt()
+            label.alpha = (255f * (1f - flick / letterGoneAt).coerceIn(0f, 1f)).toInt()
             canvas.drawText(
                 text,
                 rect.centerX,
@@ -451,77 +455,85 @@ class KeyboardView @JvmOverloads constructor(
 
     // --- the iPadOS flick animation -------------------------------------------------------
 
-    /**
-     * One key's animation: [target] is where the finger says the glyphs belong, [progress] is
-     * where they have actually got to.
-     */
+    /** One key's flick: how far its glyphs have been pulled, and whether a finger is doing it. */
     private class Flick {
         var progress = 0f
-        var target = 0f
+
+        /**
+         * True while a finger is on the key. A held key is not animating -- it is being moved --
+         * so it neither eases toward anything nor asks for frames of its own.
+         */
+        var held = false
     }
 
     /**
-     * Points every key's glyphs at wherever the fingers currently have them.
+     * Puts every key's glyphs exactly where the fingers currently have them.
      *
-     * The targets come from the state machines rather than from the raw coordinates, because the
-     * rules for what counts as a flick in progress -- downward, vertically dominant, on a key that
-     * has a secondary, not yet promoted to a glide -- already live there and must not be guessed
-     * at a second time here. Every key not under a flicking finger is aimed back at rest, which is
-     * what makes the glyphs fall home on release, on a cancel, and when a flick turns into a
-     * glide, without any of those needing to be handled separately.
+     * The pull comes from the state machines rather than from the raw coordinates here, because
+     * the rules for what counts as a flick in progress -- downward, vertically dominant on the way
+     * in, on a key that has a secondary, not yet promoted to a glide -- already live there, and a
+     * second copy of them in the renderer would be a second thing to keep in step.
+     *
+     * Assigning [Flick.progress] directly, rather than easing toward it, is the point: the symbol
+     * travels the same number of pixels the thumb does, so a slow pull is slow, a fast one is
+     * fast, and a pull that turns round comes back up under the finger that is lifting it. Every
+     * key with no finger on it is released to settle home, which covers the lift, a cancel, and a
+     * flick escaping into a glide without any of the three being handled separately.
      */
     private fun syncFlickTargets() {
         var changed = false
         flicks.values.forEach {
-            if (it.target != 0f) {
-                it.target = 0f
+            if (it.held) {
+                it.held = false
                 changed = true
             }
         }
         pointers.values.forEach { fsm ->
             val keyId = fsm.originKeyId ?: return@forEach
-            val progress = fsm.flickProgress
-            if (progress <= 0f) return@forEach
+            val pull = fsm.flickProgress
+            if (pull <= 0f) return@forEach
             val flick = flicks.getOrPut(keyId) { Flick() }
-            if (flick.target != progress) {
-                flick.target = progress
-                changed = true
-            }
+            if (flick.progress != pull || !flick.held) changed = true
+            flick.progress = pull
+            flick.held = true
         }
         if (changed) invalidate()
     }
 
     /**
-     * Advances every animation one frame, and asks for another while any is still moving.
+     * Settles every released key one frame further home, and asks for another frame while any is
+     * still moving. Keys under a finger are skipped: [syncFlickTargets] is already placing those,
+     * and a touch event repaints them.
      *
-     * Exponential rather than a fixed-duration tween because the target keeps moving: the finger
-     * can reverse, stall part way down, or lift at any moment, and a tween would have to be
-     * restarted and re-aimed on every touch sample. Chasing a target handles all of that with no
-     * cases in it, and never overshoots -- an iPadOS key slides, it does not bounce.
+     * Exponential rather than a fixed-duration tween because a key can be let go from anywhere --
+     * fully pulled after a flick, or a tenth of the way down after a change of mind -- and the
+     * return should take its length from how far there is to go. It also cannot overshoot: an
+     * iPadOS key slides back, it does not bounce.
      */
     private fun advanceFlicks() {
         if (flicks.isEmpty()) return
         val now = System.nanoTime()
-        // A dropped frame must not teleport the glyphs, and the first frame of an animation has
-        // no previous one to measure from.
+        // A dropped frame must not teleport the glyphs, and the first frame after a lift has no
+        // previous one to measure from.
         val dtMs =
             if (lastFrameNanos == 0L) 0f
             else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
         lastFrameNanos = now
-        val step = 1f - exp(-dtMs / FLICK_TIME_CONSTANT_MS)
+        val step = 1f - exp(-dtMs / FLICK_SETTLE_MS)
 
-        var animating = false
+        var settling = false
         val entries = flicks.entries.iterator()
         while (entries.hasNext()) {
             val flick = entries.next().value
-            flick.progress += (flick.target - flick.progress) * step
-            // An exponential only ever approaches its target, so it is landed by hand -- otherwise
-            // a key at rest would keep asking for frames forever.
-            if (abs(flick.target - flick.progress) < 0.004f) flick.progress = flick.target
-            if (flick.target == 0f && flick.progress == 0f) entries.remove() else animating = true
+            if (flick.held) continue
+            flick.progress -= flick.progress * step
+            // An exponential only ever approaches zero, so it is landed by hand -- otherwise a key
+            // at rest would keep asking for frames forever.
+            if (flick.progress < 0.004f) flick.progress = 0f
+            if (flick.progress == 0f) entries.remove() else settling = true
         }
 
-        if (animating) postInvalidateOnAnimation() else lastFrameNanos = 0L
+        if (settling) postInvalidateOnAnimation() else lastFrameNanos = 0L
     }
 
     /** Straight per-channel interpolation, for the secondary taking on the primary's colour. */

@@ -28,6 +28,23 @@ data class GestureConfig(
      */
     val flickDistanceRatio: Float = 0.20f,
     /**
+     * How far the finger drags the key's symbol, as a fraction of key height.
+     *
+     * Not a threshold -- nothing is decided by it. It is the distance the symbol itself has to
+     * cover to get from its resting slot to the letter's place, so setting the finger's travel
+     * equal to it makes the two move as one: the symbol sits under the thumb and is dragged
+     * down, rather than being played back at some speed of its own. That is the whole difference
+     * between an animation and a manoeuvre, and the number is therefore the view's glyph geometry
+     * (0.74 - 0.28 of key height) rather than anything measured off a hand.
+     *
+     * Deliberately not [flickDistanceRatio]. A flick commits after 0.20 because that is Android's
+     * touch slop and the bank showed nothing between a tap and a flick to separate them better,
+     * and the symbol is only 44% of the way home at that point. So the pull has a point of no
+     * return partway down it, like any detent: past 0.20 the letter has faded out and releasing
+     * gives the symbol, and coming back up above it puts the letter back and gives the letter.
+     */
+    val flickTravelRatio: Float = 0.46f,
+    /**
      * |dy| must exceed this multiple of |dx| for a flick; otherwise it reads as a glide.
      *
      * This is what separates a flick from "ok". On the o key, flicks leave at a ratio of 6.6 or
@@ -196,6 +213,7 @@ class TouchFsm(
     private var trackpadSpeed = 0f
 
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
+    private val flickTravel get() = config.flickTravelRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
     private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
@@ -220,17 +238,40 @@ class TouchFsm(
      * with no secondary leaves them at rest, and a flick that grows into a glide drops back to 0
      * and lets them fall home.
      */
-    val flickProgress: Float
+    val flickProgress: Float get() = (flickPull / flickTravel).coerceIn(0f, 1f)
+
+    /**
+     * True while releasing would commit the secondary. Derived from where the finger is now, not
+     * latched when it first crossed: pulling back up disarms it again, which is what makes the
+     * gesture something you can change your mind about halfway through.
+     *
+     * Safe against the bank: of 208 recorded gestures, none crossed 0.20 of a key height and then
+     * lifted back above it. Real flicks retract 0.0px at the lift by median and 0.5px at the 90th
+     * percentile, and the shortest one recorded still ended 33.7px down against the 24px this
+     * asks for -- so no gesture anyone has actually made changes its verdict by being read here
+     * instead of at the crossing.
+     */
+    val flickArmed: Boolean get() = flickPull > flickDistance
+
+    /** Downward travel currently being read as a flick, in pixels. 0 when none is. */
+    private val flickPull: Float
         get() {
-            if (state == GestureState.FLICK) return 1f
-            if (state != GestureState.PRESSED) return 0f
+            if (state != GestureState.PRESSED && state != GestureState.FLICK) return 0f
             val key = origin ?: return 0f
             if (key.key.secondary == null || key.key.type == KeyType.BACKSPACE) return 0f
             val start = down ?: return 0f
             val now = path.lastOrNull() ?: return 0f
             val dy = now.y - start.y
-            if (dy <= 0f || dy <= config.verticalDominance * abs(now.x - start.x)) return 0f
-            return (dy / flickDistance).coerceIn(0f, 1f)
+            if (dy <= 0f) return 0f
+            // Dominance gates getting into a flick, not staying in one: several recorded flicks
+            // hook through 80 degrees at the lift, and the symbol must not fly home because the
+            // thumb rolled sideways on its way off the glass.
+            if (state == GestureState.PRESSED &&
+                dy <= config.verticalDominance * abs(now.x - start.x)
+            ) {
+                return 0f
+            }
+            return dy
         }
 
     fun onDown(x: Float, y: Float, t: Long): List<GestureOutput> {
@@ -435,21 +476,25 @@ class TouchFsm(
 
     fun onUp(x: Float, y: Float, t: Long): List<GestureOutput> {
         val key = origin
+        // Read from the lift point itself, not from the last move: a device does not always send
+        // a move at the position the finger left from, and those last few pixels are exactly the
+        // part of the pull that decides it.
+        val armedAtRelease = down?.let { y - it.y > flickDistance } ?: false
         val result: List<GestureOutput> = when (state) {
-            GestureState.PRESSED -> when {
-                key == null -> emptyList()
-                key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE ||
-                    key.key.type == KeyType.RETURN ->
-                    listOf(GestureOutput.CommitPrimary(key.key.id, key.key.primary))
-                else -> listOf(GestureOutput.SpecialKey(key.key.type, key.key.id))
-            }
-            GestureState.FLICK ->
-                key?.key?.secondary?.let {
-                    listOf(
+            GestureState.PRESSED -> tapOutput(key)
+            GestureState.FLICK -> {
+                val secondary = key?.key?.secondary
+                when {
+                    secondary == null -> emptyList()
+                    // Pulled down and then brought back up: the symbol never landed, so this was
+                    // a keypress with a wobble in it.
+                    !armedAtRelease -> listOf(GestureOutput.FlickPreviewCleared) + tapOutput(key)
+                    else -> listOf(
                         GestureOutput.FlickPreviewCleared,
-                        GestureOutput.CommitSecondary(key.key.id, it),
+                        GestureOutput.CommitSecondary(key.key.id, secondary),
                     )
-                } ?: emptyList()
+                }
+            }
             GestureState.GLIDE -> listOf(GestureOutput.GlideCompleted(path.toList()))
             GestureState.ACCENTS -> {
                 val accents = key?.key?.accents.orEmpty()
@@ -465,9 +510,18 @@ class TouchFsm(
             GestureState.BACKSPACE -> listOf(GestureOutput.BackspaceRepeatEnded)
             GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
-        val captured = capture(PathPoint(x, y, t))
+        val captured = capture(PathPoint(x, y, t), armedAtRelease)
         reset()
         return result + listOfNotNull(captured) + GestureOutput.KeyHighlighted(null)
+    }
+
+    /** What releasing a key with no gesture on it does. */
+    private fun tapOutput(key: KeyRect?): List<GestureOutput> = when {
+        key == null -> emptyList()
+        key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE ||
+            key.key.type == KeyType.RETURN ->
+            listOf(GestureOutput.CommitPrimary(key.key.id, key.key.primary))
+        else -> listOf(GestureOutput.SpecialKey(key.key.type, key.key.id))
     }
 
     /**
@@ -479,7 +533,7 @@ class TouchFsm(
      * counts as part of "exact": a tap that never moved still has to record when it ended, or a
      * replay of it has no duration and cannot tell a tap from a long press.
      */
-    private fun capture(up: PathPoint): GestureOutput.GestureCaptured? {
+    private fun capture(up: PathPoint, armed: Boolean): GestureOutput.GestureCaptured? {
         val key = origin ?: return null
         val last = path.lastOrNull() ?: return null
         val full = if (last == up) path.toList() else path + up
@@ -488,7 +542,7 @@ class TouchFsm(
                 startKeyId = key.key.id,
                 verdict = when (state) {
                     GestureState.PRESSED -> GestureVerdict.TAP
-                    GestureState.FLICK -> GestureVerdict.FLICK
+                    GestureState.FLICK -> if (armed) GestureVerdict.FLICK else GestureVerdict.TAP
                     GestureState.GLIDE -> GestureVerdict.GLIDE
                     GestureState.ACCENTS -> GestureVerdict.ACCENT
                     GestureState.TRACKPAD, GestureState.SELECTING -> GestureVerdict.TRACKPAD

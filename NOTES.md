@@ -188,10 +188,10 @@ compromise. Word deletion stops at a line break rather than running past it.
   A cursor should look like a cursor.
 - **Vector glyphs, never colour emoji.** The globe and microphone were emoji at first and were
   the single ugliest detail against Gboard's flat monochrome icons.
-- **The flick shows itself before it commits.** Swiping down on a key slides its symbol out of
+- **The flick is a manoeuvre, not an animation.** Swiping down on a key drags its symbol out of
   the small grey slot and into the letter's own place — position, size and colour — while the
-  letter drops out of the bottom of the key. Nothing about the gesture is hidden until release:
-  the key is visibly *becoming* the symbol, and pulling back up puts it away again.
+  letter drops out of the bottom of the key. It tracks the thumb pixel for pixel in both
+  directions, so it can be done slowly, stopped halfway, and taken back.
 
 ---
 
@@ -299,34 +299,48 @@ horizontal and vertical has to cover a whole document. At 0.6 px/ms vertical is 
 while horizontal is at 1.14×. The accepted cost is that a fast diagonal drag is steeper than the
 finger's own path.
 
-### Flick animation — `view/KeyboardView`
+### The flick — `view/KeyboardView`, `gesture/TouchFsm`
 
 | parameter | value |
 |---|---|
-| glyph time constant | 40 ms |
-| symbol size / travel | 0.30 → 0.62 key units, up to the primary's baseline |
-| letter size / travel | ×0.74, 0.46 key heights down, clipped at the key edge |
-| letter fully faded at | 0.75 of the flick |
+| symbol travel | 0.46 key heights, 1:1 with the finger |
+| commit point | 0.20 key heights — 44% of the way down |
+| symbol size / colour | 0.30 → 0.62 key units, `#6B6B7B` → `#181B25` |
+| letter | ×0.74, 0.46 key heights down, clipped at the key edge, gone at the commit point |
+| settle after release | 40 ms time constant |
 
-**The glyphs chase the finger, they are not pinned to it.** A flick commits after 0.20 of a key
-height — 24px on the target phone, and that number is Android's touch slop rather than a choice
-(see the gesture thresholds above). A fast finger crosses 24px in three or four move events, so
-glyphs drawn straight at the finger's offset would jump between two or three positions and then
-stop. Aiming them at that offset and letting them approach it exponentially gives both readings
-honestly: a slow deliberate drag tracks the thumb, and a flick fast enough to be four samples
-long still gets ~120ms of visible movement.
+**The symbol is dragged, not played.** It moves exactly as many pixels as the thumb does — the
+travel ratio is the view's own glyph geometry, the 0.46 key heights between the symbol's resting
+slot and the letter's baseline — so a slow pull is slow, a fast one is fast, and one that turns
+round comes back up under the finger. Nothing is eased, tweened or timed while a finger is down.
+The only thing animated on a clock is the settle *after* the lift, when there is no finger left
+to follow.
 
-Exponential rather than a fixed-duration tween because the target keeps moving — the finger can
-reverse, stall part way down, or lift at any moment, and a tween would have to be restarted and
-re-aimed on every touch sample. Chasing a target has no cases in it, and never overshoots; an
-iPadOS key slides, it does not bounce.
+An earlier version chased the finger exponentially instead, on the reasoning that a flick commits
+after 24px and a fast thumb crosses that in three or four samples. That reasoning was about the
+wrong distance: the glyph's own travel is 55px, and real flicks in the bank pull a median of
+112px. There was never a shortage of samples to move across, and the lag it added was the whole
+difference between dragging something and watching a clip of it being dragged.
 
-The progress comes from `TouchFsm.flickProgress`, not from the view's own arithmetic on the
-coordinates. What counts as a flick still in progress — downward, vertically dominant, on a key
-with a secondary, not yet promoted to a glide — is exactly the state machine's business, and a
-second copy of those rules in the renderer would be a second thing to keep in step. It falls to
-zero the moment the flick becomes a glide, which is what sends the glyphs home with no separate
-handling for release, cancellation or escape.
+**The pull has a detent, and the letter's fade is where it is.** The commit point stays at 0.20
+key heights — Android's touch slop, measured, and raising it is what lost ten of sixty-four flicks
+the first time round — so the symbol is only 44% home when the gesture arms. The letter is
+therefore faded to nothing at exactly that fraction, computed from the two ratios so they cannot
+drift apart. A key showing no letter will type its symbol if released; one showing a letter will
+type the letter. The detent can be felt without being explained.
+
+**Arming is read from the finger's position at release, never latched at the crossing.** That is
+what makes the pull something you can change your mind about halfway through, and it is the
+stateless version of the constraint — no flag to be set, and so no wrong moment for it to be
+cleared. It leaves the FLICK state alone rather than dropping back to PRESSED, because the glide
+promotion is far more forgiving from FLICK (2.5 key widths against 1.2) and a pull-and-return
+would otherwise start gliding a word.
+
+Safe against the bank, which is why it was done at all: of 208 recorded gestures, **none** crossed
+its own threshold and then lifted back above it. Real flicks retract 0.0px at the lift by median
+and 0.5px at the 90th percentile, and the shortest recorded flick still ended 33.7px down against
+the 24px asked for. Replaying the whole bank under the new rule reproduces every verdict the
+device reached, to the sample.
 
 ### Cursor and selection
 

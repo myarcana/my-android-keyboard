@@ -74,21 +74,89 @@ class TouchFsmTest {
 
     // --- flick animation ------------------------------------------------------------------
 
+    private val flickTravel = GestureConfig().flickTravelRatio * geometry.keyHeight
+    private val flickDistance = GestureConfig().flickDistanceRatio * geometry.keyHeight
+
     @Test
-    fun `flick progress tracks the finger down the key and stops at one`() {
+    fun `the symbol travels exactly as far as the finger does`() {
         val q = key("q")
         val f = fsm()
-        val flickDistance = GestureConfig().flickDistanceRatio * geometry.keyHeight
         f.onDown(q.centerX, q.centerY, 0)
         assertEquals(0f, f.flickProgress, 0.001f)
 
-        f.onMove(q.centerX, q.centerY + flickDistance / 2f, 20)
-        assertEquals(0.5f, f.flickProgress, 0.01f)
+        f.onMove(q.centerX, q.centerY + flickTravel * 0.25f, 20)
+        assertEquals(0.25f, f.flickProgress, 0.001f)
 
-        // Committed to a flick, and staying down does not push it past the end.
-        f.onMove(q.centerX, q.centerY + flickDistance * 3f, 40)
+        f.onMove(q.centerX, q.centerY + flickTravel * 0.5f, 40)
+        assertEquals(0.5f, f.flickProgress, 0.001f)
+
+        f.onMove(q.centerX, q.centerY + flickTravel, 60)
+        assertEquals(1f, f.flickProgress, 0.001f)
+
+        // Landed. Pushing further does not keep dragging it off the key.
+        f.onMove(q.centerX, q.centerY + flickTravel * 3f, 80)
+        assertEquals(1f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `pulling back up brings the symbol back with the finger`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + flickTravel, 40)
         assertEquals(GestureState.FLICK, f.state)
         assertEquals(1f, f.flickProgress, 0.001f)
+
+        f.onMove(q.centerX, q.centerY + flickTravel * 0.5f, 60)
+        assertEquals(0.5f, f.flickProgress, 0.001f)
+
+        f.onMove(q.centerX, q.centerY, 80)
+        assertEquals(0f, f.flickProgress, 0.001f)
+
+        // And it can go back down again: nothing about the pull is latched.
+        f.onMove(q.centerX, q.centerY + flickTravel * 0.75f, 100)
+        assertEquals(0.75f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `a pull taken back past the commit point types the letter, not the symbol`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + flickTravel, 40)
+        assertTrue(f.flickArmed)
+
+        f.onMove(q.centerX, q.centerY + flickDistance * 0.5f, 60)
+        assertTrue("back above the commit point", !f.flickArmed)
+
+        val out = f.onUp(q.centerX, q.centerY + flickDistance * 0.5f, 80)
+        assertEquals("q", out.only<GestureOutput.CommitPrimary>().text)
+        assertTrue("the symbol must not be typed", !out.has<GestureOutput.CommitSecondary>())
+        assertEquals(GestureVerdict.TAP, out.only<GestureOutput.GestureCaptured>().trace.verdict)
+    }
+
+    @Test
+    fun `arming is read from the lift point, not from the last move before it`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + flickTravel, 40)
+        // No move is sent at the position the finger actually left from, which is a thing devices
+        // do; the last few pixels of the pull are exactly what decides it.
+        val out = f.onUp(q.centerX, q.centerY + flickDistance * 0.5f, 60)
+        assertEquals("q", out.only<GestureOutput.CommitPrimary>().text)
+    }
+
+    @Test
+    fun `the commit point sits partway down the pull`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + flickDistance * 1.5f, 40)
+        assertTrue("armed well before the symbol lands", f.flickArmed)
+        assertTrue("and the symbol is still on its way", f.flickProgress < 1f)
+        assertEquals("1", f.onUp(q.centerX, q.centerY + flickDistance * 1.5f, 80)
+            .only<GestureOutput.CommitSecondary>().text)
     }
 
     @Test
@@ -102,11 +170,11 @@ class TouchFsmTest {
     }
 
     @Test
-    fun `a flick that becomes a glide sends the glyphs home`() {
+    fun `a flick that becomes a glide sends the symbol home`() {
         val q = key("q")
         val f = fsm()
         f.onDown(q.centerX, q.centerY, 0)
-        f.onMove(q.centerX, q.centerY + 25f, 40)
+        f.onMove(q.centerX, q.centerY + flickTravel, 40)
         assertEquals(1f, f.flickProgress, 0.001f)
 
         f.onMove(q.centerX, q.centerY + 200f, 80)
@@ -121,6 +189,17 @@ class TouchFsmTest {
         f.onDown(q.centerX, q.centerY, 0)
         f.onMove(q.centerX + 24f, q.centerY + 6f, 40)
         assertEquals(0f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `a thumb rolling sideways at the lift does not send the symbol home`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + flickTravel, 40)
+        // Several recorded flicks hook through 80 degrees on the way off the glass.
+        f.onMove(q.centerX + 30f, q.centerY + flickTravel, 60)
+        assertEquals(1f, f.flickProgress, 0.001f)
     }
 
     @Test
