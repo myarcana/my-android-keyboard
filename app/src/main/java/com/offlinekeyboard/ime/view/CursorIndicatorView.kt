@@ -29,6 +29,15 @@ class CursorIndicatorView(context: Context) : View(context) {
             }
         }
 
+    /** True when the pill hangs below the caret, pointing up at it, for carets near the top. */
+    var pointsUp: Boolean = false
+        set(value) {
+            if (field != value) {
+                field = value
+                invalidate()
+            }
+        }
+
     private val density = resources.displayMetrics.density
     private val pill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#E6322F3D") }
     private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -52,28 +61,34 @@ class CursorIndicatorView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
-        val pillBottom = height - pointerHeight - stalkHeight
-        val radius = pillBottom / 2f
-
-        canvas.drawRoundRect(RectF(0f, 0f, w, pillBottom), radius, radius, pill)
-
-        // downward pointer, then a hairline stalk down to the exact granular point
+        val h = height.toFloat()
         val cx = w / 2f
+        val pillHeight = h - pointerHeight - stalkHeight
+        val radius = pillHeight / 2f
+
+        val pillTop = if (pointsUp) h - pillHeight else 0f
+        val pillBottom = pillTop + pillHeight
+        canvas.drawRoundRect(RectF(0f, pillTop, w, pillBottom), radius, radius, pill)
+
+        // pointer and a hairline stalk running to the exact granular point
+        val tip = if (pointsUp) 0f else h
+        val base = if (pointsUp) pillTop else pillBottom
+        val pointerTip = if (pointsUp) base - pointerHeight else base + pointerHeight
         canvas.drawPath(
             Path().apply {
-                moveTo(cx - pointerHeight, pillBottom)
-                lineTo(cx + pointerHeight, pillBottom)
-                lineTo(cx, pillBottom + pointerHeight)
+                moveTo(cx - pointerHeight, base)
+                lineTo(cx + pointerHeight, base)
+                lineTo(cx, pointerTip)
                 close()
             },
             pill,
         )
-        canvas.drawLine(cx, pillBottom + pointerHeight, cx, height.toFloat(), stalk)
+        canvas.drawLine(cx, pointerTip, cx, tip, stalk)
 
         canvas.drawText(
             label,
             cx,
-            pillBottom / 2f - (text.descent() + text.ascent()) / 2f,
+            (pillTop + pillBottom) / 2f - (text.descent() + text.ascent()) / 2f,
             text,
         )
     }

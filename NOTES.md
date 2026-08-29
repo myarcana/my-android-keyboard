@@ -94,6 +94,45 @@ keys are laid out in the *top* portion and the inset is empty space below, which
 coordinates and touch coordinates stay identical (both measured from the top) — no canvas
 translation and no touch offset to get wrong.
 
+### Positioning a popup from an IME
+
+An IME cannot draw inside the target app's text field, but it *can* place a `PopupWindow`
+anywhere on screen. Two traps when doing that:
+
+- **`CursorAnchorInfo` gives screen coordinates; `showAtLocation` wants window coordinates.**
+  For an IME the parent window's origin is the top of the keyboard, so passing screen
+  coordinates straight through puts the popup ~1400px too low. Convert explicitly:
+
+  ```kotlin
+  val onScreen = IntArray(2); val inWindow = IntArray(2)
+  view.getLocationOnScreen(onScreen); view.getLocationInWindow(inWindow)
+  val originY = onScreen[1] - inWindow[1]   // subtract from the screen coordinate
+  ```
+
+- **`CursorAnchorInfo` arrives asynchronously.** It is not available in the same frame that
+  `requestCursorUpdates(CURSOR_UPDATE_MONITOR)` is called, so code must *wait* for it rather
+  than treat a missing caret as a reason to tear the popup down — dismissing it a few
+  milliseconds before the first update arrives kills it permanently.
+
+Verify with `adb logcat -s OfflineKeyboard`; `DEBUG_GESTURES` in `KeyboardService` logs every
+gesture output.
+
+### Driving gestures from adb
+
+`adb shell input swipe` is useless for testing a long-press-then-drag: it interpolates
+immediately, so the gesture becomes a glide before the long-press timer fires. Use
+`input motionevent`, which sends each event separately and lets real time pass in between:
+
+```sh
+adb shell input motionevent DOWN 624 2138
+sleep 0.9                                   # long-press timer fires -> trackpad
+adb shell input motionevent MOVE 649 2138
+adb exec-out screencap -p > shot.png
+adb shell input motionevent UP 649 2138
+```
+
+Still single-pointer only, so the two-finger selection gesture remains manual.
+
 ---
 
 ## Measuring a reference keyboard instead of eyeballing it

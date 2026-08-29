@@ -51,6 +51,7 @@ class KeyboardService : InputMethodService() {
     /** Learned from how far the caret actually jumps per step in the current field. */
     private var charWidthEstimate = 0f
     private var lastCaretX = Float.NaN
+    private var trackpadActive = false
 
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
@@ -237,28 +238,17 @@ class KeyboardService : InputMethodService() {
      * through CursorAnchorInfo.
      */
     private fun startTrackpad() {
+        trackpadActive = true
         currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
         progressX = 0f
         progressY = 0f
         lastCaretX = Float.NaN
-        val kv = keyboardView ?: return
-        val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
-        val popup = indicatorPopup ?: PopupWindow(view).apply {
-            isTouchable = false
-            isFocusable = false
-            isClippingEnabled = false
-            width = ViewGroup.LayoutParams.WRAP_CONTENT
-            height = ViewGroup.LayoutParams.WRAP_CONTENT
-            setBackgroundDrawable(null)
-            indicatorPopup = this
-        }
-        if (!popup.isShowing) {
-            runCatching { popup.showAtLocation(kv, Gravity.NO_GRAVITY, 0, 0) }
-        }
         updateIndicator()
     }
 
     private fun stopTrackpad() {
+        trackpadActive = false
+        anchorInfo = null
         currentInputConnection?.requestCursorUpdates(0)
         indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
     }
@@ -288,36 +278,79 @@ class KeyboardService : InputMethodService() {
         return pts
     }
 
+    /**
+     * Shown lazily, once the app has told us where the caret is.
+     *
+     * CursorAnchorInfo arrives asynchronously and is not available at the instant the trackpad
+     * starts, so this must wait rather than treat a missing caret as a reason to tear the
+     * indicator down -- doing that dismissed it permanently a few milliseconds before the
+     * position arrived.
+     */
     private fun updateIndicator() {
-        val popup = indicatorPopup?.takeIf { it.isShowing } ?: return
-        val view = indicator ?: return
-        val info = anchorInfo
-        val point = info?.let { caretPoint(it) }
-        if (point == null) {
-            // The app does not report caret position; nothing sensible to point at.
-            runCatching { popup.dismiss() }
-            return
-        }
+        if (!trackpadActive) return
+        val kv = keyboardView ?: return
+        val point = anchorInfo?.let { caretPoint(it) } ?: return
+
         val caretX = point[0]
         val top = point[1]
         val bottom = point[3]
-        val lineHeight = (bottom - top).takeIf { it > 1f } ?: (24f * resources.displayMetrics.density)
+        val density = resources.displayMetrics.density
+        val lineHeight = (bottom - top).takeIf { it > 1f } ?: (24f * density)
         val charWidth = charWidthEstimate.takeIf { it > 0f } ?: (lineHeight * 0.45f)
 
+        val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
         view.label = "${(progressX * 100).roundToInt()}% \u00b7 ${(progressY * 100).roundToInt()}%"
         view.measure(
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
         )
-        val gx = caretX + progressX * charWidth
-        val gy = top + progressY * lineHeight
+        // Hang the pill below the caret when there is no room above it, so it never covers the
+        // app's toolbar when editing on the first line.
+        view.pointsUp = (top - view.measuredHeight) < 0f
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+
+        // CursorAnchorInfo's matrix yields screen coordinates, but showAtLocation places the
+        // popup relative to the parent's *window* origin -- which for an IME is the top of the
+        // keyboard, roughly 1400px down. Convert between the two explicitly.
+        val onScreen = IntArray(2)
+        val inWindow = IntArray(2)
+        kv.getLocationOnScreen(onScreen)
+        kv.getLocationInWindow(inWindow)
+        val originX = onScreen[0] - inWindow[0]
+        val originY = onScreen[1] - inWindow[1]
+
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenX = (caretX + progressX * charWidth - view.measuredWidth / 2f)
+            .coerceIn(0f, (screenWidth - view.measuredWidth).toFloat())
+        val screenY = if (view.pointsUp) {
+            bottom + progressY * lineHeight
+        } else {
+            top + progressY * lineHeight - view.measuredHeight
+        }
+
+        val x = screenX.roundToInt() - originX
+        val y = screenY.roundToInt() - originY
+
+        val popup = indicatorPopup ?: PopupWindow(view).apply {
+            isTouchable = false
+            isFocusable = false
+            isClippingEnabled = false
+            width = ViewGroup.LayoutParams.WRAP_CONTENT
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+            setBackgroundDrawable(null)
+            indicatorPopup = this
+        }
         runCatching {
-            popup.update(
-                (gx - view.measuredWidth / 2f).roundToInt(),
-                (gy - view.measuredHeight).roundToInt(),
-                -1,
-                -1,
-            )
+            if (popup.isShowing) {
+                popup.update(x, y, -1, -1)
+            } else {
+                popup.showAtLocation(kv, Gravity.NO_GRAVITY, x, y)
+            }
+        }.onFailure {
+            if (DEBUG_GESTURES) android.util.Log.d(TAG, "indicator failed: $it")
         }
     }
 
