@@ -127,6 +127,10 @@ Schemas: `luna_pinyin` (Simplified), `terra_pinyin` + `bopomofo` (Traditional). 
 answered question, Traditional gets **both** Zhuyin and Pinyin — Zhuyin needs its own
 37-symbol key layout, added to `layout/` as a third layout alongside QWERTY and symbols.
 
+**Build reference: Trime** (`osfans/trime`), not fcitx5-android. Both are alive and both have
+solved the NDK build, but Trime *is* an Android IME wrapping librime over JNI — the same shape
+as this app — whereas fcitx5-android brings the whole fcitx5 framework along to get there.
+
 Candidate bar renders librime candidates in Chinese modes.
 
 **Milestone: pinyin and zhuyin both produce correct trad/simp characters.**
@@ -140,12 +144,25 @@ zh/en), transcribe each with Apple dictation as the reference, and score candida
 offline on the Mac before shipping 250MB of assets into the APK.
 
 Candidates, routed **per keyboard language** — we know the target language at dictation time
-because the user already switched layouts, which beats a single generalist bilingual model:
+because the user already switched layouts, which beats a single generalist bilingual model.
 
-| Mode | Candidate |
-|---|---|
-| English | dedicated English offline model (Zipformer / Moonshine class) |
-| Chinese (both) | SenseVoice-small (~234M, CER 2.96% on AISHELL-1) or Paraformer trilingual |
+The shortlist as of August 2026, all int8 exports in sherpa-onnx layout. `docs/ASR_BENCHMARK.md`
+is the harness that scores them on real recordings; `tools/asr_bench/bench.py` runs it.
+
+| Model | Size | Languages |
+|---|---|---|
+| SenseVoice-small | 239 MB | zh, yue, en, ja, ko |
+| Dolphin-small-ctc | 250 MB | zh + dialects |
+| Moonshine-base-en | 287 MB | en |
+| FireRedASR2-ctc | 776 MB | zh, en |
+| Qwen3-ASR-0.6B | 996 MB | 52 languages |
+| **Breeze-ASR-25** | 1774 MB | **Taiwanese Mandarin**, en, code-switching |
+
+Breeze-ASR-25 (MediaTek Research, a Whisper-large-v2 fine-tune) is the find: the only candidate
+actually trained on Taiwanese Mandarin with zh/en code-switching, and it emits Traditional
+characters natively, which would delete step 3 below in Traditional mode. It is also the
+largest by a factor of two, in a process Android is willing to kill, so it has to win the
+benchmark rather than be assumed to deserve its size.
 
 Live-text UX with high final accuracy: stream a small model for on-screen preview while
 speaking, then re-run the buffered audio through the accurate non-streaming model at

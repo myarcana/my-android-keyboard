@@ -1,0 +1,25 @@
+id	lang	text
+en01	en	Can you pick up the kids at four thirty and text me when you get there
+en02	en	I'll be about fifteen minutes late, the train is delayed again
+en03	en	Send the invoice to accounts by Friday please, the reference is J K four nine two
+en04	en	Do you want to grab dinner at that Thai place on Anderson Street
+en05	en	The meeting moved to Tuesday comma so I rescheduled the dentist period
+en06	en	My flight lands at eleven forty at terminal two, I'll message you when I'm through customs
+tw01	zh-TW	我大概七點到家，你先吃不用等我
+tw02	zh-TW	明天早上十點的會議改到下午三點了
+tw03	zh-TW	幫我買一杯珍珠奶茶，微糖少冰，謝謝
+tw04	zh-TW	這個週末要不要一起去陽明山走走
+tw05	zh-TW	我剛剛把資料傳到你的信箱了，你收到再跟我說
+tw06	zh-TW	請問這附近有沒有停車場 問號
+cn01	zh-CN	今天下午三点开会，你记得把报告带上
+cn02	zh-CN	地铁十号线又坏了，我可能要迟到二十分钟
+cn03	zh-CN	帮我点一份麻辣烫，不要香菜，多加豆腐
+cn04	zh-CN	这个方案我看过了，整体没问题，细节明天再讨论
+cn05	zh-CN	周末我们去爬山吧，天气预报说是晴天
+cn06	zh-CN	你把地址发给我 逗号 我打车过去 句号
+mx01	mixed	我明天要去 meeting，大概 two o'clock 結束
+mx02	mixed	這個 bug 我已經 fix 好了，你 pull 一下最新的 code
+mx03	mixed	幫我 book 一張明天飛 Tokyo 的機票
+mx04	mixed	Can you 幫我看一下這個 report，我下午要 present
+mx05	mixed	我在 Costco，你要不要 order 什麼
+mx06	mixed	那個 deadline 是 next Friday，不是 this Friday
