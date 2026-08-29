@@ -91,8 +91,33 @@ MODELS = {
         "mb": 1774,
         "langs": "Taiwanese Mandarin, en, code-switching",
         "note": "the only candidate trained on the target accent; outputs traditional natively",
+        # See WHISPER_RUNTIME_CAVEAT: its Chinese columns measure the runtime, not the model.
+        "family": "whisper",
     },
 }
+
+
+WHISPER_RUNTIME_CAVEAT = """\
+sherpa-onnx's Whisper path drops characters from Chinese, so any row marked * understates the
+model by a wide margin and its Chinese columns should not be compared with the others.
+
+Established here rather than assumed. Breeze dropped characters from plain Mandarin -- 麻辣烫 as
+麻, 地铁 as 地, 爬山 as 山 -- while transcribing the code-switched prompts almost perfectly, which
+is not how a weak model fails. Four things were ruled out in turn: silence (trimming the takes
+to a third of their length changed nothing), quantisation (the unquantised 6.2 GB weights drop
+the same characters), the vocabulary (both shipped token files are byte-identical), and the
+audio itself (SenseVoice hears every one of those words correctly on the same recordings).
+
+What isolates it is running stock Whisper-small through both runtimes. Through sherpa-onnx it
+drops the same characters as Breeze; through ctranslate2, the same weights return 豆腐, 周末,
+晴天, 地铁 and 迟到 intact. Different weights, same runtime, same failure. It is upstream issue
+k2-fsa/sherpa-onnx#2900 -- over 3x the CER of faster-whisper on Chinese, from missing Whisper
+decoding heuristics. No exposed parameter works around it: tail_paddings and language
+conditioning make no difference.
+
+The consequence for the phone is the thing to remember: sherpa-onnx is the Android runtime, so
+until this is fixed a Whisper-derived model cannot be shipped on its Chinese modes whatever it
+scores here."""
 
 
 def recognizer(name: str):
@@ -404,7 +429,7 @@ def cmd_score(_args) -> int:
                 trad_hit += hit
                 trad_total += total
 
-        row = f"{name:20}"
+        row = f"{name + ' *' if MODELS.get(name, {}).get('family') == 'whisper' else name:20}"
         for g in groups:
             d, n = errors[g]
             row += f"{(100 * d / n):9.1f}%" if n else f"{'-':>10}"
@@ -415,6 +440,8 @@ def cmd_score(_args) -> int:
 
     print("\nCER, spoken numbers folded to digits; lower is better.")
     print("trad = share of script-specific characters returned in Traditional.")
+    if any(MODELS.get(n, {}).get("family") == "whisper" for n in names):
+        print("\n* " + WHISPER_RUNTIME_CAVEAT.replace("\n", "\n  "))
     warn_about_recordings(prompts)
     return 0
 

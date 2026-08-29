@@ -113,6 +113,39 @@ than to anything being measured. Re-record those and run it again.
 numbers, but a model that is slow here will not be fast there, and load time is what the user
 waits through the first time they tap the microphone.
 
+## The Whisper runtime caveat
+
+`breeze-asr-25` is a Whisper fine-tune, and **sherpa-onnx's Whisper path drops characters from
+Chinese**. Its row is marked `*` and its Chinese columns are not comparable with the others.
+
+This was established, not assumed. Breeze dropped characters from plain Mandarin — 麻辣烫 as 麻,
+地铁 as 地, 爬山 as 山 — while transcribing the code-switched prompts almost perfectly, which is
+not how a weak model fails. Four explanations were ruled out in turn:
+
+- **Silence or padding** — trimming the takes to a third of their length changes nothing.
+- **Quantisation** — the unquantised 6.2 GB weights drop the same characters, identically.
+- **Vocabulary** — the two shipped token files are byte-identical, 50257 entries.
+- **The audio** — SenseVoice hears every one of those words correctly on the same recordings.
+
+What isolates it is running **stock Whisper-small through both runtimes**. Through sherpa-onnx
+it drops the same characters Breeze does; through ctranslate2 the same weights return 豆腐,
+周末, 晴天, 地铁 and 迟到 intact. Different weights, same runtime, same failure.
+
+It is upstream [k2-fsa/sherpa-onnx#2900](https://github.com/k2-fsa/sherpa-onnx/issues/2900) —
+over 3× the CER of faster-whisper on Chinese, attributed to missing Whisper decoding heuristics
+(token suppression, language conditioning). No exposed parameter works around it: `tail_paddings`
+and language conditioning make no difference.
+
+Two consequences:
+
+1. Breeze's `en` and `mixed` scores were achieved *despite* this, so they are a floor rather
+   than a ceiling. Its true Chinese numbers are unmeasured.
+2. sherpa-onnx is the planned Android runtime. Until this is fixed, a Whisper-derived model
+   cannot ship on the Chinese modes whatever it scores here — so this is a blocker on the
+   engine, not a question about the model.
+
+The non-Whisper candidates use different code paths and are unaffected. Their numbers stand.
+
 ## Deciding
 
 The bar is the `apple` row. Beat it in all four columns and the choice is made. The likely
