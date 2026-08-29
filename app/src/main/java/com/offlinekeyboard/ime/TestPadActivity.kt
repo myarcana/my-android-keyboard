@@ -91,9 +91,14 @@ class TestPadActivity : Activity() {
 
         // targetSdk 35+ lays activities out edge to edge, so without this the first lines of
         // text run underneath the status bar.
+        //
+        // The keyboard inset matters just as much: without it the field extends *behind* the
+        // keyboard, so the editor considers a caret down there perfectly visible and never
+        // scrolls. Anything testing scroll behaviour against this pad would be testing nothing.
         ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
-            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
+            v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
             insets
         }
 

@@ -5,6 +5,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.inputmethodservice.InputMethodService
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
@@ -31,6 +33,17 @@ import com.offlinekeyboard.ime.view.KeyboardView
  * Word decoding will exist only to turn a glide gesture into a word (Phase 2).
  */
 private const val TAG = "OfflineKeyboard"
+
+/**
+ * Auto-scroll rate while the marker is parked past an edge of the visible text, in milliseconds
+ * per line. Proportional to how far past the edge the marker is: just over the line creeps, a
+ * long way past moves quickly, which is how dragging a selection to the edge of a window behaves
+ * everywhere else.
+ */
+private const val EDGE_SCROLL_SLOWEST_MS = 260L
+private const val EDGE_SCROLL_FASTEST_MS = 45L
+/** Distance past the edge, in pixels, at which the fastest rate is reached. */
+private const val EDGE_SCROLL_FULL_SPEED_PX = 420f
 
 /**
  * Debug tooling: logs every gesture output, and registers a broadcast receiver that stands in
@@ -77,6 +90,23 @@ class KeyboardService : InputMethodService() {
     private var chaseWaitTicks = 0
     /** Caret offset when the outstanding vertical arrows were sent, to tell moved from stuck. */
     private var pendingFromOffset = -1
+
+    /**
+     * True once a vertical step moved the caret in the text but not on screen, which is the
+     * signature of the editor scrolling to keep a pinned caret in view.
+     */
+    private var scrollPinned = false
+
+    private val handler = Handler(Looper.getMainLooper())
+    /** Repeats a single line step while the marker is held past an edge of the visible text. */
+    private val edgeScrollTick = object : Runnable {
+        override fun run() {
+            val dir = edgeScrollDirection()
+            if (!trackpadActive || dir == 0) return
+            scrollOneLine(dir)
+            handler.postDelayed(this, edgeScrollInterval())
+        }
+    }
     /**
      * Which way the caret has run out of text: +1 cannot go further down, -1 cannot go further
      * up, 0 free. Directional and sticky, so the marker can be stopped from travelling further
@@ -289,6 +319,8 @@ class KeyboardService : InputMethodService() {
 
     private fun stopTrackpad() {
         trackpadActive = false
+        scrollPinned = false
+        handler.removeCallbacks(edgeScrollTick)
         markerX = Float.NaN
         markerCenterY = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
@@ -309,6 +341,7 @@ class KeyboardService : InputMethodService() {
         markerX = (markerX + dx).coerceIn(0f, metrics.widthPixels.toFloat())
         markerCenterY = (markerCenterY + effectiveDy).coerceIn(0f, metrics.heightPixels.toFloat())
         updateIndicator()
+        updateEdgeScroll()
         if (extendingSelection) {
             // Steer on the pan as well as on cursor updates: CURSOR_UPDATE_MONITOR only fires
             // when the cursor actually moves, so waiting for one would deadlock -- no movement,
@@ -506,11 +539,12 @@ class KeyboardService : InputMethodService() {
             // still on screen, so screen position says "did not move" for the one case where it
             // moved the most -- which latched vertical movement off during every scroll.
             if (pendingVertical != 0 && pendingFromOffset >= 0) {
-                verticalStuckDir = if (info.selectionStart == pendingFromOffset) {
-                    if (pendingVertical > 0) 1 else -1
-                } else {
-                    0
-                }
+                val movedInText = info.selectionStart != pendingFromOffset
+                verticalStuckDir = if (movedInText) 0 else if (pendingVertical > 0) 1 else -1
+                // Moved in the text but not on screen: the editor is scrolling underneath a
+                // pinned caret. Its reported position will not close the error, so vertical
+                // movement has to be handed to the rate-limited scroll instead of chased.
+                scrollPinned = movedInText && abs(point[1] - previousTop) < 1f
             }
 
             // Deliberately no attempt to move the marker with the scrolling text. Doing so
@@ -538,7 +572,68 @@ class KeyboardService : InputMethodService() {
         lastSelEnd = info.selectionEnd
 
         updateIndicator()
+        updateEdgeScroll()
         if (extendingSelection) steerSelection() else chaseCaret()
+    }
+
+    /**
+     * +1 when the marker is held below the visible text, -1 above it, 0 within it.
+     *
+     * The visible text ends where the keyboard begins; anything below that is the user pushing
+     * past the bottom of what they can see.
+     */
+    /**
+     * +1 to keep scrolling down, -1 up, 0 to leave it to the ordinary chase.
+     *
+     * Only active once the editor has been seen scrolling under a pinned caret. Until then the
+     * caret is moving normally within the visible text and the chase closes the error properly.
+     */
+    private fun edgeScrollDirection(): Int {
+        if (!scrollPinned || !trackpadActive) return 0
+        if (markerCenterY.isNaN() || caretTop.isNaN()) return 0
+        val lh = lineHeight.takeIf { it > 1f } ?: return 0
+        val lines = (markerCenterY - (caretTop + lh / 2f)) / lh
+        return when {
+            lines > 0.5f -> 1
+            lines < -0.5f -> -1
+            else -> 0
+        }
+    }
+
+    /**
+     * Steps the caret one line so the editor scrolls to keep it in view.
+     *
+     * Deliberately one line per tick rather than closing the whole error at once. Once the caret
+     * is pushed past the edge the editor pins it there and scrolls the text instead, so its
+     * reported position stops changing and the error never resolves -- an error-driven chase
+     * therefore runs away, and measured on device it reached the end of the document in a single
+     * short drag. A fixed rate turns that into a steady scroll.
+     */
+    private fun scrollOneLine(direction: Int) {
+        if (extendingSelection) {
+            extendSelection(direction * (lineHeight.takeIf { it > 1f } ?: 60f))
+            return
+        }
+        if (pendingFromOffset < 0) pendingFromOffset = caretOffset
+        sendArrow(
+            if (direction > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
+            0,
+        )
+        pendingVertical += direction
+    }
+
+    /** Milliseconds until the next line, from how far the marker is beyond the caret. */
+    private fun edgeScrollInterval(): Long {
+        val lh = lineHeight.takeIf { it > 1f } ?: return EDGE_SCROLL_SLOWEST_MS
+        val past = abs(markerCenterY - (caretTop + lh / 2f))
+        val ramp = (past / EDGE_SCROLL_FULL_SPEED_PX).coerceIn(0f, 1f)
+        return (EDGE_SCROLL_SLOWEST_MS - (EDGE_SCROLL_SLOWEST_MS - EDGE_SCROLL_FASTEST_MS) * ramp)
+            .toLong()
+    }
+
+    private fun updateEdgeScroll() {
+        handler.removeCallbacks(edgeScrollTick)
+        if (trackpadActive && edgeScrollDirection() != 0) handler.post(edgeScrollTick)
     }
 
     private fun chaseCaret() {
@@ -572,8 +667,10 @@ class KeyboardService : InputMethodService() {
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
+        // While parked past an edge the repeating scroll owns vertical movement; an
+        // error-driven step here would race it and overshoot.
         val stuckThisWay = verticalStuckDir != 0 && (lines > 0) == (verticalStuckDir > 0)
-        if (lines != 0 && !stuckThisWay) {
+        if (lines != 0 && !stuckThisWay && edgeScrollDirection() == 0) {
             val step = if (lines > 0) 1 else -1
             if (pendingFromOffset < 0) pendingFromOffset = caretOffset
             repeat(abs(lines)) {

@@ -20,7 +20,7 @@
             android:name=".TestPadActivity"
             android:exported="true"
             android:label="@string/testpad_name"
-            android:windowSoftInputMode="stateVisible">
+            android:windowSoftInputMode="stateVisible|adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
