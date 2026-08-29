@@ -89,6 +89,56 @@ its span is free to be used for something else.
 
 ---
 
+### Canonical Unicode order is a taxonomy, not a ranking
+
+The emoji bar ranks in tiers -- named for the word, then tagged with it, then a prefix of
+either -- and something has to break the ties inside a tier, because most queries are a tag
+match with several plausible answers.
+
+Canonical order was the obvious tiebreak and it is quietly wrong. It groups by *kind*, so
+whichever member of a tie happens to sit in an earlier group wins: "car" found the railway
+car, "water" the water buffalo, "drink" the baby bottle, "light" the police car light. Each
+one is arguable on its own; together they made the bar feel like it did not know English.
+
+Unicode publishes an actual frequency ranking (home.unicode.org/emoji/emoji-frequency), a
+table of ~1450 emoji ordered by measured median use. Sorting the generated asset by it fixes
+all four, and the app needs no ranking data at all -- file order *is* the ranking, so the
+runtime stays a dumb tier sort and re-ranking means regenerating the asset.
+
+One refinement was tried and rejected: promoting, within a tier, the emoji whose *name* starts
+with the query. It fixes "birthday" (the cake, not the party popper) and breaks "heart" and
+"love", which both stop finding ❤️ and offer the heart *suit* instead. Two of the most-typed
+words in the language outrank one; frequency alone is the better rule.
+
+### Clearing the line, not the field
+
+Swipe up on backspace clears back to the start of the line. In a single-line field -- the
+common case -- there is no line break to stop at, so that is the whole field, which is what the
+requirement asks for. Starting from the beginning of a line there is nothing on it to clear, so
+it takes the line above instead, and repeating the gesture walks a paragraph away a line at a
+time.
+
+Deleting the entire field outright from anywhere was the first design and it is a trap: it is
+the only gesture on this keyboard that can destroy text the user cannot currently see, and
+there is no undo to answer for it. The threshold is also deliberately larger than the flick
+threshold (0.8 vs 0.45 key heights) -- a thumb drifting up off the key must not fire it.
+
+### The bar reads the editor, it does not remember what was typed
+
+Suggestions are for the word the caret sits at the end of, found by reading back through
+`getTextBeforeCursor` on every change. Keeping our own buffer of keystrokes would be cheaper
+and would be wrong the instant the spacebar trackpad moved the caret somewhere else -- the bar
+would be offering emoji for a word elsewhere on screen. Tuned numbers: 48 characters of
+lookbehind (no emoji name is longer), two-word queries tried before one-word ones so "thumbs
+up" beats "up", and a two-character minimum, below which the bar is noise.
+
+### Held backspace accelerates
+
+500ms to start (the shared long-press timeout), then a character every 55ms, then whole words
+every 140ms after 18 repeats -- about a second in. A fixed character rate is either too slow to
+clear a sentence or too fast to stop on the word you meant; both rates exist so neither has to
+compromise. Word deletion stops at a line break rather than running past it.
+
 ## Why the UI reads well
 
 - **The geometry is measured, not guessed.** Key sizes, gaps and the palette were taken from

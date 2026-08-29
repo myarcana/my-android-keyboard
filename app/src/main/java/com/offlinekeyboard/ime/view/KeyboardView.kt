@@ -90,6 +90,21 @@ class KeyboardView @JvmOverloads constructor(
 
     var onOutput: (List<GestureOutput>) -> Unit = {}
 
+    /** Tapped a suggestion. The index is into [candidates]. */
+    var onCandidate: (Int) -> Unit = {}
+
+    /**
+     * What the suggestion strip shows: emoji in English, Chinese candidates in the CJK modes.
+     * Never English words -- see [com.offlinekeyboard.ime.candidates.EmojiIndex].
+     */
+    var candidates: List<String> = emptyList()
+        set(value) {
+            if (field == value) return
+            field = value
+            pressedCandidate = -1
+            invalidate()
+        }
+
     var layout: Layout = IosLayouts.QWERTY_LOWER
         set(value) {
             field = value
@@ -116,6 +131,11 @@ class KeyboardView @JvmOverloads constructor(
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
     private var selecting = false
+
+    /** Index of the suggestion under a finger, for the pressed highlight. */
+    private var pressedCandidate = -1
+    /** Pointers that went down on the strip, so their UP commits a suggestion, not a key. */
+    private val candidatePointers = mutableMapOf<Int, Int>()
 
     /**
      * Height of the system navigation bar. From targetSdk 35 the IME window is laid out
@@ -185,12 +205,57 @@ class KeyboardView @JvmOverloads constructor(
         }
 
         val radius = g.cornerRadius
+        drawCandidates(canvas, g, t, radius)
         g.keyRects.forEach { rect -> drawKey(canvas, rect, radius, t, g) }
 
         if (glidePath.size > 1) drawGlideTrail(canvas, g, t)
         accentPopup?.let { (anchor, accents, selected) ->
             drawAccentPopup(canvas, g, t, anchor, accents, selected, radius)
         }
+    }
+
+    /**
+     * The suggestion strip. Cells are square and left-aligned rather than stretched to fill the
+     * width: emoji are square, and a fixed cell means a suggestion does not jump sideways as
+     * the list behind it grows or shrinks with each letter typed.
+     */
+    private fun drawCandidates(canvas: Canvas, g: LayoutGeometry, t: Theme, radius: Float) {
+        if (candidates.isEmpty()) return
+        val cell = candidateCellWidth(g)
+        val top = g.stripHeight * 0.12f
+        val bottom = g.stripHeight * 0.88f
+        label.textSize = (bottom - top) * 0.74f
+        candidates.take(visibleCandidateCount(g)).forEachIndexed { i, candidate ->
+            val left = g.margin + i * cell
+            if (i == pressedCandidate) {
+                fill.color = t.keyPressed
+                canvas.drawRoundRect(
+                    RectF(left + cell * 0.06f, top, left + cell * 0.94f, bottom),
+                    radius,
+                    radius,
+                    fill,
+                )
+            }
+            label.color = t.text
+            canvas.drawText(
+                candidate,
+                left + cell / 2f,
+                (top + bottom) / 2f - (label.descent() + label.ascent()) / 2f,
+                label,
+            )
+        }
+    }
+
+    private fun candidateCellWidth(g: LayoutGeometry): Float = g.stripHeight
+
+    private fun visibleCandidateCount(g: LayoutGeometry): Int =
+        ((width - 2 * g.margin) / candidateCellWidth(g)).toInt().coerceAtLeast(1)
+
+    /** Which suggestion a touch landed on, or -1 for none. */
+    private fun candidateAt(x: Float, y: Float, g: LayoutGeometry): Int {
+        if (y >= g.stripHeight || candidates.isEmpty()) return -1
+        val i = ((x - g.margin) / candidateCellWidth(g)).toInt()
+        return if (i in 0 until minOf(candidates.size, visibleCandidateCount(g))) i else -1
     }
 
     private fun drawKey(canvas: Canvas, rect: KeyRect, radius: Float, t: Theme, g: LayoutGeometry) {
@@ -311,9 +376,15 @@ class KeyboardView @JvmOverloads constructor(
                 val trackpad = pointers.values.firstOrNull {
                     it.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD
                 }
+                val candidate =
+                    if (trackpad == null) candidateAt(event.getX(i), event.getY(i), g) else -1
                 if (trackpad != null) {
                     consumedPointers += id
                     emit(trackpad.onSecondaryTap())
+                } else if (candidate >= 0) {
+                    candidatePointers[id] = candidate
+                    pressedCandidate = candidate
+                    invalidate()
                 } else {
                     val fsm = TouchFsm(g, config)
                     pointers[id] = fsm
@@ -325,6 +396,15 @@ class KeyboardView @JvmOverloads constructor(
             MotionEvent.ACTION_MOVE -> {
                 for (i in 0 until event.pointerCount) {
                     val id = event.getPointerId(i)
+                    candidatePointers[id]?.let { pressed ->
+                        // Sliding off the suggestion cancels it, as sliding off a key does.
+                        val still = candidateAt(event.getX(i), event.getY(i), g) == pressed
+                        val shown = if (still) pressed else -1
+                        if (shown != pressedCandidate) {
+                            pressedCandidate = shown
+                            invalidate()
+                        }
+                    }
                     pointers[id]?.let { fsm ->
                         if (fsm.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD ||
                             fsm.state == com.offlinekeyboard.ime.gesture.GestureState.SELECTING
@@ -343,6 +423,13 @@ class KeyboardView @JvmOverloads constructor(
                 val i = event.actionIndex
                 val id = event.getPointerId(i)
                 cancelLongPress(id)
+                candidatePointers.remove(id)?.let { pressed ->
+                    val committed = pressedCandidate == pressed
+                    pressedCandidate = -1
+                    invalidate()
+                    if (committed) onCandidate(pressed)
+                    return true
+                }
                 if (consumedPointers.remove(id)) return true
                 pointers.remove(id)?.let { fsm ->
                     emit(fsm.onUp(event.getX(i), event.getY(i), event.eventTime))
@@ -354,6 +441,8 @@ class KeyboardView @JvmOverloads constructor(
                 pointers.values.forEach { emit(it.onCancel()) }
                 pointers.clear()
                 consumedPointers.clear()
+                candidatePointers.clear()
+                pressedCandidate = -1
             }
         }
         return true

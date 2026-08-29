@@ -24,6 +24,12 @@ data class GestureConfig(
     /** Longer path length that promotes an in-progress flick into a glide. */
     val flickToGlideRatio: Float = 2.0f,
     /**
+     * Upward travel on backspace that clears the line, as a fraction of key height. Larger than
+     * [flickDistanceRatio] because this gesture destroys text: a thumb drifting off the key
+     * must not trigger it, and there is nothing to undo it with.
+     */
+    val bulkDeleteDistanceRatio: Float = 0.8f,
+    /**
      * Trackpad gain: pixels the granular cursor travels per pixel of finger movement.
      * Vertical is deliberately higher -- a line is a much longer journey than a character, and
      * there is less room to move vertically on a keyboard than horizontally.
@@ -70,6 +76,13 @@ sealed interface GestureOutput {
     data class GlideUpdated(val path: List<PathPoint>) : GestureOutput
     data class GlideCompleted(val path: List<PathPoint>) : GestureOutput
 
+    /** Backspace was held: the host should start repeating deletions until it is released. */
+    data object BackspaceRepeatStarted : GestureOutput
+    data object BackspaceRepeatEnded : GestureOutput
+
+    /** Swipe up on backspace: clear the line, or the whole field if it has only one. */
+    data object BulkDelete : GestureOutput
+
     data object TrackpadStarted : GestureOutput
 
     /**
@@ -88,7 +101,24 @@ sealed interface GestureOutput {
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
 }
 
-enum class GestureState { IDLE, PRESSED, FLICK, GLIDE, ACCENTS, TRACKPAD, SELECTING }
+enum class GestureState {
+    IDLE,
+    PRESSED,
+    FLICK,
+    GLIDE,
+    ACCENTS,
+    TRACKPAD,
+    SELECTING,
+
+    /** Backspace held down, deleting repeatedly. An upward swipe from here clears the line. */
+    BACKSPACE,
+
+    /**
+     * The gesture has already done its work and is waiting for the finger to lift. Without it a
+     * swipe that clears the line would also delete a character when released.
+     */
+    SPENT,
+}
 
 /**
  * One state machine per pointer. Pure logic: no Android types, an injected timestamp on every
@@ -117,6 +147,7 @@ class TouchFsm(
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
+    private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
 
     /** Deadline the host should schedule a [onLongPressTimeout] callback for, or null. */
     val longPressDeadline: Long? get() = down?.let { it.t + config.longPressMs }
@@ -141,6 +172,10 @@ class TouchFsm(
                 trackpadAnchor = path.last()
                 trackpadSpeed = 0f
                 listOf(GestureOutput.TrackpadStarted)
+            }
+            key.key.type == KeyType.BACKSPACE -> {
+                state = GestureState.BACKSPACE
+                listOf(GestureOutput.BackspaceRepeatStarted)
             }
             key.key.accents.isNotEmpty() -> {
                 state = GestureState.ACCENTS
@@ -171,7 +206,8 @@ class TouchFsm(
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x)
             GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
-            GestureState.IDLE -> emptyList()
+            GestureState.BACKSPACE -> bulkDeleteIfSwipedUp(dy)
+            GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
     }
 
@@ -180,15 +216,36 @@ class TouchFsm(
         val isDownward = dy > 0
         val verticallyDominant = abs(dy) > config.verticalDominance * abs(dx)
 
+        if (key.key.type == KeyType.BACKSPACE) {
+            // The requirement is "hold, then swipe up", but a swipe up without the hold means
+            // the same thing and there is nothing else an upward swipe from backspace could be.
+            return bulkDeleteIfSwipedUp(dy)
+        }
         if (isDownward && verticallyDominant && abs(dy) > flickDistance && key.key.secondary != null) {
             state = GestureState.FLICK
             return listOf(GestureOutput.FlickPreview(key.key.id, key.key.secondary))
         }
-        if (pathLength > glideDistance) {
+        // Only letters can start a word: a swipe off shift or 123 is a mis-hit, not a glide.
+        if (pathLength > glideDistance && key.key.type == KeyType.CHARACTER) {
             state = GestureState.GLIDE
             return listOf(GestureOutput.GlideStarted, GestureOutput.GlideUpdated(path.toList()))
         }
         return emptyList()
+    }
+
+    /**
+     * Clears the line, once. The gesture goes SPENT rather than back to PRESSED so that lifting
+     * the finger afterwards does not also delete a character, and so a wobbling finger that
+     * crosses the threshold repeatedly cannot clear line after line.
+     */
+    private fun bulkDeleteIfSwipedUp(dy: Float): List<GestureOutput> {
+        if (dy > -bulkDeleteDistance) return emptyList()
+        val wasRepeating = state == GestureState.BACKSPACE
+        state = GestureState.SPENT
+        return buildList {
+            if (wasRepeating) add(GestureOutput.BackspaceRepeatEnded)
+            add(GestureOutput.BulkDelete)
+        }
     }
 
     /**
@@ -311,7 +368,9 @@ class TouchFsm(
                 }
             }
             GestureState.TRACKPAD, GestureState.SELECTING -> listOf(GestureOutput.TrackpadEnded)
-            GestureState.IDLE -> emptyList()
+            // The repeat already deleted; releasing must not delete once more.
+            GestureState.BACKSPACE -> listOf(GestureOutput.BackspaceRepeatEnded)
+            GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
         reset()
         return result + GestureOutput.KeyHighlighted(null)
@@ -322,10 +381,12 @@ class TouchFsm(
         // Must still emit TrackpadEnded: the service holds a physical shift key down for the
         // duration of a selection, and would otherwise never release it.
         val wasTrackpad = state == GestureState.TRACKPAD || state == GestureState.SELECTING
+        val wasRepeating = state == GestureState.BACKSPACE
         reset()
         return buildList {
             if (wasGlide) add(GestureOutput.FlickPreviewCleared)
             if (wasTrackpad) add(GestureOutput.TrackpadEnded)
+            if (wasRepeating) add(GestureOutput.BackspaceRepeatEnded)
             add(GestureOutput.KeyHighlighted(null))
         }
     }

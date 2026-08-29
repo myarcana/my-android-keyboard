@@ -20,6 +20,8 @@ import android.widget.PopupWindow
 import com.offlinekeyboard.ime.view.CursorIndicatorView
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import com.offlinekeyboard.ime.candidates.EmojiIndex
+import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
@@ -46,6 +48,26 @@ private const val EDGE_SCROLL_FASTEST_MS = 45L
 private const val EDGE_SCROLL_FULL_SPEED_PX = 420f
 
 /**
+ * Held backspace. It deletes characters at first, then whole words -- the same acceleration
+ * iOS has, and the reason it exists is that a fixed character rate is either too slow to clear
+ * a sentence or too fast to stop on the word you meant.
+ */
+private const val BACKSPACE_CHAR_INTERVAL_MS = 55L
+private const val BACKSPACE_WORD_INTERVAL_MS = 140L
+/** Repeats at the character rate before words take over: about a second of holding. */
+private const val BACKSPACE_REPEATS_BEFORE_WORDS = 18
+
+/**
+ * Text read backwards in one go when clearing a line. A line longer than this is cleared by
+ * repeating, so the number only trades IPC calls against the rare very long line.
+ */
+private const val BULK_DELETE_CHUNK = 2048
+/** Bounds the clearing loop, so a misbehaving editor cannot spin it forever. */
+private const val BULK_DELETE_MAX_CHUNKS = 64
+
+private const val EMOJI_ASSET = "emoji_en.tsv"
+
+/**
  * Debug tooling: logs every gesture output, and registers a broadcast receiver that stands in
  * for the second finger of the selection gesture, which adb cannot send. Tied to the build type
  * so the receiver -- which is necessarily exported -- never exists in a release build.
@@ -55,6 +77,19 @@ private val DEBUG_GESTURES = BuildConfig.DEBUG
 class KeyboardService : InputMethodService() {
 
     private var keyboardView: KeyboardView? = null
+
+    // --- suggestion bar ---
+    /**
+     * Requirement 9: the bar offers emoji, never English words. Loaded off the main thread
+     * because it is 1900 entries read from an asset and the keyboard must appear instantly.
+     */
+    private var emoji: EmojiIndex? = null
+    private var emojiLoading = false
+    /** How many characters a tapped suggestion replaces: the word that produced it. */
+    private var candidateReplaceLength = 0
+
+    /** Repeats while backspace is held; counts its own repeats to know when to switch to words. */
+    private var backspaceRepeats = 0
 
     private enum class ShiftState { OFF, ONE_SHOT, LOCKED }
 
@@ -208,19 +243,44 @@ class KeyboardService : InputMethodService() {
         KeyboardView(this).also { view ->
             keyboardView = view
             view.onOutput = ::handleOutputs
+            view.onCandidate = ::commitCandidate
             applyLayout()
+            loadEmojiIndex()
         }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         endSelection()
         stopTrackpad()
+        stopBackspaceRepeat()
+        clearCandidates()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         shift = ShiftState.OFF
         applyLayout()
+        loadEmojiIndex()
+        refreshCandidates()
+    }
+
+    /**
+     * The caret moved, in the editor's own reckoning. The bar follows it: suggestions are for
+     * the word the caret is in, so tapping into another word must re-offer that word's emoji
+     * rather than leave the previous word's on screen.
+     */
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
+        )
+        if (!trackpadActive) refreshCandidates()
     }
 
     private var plane: Layout = IosLayouts.QWERTY_LOWER
@@ -251,6 +311,9 @@ class KeyboardService : InputMethodService() {
                     endSelection()
                     stopTrackpad()
                 }
+                GestureOutput.BackspaceRepeatStarted -> startBackspaceRepeat()
+                GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
+                GestureOutput.BulkDelete -> bulkDelete()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
                 is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
                 else -> Unit
@@ -265,6 +328,7 @@ class KeyboardService : InputMethodService() {
             shift = ShiftState.OFF
             applyLayout()
         }
+        refreshCandidates()
     }
 
     private fun handleSpecialKey(type: KeyType) {
@@ -304,6 +368,154 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val selected = ic.getSelectedText(0)
         if (selected.isNullOrEmpty()) ic.deleteSurroundingText(1, 0) else ic.commitText("", 1)
+        refreshCandidates()
+    }
+
+    // --- held backspace -------------------------------------------------------------------
+
+    private val backspaceRepeat = object : Runnable {
+        override fun run() {
+            backspaceRepeats++
+            if (backspaceRepeats > BACKSPACE_REPEATS_BEFORE_WORDS) {
+                deleteWordBackwards()
+                handler.postDelayed(this, BACKSPACE_WORD_INTERVAL_MS)
+            } else {
+                backspace()
+                handler.postDelayed(this, BACKSPACE_CHAR_INTERVAL_MS)
+            }
+        }
+    }
+
+    /** The long press itself is the first deletion, so the hold feels immediate. */
+    private fun startBackspaceRepeat() {
+        stopBackspaceRepeat()
+        backspaceRepeats = 0
+        handler.post(backspaceRepeat)
+    }
+
+    private fun stopBackspaceRepeat() {
+        handler.removeCallbacks(backspaceRepeat)
+        backspaceRepeats = 0
+    }
+
+    /**
+     * Deletes back over any run of spaces and then the word before them, stopping at a line
+     * break: a held backspace should pause at the start of each line rather than run past it.
+     */
+    private fun deleteWordBackwards() {
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
+        if (before.isNullOrEmpty()) return
+        var n = 0
+        while (n < before.length && before[before.length - 1 - n] == ' ') n++
+        while (n < before.length && !before[before.length - 1 - n].isWhitespace()) n++
+        ic.deleteSurroundingText(n.coerceAtLeast(1), 0)
+        refreshCandidates()
+    }
+
+    /**
+     * Requirement 11: hold backspace and swipe up to clear what was typed.
+     *
+     * Clears back to the start of the line -- which in a single-line field, the common case, is
+     * the whole field, since there is no line break to stop at. Starting from the beginning of a
+     * line there is nothing on it to clear, so the gesture takes the line above instead, and
+     * repeating it walks a paragraph away a line at a time. Deleting the entire field outright
+     * from anywhere would be the one gesture on this keyboard that can destroy text the user
+     * cannot see, and there is no undo to answer for it.
+     */
+    private fun bulkDelete() {
+        val ic = currentInputConnection ?: return
+        ic.beginBatchEdit()
+        ic.finishComposingText()
+
+        val selected = ic.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            ic.commitText("", 1)
+            ic.endBatchEdit()
+            refreshCandidates()
+            return
+        }
+
+        var clearedSomething = false
+        for (chunk in 0 until BULK_DELETE_MAX_CHUNKS) {
+            val before = ic.getTextBeforeCursor(BULK_DELETE_CHUNK, 0)
+            if (before.isNullOrEmpty()) break
+            val lineBreak = before.lastIndexOf('\n')
+            val onThisLine = if (lineBreak >= 0) before.length - 1 - lineBreak else before.length
+            if (onThisLine > 0) {
+                ic.deleteSurroundingText(onThisLine, 0)
+                clearedSomething = true
+                // A line break in view means the line's start has been reached; stop there.
+                // Without one the chunk was all one line, so more of it may lie further back.
+                if (lineBreak >= 0) break
+            } else {
+                if (clearedSomething) break
+                // Started at the beginning of a line: step over the break and take the line above.
+                ic.deleteSurroundingText(1, 0)
+            }
+        }
+
+        ic.endBatchEdit()
+        refreshCandidates()
+    }
+
+    // --- suggestion bar -------------------------------------------------------------------
+
+    private fun loadEmojiIndex() {
+        if (emoji != null || emojiLoading) return
+        emojiLoading = true
+        Thread {
+            val loaded = runCatching { assets.open(EMOJI_ASSET).use(EmojiIndex::load) }
+                .onFailure { android.util.Log.w(TAG, "emoji index failed to load", it) }
+                .getOrNull()
+            handler.post {
+                emoji = loaded
+                emojiLoading = false
+                refreshCandidates()
+            }
+        }.start()
+    }
+
+    private fun clearCandidates() {
+        keyboardView?.candidates = emptyList()
+        candidateReplaceLength = 0
+    }
+
+    /**
+     * Offers emoji for the word the caret sits at the end of.
+     *
+     * The two-word form is tried first and the first form that matches wins, so "thumbs up"
+     * beats "up" where both would match, and the length that produced the match is remembered:
+     * that is exactly what a tapped emoji replaces.
+     */
+    private fun refreshCandidates() {
+        val view = keyboardView ?: return
+        val index = emoji
+        val ic = currentInputConnection
+        if (index == null || ic == null) return clearCandidates()
+        if (!ic.getSelectedText(0).isNullOrEmpty()) return clearCandidates()
+
+        val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0) ?: return clearCandidates()
+        for (word in TypedWord.endingAt(before)) {
+            val hits = index.search(word.query)
+            if (hits.isNotEmpty()) {
+                view.candidates = hits
+                candidateReplaceLength = word.length
+                return
+            }
+        }
+        clearCandidates()
+    }
+
+    /** Replaces the typed word with the emoji, the way the iOS emoji suggestion does. */
+    private fun commitCandidate(position: Int) {
+        val text = keyboardView?.candidates?.getOrNull(position) ?: return
+        val ic = currentInputConnection ?: return
+        ic.beginBatchEdit()
+        if (candidateReplaceLength > 0) ic.deleteSurroundingText(candidateReplaceLength, 0)
+        ic.commitText(text, 1)
+        ic.endBatchEdit()
+        refreshCandidates()
     }
 
     /**
