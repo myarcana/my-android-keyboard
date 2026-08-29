@@ -31,9 +31,12 @@ $ADB shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 $ADB shell wm dismiss-keyguard >/dev/null 2>&1 || true   # this phone has no PIN
 
 $ADB install -r app/build/outputs/apk/debug/app-debug.apk >/dev/null
+# -S forces a fresh activity instance. Without it am start merely resumes the existing one,
+# so onCreate never runs and the pad keeps whatever text and caret position it had.
+# It force-stops the package, so re-select the IME afterwards.
+$ADB shell am start -S -n com.offlinekeyboard.ime/.TestPadActivity >/dev/null
 $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
 $ADB shell ime set "$IME" >/dev/null
-$ADB shell am start -n com.offlinekeyboard.ime/.TestPadActivity >/dev/null
 
 sleep 1.5   # let the window animation settle before capturing
 $ADB exec-out screencap -p > "$SHOT"

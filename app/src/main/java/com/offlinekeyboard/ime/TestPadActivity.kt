@@ -8,6 +8,8 @@ import android.util.TypedValue
 import android.view.Gravity
 import android.widget.EditText
 import android.widget.LinearLayout
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 /**
  * A scratch text field for exercising the keyboard during development.
@@ -81,12 +83,23 @@ class TestPadActivity : Activity() {
             )
         }
 
-        setContentView(
-            LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                addView(field)
-            },
-        )
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(field)
+        }
+        setContentView(root)
+
+        // targetSdk 35+ lays activities out edge to edge, so without this the first lines of
+        // text run underneath the status bar.
+        ViewCompat.setOnApplyWindowInsetsListener(root) { v, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
+            v.setPadding(bars.left, bars.top, bars.right, bars.bottom)
+            insets
+        }
+
         field.requestFocus()
+        // Start at the top: the short-line section is the interesting part, and focusing the
+        // field otherwise leaves the view wherever it was last scrolled.
+        field.post { field.setSelection(0) }
     }
 }

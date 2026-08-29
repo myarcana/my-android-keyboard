@@ -34,6 +34,13 @@ Check the current state with `adb shell settings get global verifier_verify_adb_
 `adb shell dumpsys package com.offlinekeyboard.ime | grep lastUpdateTime`, then dismiss the
 dialog with `adb shell input keyevent KEYCODE_BACK`.
 
+### `am start` resumes, it does not restart
+
+Launching an activity that is already on top merely resumes it: `onCreate` never runs, so
+changes to initial state (text, caret position) appear not to have taken effect even though
+the new APK is installed. Pass `-S` to force a fresh instance. That force-stops the package,
+so re-select the IME afterwards. `tools/deploy.sh` does both, in that order.
+
 ### Never `am force-stop` the keyboard's own package
 
 Force-stopping `com.offlinekeyboard.ime` kills the running IME, and Android immediately falls
