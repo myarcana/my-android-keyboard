@@ -97,6 +97,17 @@ class KeyboardView @JvmOverloads constructor(
      * What the suggestion strip shows: emoji in English, Chinese candidates in the CJK modes.
      * Never English words -- see [com.offlinekeyboard.ime.candidates.EmojiIndex].
      */
+    /**
+     * Replaces the suggestions while dictation is running. The strip is the only spare row on a
+     * keyboard, and a microphone that is listening has to say so somewhere the eye already is.
+     */
+    var status: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
     var candidates: List<String> = emptyList()
         set(value) {
             if (field == value) return
@@ -220,6 +231,17 @@ class KeyboardView @JvmOverloads constructor(
      * the list behind it grows or shrinks with each letter typed.
      */
     private fun drawCandidates(canvas: Canvas, g: LayoutGeometry, t: Theme, radius: Float) {
+        status?.let { message ->
+            label.color = t.secondaryText
+            label.textSize = g.stripHeight * 0.34f
+            canvas.drawText(
+                message,
+                width / 2f,
+                g.stripHeight / 2f - (label.descent() + label.ascent()) / 2f,
+                label,
+            )
+            return
+        }
         if (candidates.isEmpty()) return
         val cell = candidateCellWidth(g)
         val top = g.stripHeight * 0.12f
@@ -253,7 +275,7 @@ class KeyboardView @JvmOverloads constructor(
 
     /** Which suggestion a touch landed on, or -1 for none. */
     private fun candidateAt(x: Float, y: Float, g: LayoutGeometry): Int {
-        if (y >= g.stripHeight || candidates.isEmpty()) return -1
+        if (y >= g.stripHeight || candidates.isEmpty() || status != null) return -1
         val i = ((x - g.margin) / candidateCellWidth(g)).toInt()
         return if (i in 0 until minOf(candidates.size, visibleCandidateCount(g))) i else -1
     }

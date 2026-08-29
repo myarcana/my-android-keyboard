@@ -5,10 +5,15 @@
       Deliberately NO permissions are declared here.
 
       In particular there is no android.permission.INTERNET: this keyboard must be structurally
-      incapable of sending anything that is typed or spoken anywhere. RECORD_AUDIO will be added
-      in Phase 4 for on-device dictation, and nothing else is expected to be needed.
+      incapable of sending anything that is typed or spoken anywhere. RECORD_AUDIO is declared
+      below for on-device dictation, and nothing else is expected to be needed.
       The checkHasNoInternet Gradle task enforces this at build time.
+
+      RECORD_AUDIO is safe to grant precisely because INTERNET is absent: the microphone feeds a
+      model inside this process and the audio has nowhere else it could go.
     -->
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:allowBackup="false"
@@ -42,6 +47,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!--
+          No layout and no history: it exists only to host the system permission dialog, which
+          a keyboard cannot show for itself. Not exported, because only our own service
+          starts it.
+        -->
+        <activity
+            android:name=".asr.MicrophonePermissionActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
         <service
             android:name=".KeyboardService"

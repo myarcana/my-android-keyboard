@@ -20,6 +20,10 @@ import android.widget.PopupWindow
 import com.offlinekeyboard.ime.view.CursorIndicatorView
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import android.view.inputmethod.InputMethodManager
+import com.offlinekeyboard.ime.asr.Dictation
+import com.offlinekeyboard.ime.asr.MicrophonePermissionActivity
+import com.offlinekeyboard.ime.asr.SpokenPunctuation
 import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.capture.GestureCapture
@@ -91,6 +95,16 @@ class KeyboardService : InputMethodService() {
 
     /** Repeats while backspace is held; counts its own repeats to know when to switch to words. */
     private var backspaceRepeats = 0
+
+    // --- dictation ---
+    private var dictation: Dictation? = null
+
+    /**
+     * Set while dictating so a segment can be committed without a space in front of it if the
+     * field is empty or already ends in one. SenseVoice returns a bare clause per pause, and
+     * pasting them end to end would run the sentence together.
+     */
+    private var dictatedAnything = false
 
     private enum class ShiftState { OFF, ONE_SHOT, LOCKED }
 
@@ -237,7 +251,96 @@ class KeyboardService : InputMethodService() {
 
     override fun onDestroy() {
         if (DEBUG_GESTURES) runCatching { unregisterReceiver(debugSelectReceiver) }
+        dictation?.release()
+        dictation = null
         super.onDestroy()
+    }
+
+    // --- dictation ------------------------------------------------------------------------
+
+    private val dictationListener = object : Dictation.Listener {
+        override fun onStateChanged(state: Dictation.State) {
+            keyboardView?.status = when (state) {
+                Dictation.State.IDLE -> null
+                Dictation.State.LOADING -> getString(R.string.dictation_loading)
+                Dictation.State.LISTENING -> getString(R.string.dictation_listening)
+                Dictation.State.TRANSCRIBING -> getString(R.string.dictation_transcribing)
+            }
+            if (state == Dictation.State.IDLE) refreshCandidates()
+        }
+
+        override fun onText(text: String) = commitDictated(text)
+
+        override fun onUnavailable(reason: Dictation.Reason) {
+            keyboardView?.status = null
+            when (reason) {
+                Dictation.Reason.NO_PERMISSION -> MicrophonePermissionActivity.launchFrom(this@KeyboardService)
+                Dictation.Reason.NO_MICROPHONE ->
+                    showBriefly(getString(R.string.dictation_no_microphone))
+                Dictation.Reason.MODEL_FAILED ->
+                    showBriefly(getString(R.string.dictation_failed))
+            }
+        }
+    }
+
+    private fun toggleDictation() {
+        val engine = dictation ?: Dictation(this).also { dictation = it }
+        if (engine.state != Dictation.State.IDLE) engine.stop() else engine.start(dictationListener)
+    }
+
+    /**
+     * Commits one recognised segment.
+     *
+     * The model returns a clause per pause with no punctuation the speaker did not say, so the
+     * spacing between segments is ours to get right: a space between them in Latin script, and
+     * none in Chinese, where words do not take one.
+     */
+    private fun commitDictated(raw: String) {
+        val text = SpokenPunctuation.apply(raw, scriptFor(raw))
+        if (text.isEmpty()) return
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
+        val needsSpace = before != null && !before.isWhitespace() &&
+            !isHan(before) && !isHan(text.first()) && text.first().isLetterOrDigit()
+        ic.beginBatchEdit()
+        ic.commitText(if (needsSpace) " $text" else text, 1)
+        ic.endBatchEdit()
+        dictatedAnything = true
+        refreshCandidates()
+    }
+
+    private fun isHan(c: Char): Boolean =
+        Character.UnicodeScript.of(c.code) == Character.UnicodeScript.HAN
+
+    /**
+     * Which script the punctuation should take, decided from the segment itself rather than from
+     * a keyboard mode. Dictation runs with automatic language detection, so a segment's language
+     * is not known until it comes back -- and in a code-switched sentence it can differ from the
+     * one before it.
+     */
+    private fun scriptFor(text: String): SpokenPunctuation.Script = when {
+        text.none(::isHan) -> SpokenPunctuation.Script.LATIN
+        isTraditionalSubtype() -> SpokenPunctuation.Script.TRADITIONAL
+        else -> SpokenPunctuation.Script.SIMPLIFIED
+    }
+
+    private fun isTraditionalSubtype(): Boolean {
+        val subtype = getSystemService(InputMethodManager::class.java)
+            ?.currentInputMethodSubtype ?: return false
+        val tag = subtype.languageTag.ifEmpty { @Suppress("DEPRECATION") subtype.locale }
+        return tag.startsWith("zh_TW", ignoreCase = true) ||
+            tag.startsWith("zh-TW", ignoreCase = true)
+    }
+
+    /** A message in the suggestion strip that clears itself. There is nowhere else to put one. */
+    private fun showBriefly(message: String) {
+        keyboardView?.status = message
+        handler.postDelayed({
+            if (dictation?.state == Dictation.State.IDLE) {
+                keyboardView?.status = null
+                refreshCandidates()
+            }
+        }, 2500)
     }
 
     override fun onCreateInputView(): View =
@@ -255,6 +358,8 @@ class KeyboardService : InputMethodService() {
         stopTrackpad()
         stopBackspaceRepeat()
         clearCandidates()
+        // The microphone must never outlive the keyboard being on screen.
+        dictation?.stop()
     }
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
@@ -340,7 +445,7 @@ class KeyboardService : InputMethodService() {
             KeyType.BACKSPACE -> backspace()
             KeyType.MODE_SWITCH -> cycleplane()
             KeyType.GLOBE -> switchToNextInputMethod(false)
-            KeyType.MIC -> Unit // Phase 4: offline dictation
+            KeyType.MIC -> toggleDictation()
             else -> Unit
         }
     }

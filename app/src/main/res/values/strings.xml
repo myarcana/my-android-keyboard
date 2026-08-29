@@ -8,4 +8,9 @@
     <string name="subtype_zh_cn">简体拼音</string>
     <string name="testpad_name">Keyboard Test Pad</string>
     <string name="gesture_lab_name">Gesture Lab</string>
+    <string name="dictation_loading">Loading dictation…</string>
+    <string name="dictation_listening">Listening…</string>
+    <string name="dictation_transcribing">Transcribing…</string>
+    <string name="dictation_no_microphone">Microphone unavailable</string>
+    <string name="dictation_failed">Dictation model failed to load</string>
 </resources>

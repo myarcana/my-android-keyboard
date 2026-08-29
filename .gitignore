@@ -12,3 +12,6 @@ models/
 
 # Your own voice, and the ASR scores derived from it.
 asr-bench/
+
+# Dictation runtime and models: 290 MB, fetched by tools/fetch_asr_runtime.sh.
+app/src/main/assets/asr/
