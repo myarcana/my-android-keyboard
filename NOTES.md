@@ -143,6 +143,20 @@ Note that arrow keys will not work with a reversed selection: shift+arrow moves
 `SELECTION_END`, which is the anchor in that arrangement. Move the dragged end with
 `setSelection` instead, and collapse briefly if you need a line-aware vertical step.
 
+### Clamp to the line; do not detect a wrap and undo it
+
+Correcting the dragged end of a selection by whole characters will overshoot the end of a
+short line. Detecting that it wrapped and reverting looks like it works, but the revert is a
+visible jump, and it needs a "blocked" latch to stop it happening again -- and anything that
+clears that latch (vertical jitter during a real finger drag, say) restarts the cycle. The
+result is a selection that flickers rapidly whenever the marker is past the end of a line.
+
+Clamp the target into the line's own bounds instead. It is stateless, so there is nothing to
+get stuck or released at the wrong moment, and the selection simply rests at the line end while
+the marker carries on. `KeyboardService.lineBounds` finds the bounds from a snapshot of the
+text taken with `getExtractedText` when the drag starts -- no editing happens mid-drag, so it
+cannot go stale.
+
 ### setSelection and sendKeyEvent are not ordered relative to each other
 
 They reach the editor by different routes, so a key event sent immediately after a

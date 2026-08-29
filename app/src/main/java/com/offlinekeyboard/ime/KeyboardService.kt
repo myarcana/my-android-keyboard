@@ -95,11 +95,12 @@ class KeyboardService : InputMethodService() {
     private var selectionAppliedChars = 0
     private var selectionPrevInsH = Float.NaN
     /**
-     * Which direction the moving end has run out of line in: +1 stuck at a line end, -1 stuck
-     * at a line start, 0 free. Directional, because a block incurred going one way must only be
-     * cleared by movement back the other way.
+     * A snapshot of the field's text, taken when the drag begins, used to find line boundaries
+     * so the moving end can be clamped to its own line. No editing happens during a drag, so it
+     * cannot go stale.
      */
-    private var selectionBlockedDir = 0
+    private var selectionText: CharSequence? = null
+    private var selectionTextStart = 0
     /** A line change is in flight; wait for the app to report it before steering again. */
     private var selectionAwaitingLine = false
     /** Position collapsed onto for a line change, to tell the arrow's result from its echo. */
@@ -346,7 +347,6 @@ class KeyboardService : InputMethodService() {
         )
         if (moved) {
             selectionLineTop = Float.NaN // the line is about to change; re-learn it
-            selectionBlockedDir = 0 // a new line means a new set of edges
             selectionAwaitingLine = true
             selectionWaitTicks = 0
         }
@@ -366,24 +366,62 @@ class KeyboardService : InputMethodService() {
      * inaccurate character width costs one extra round instead of accumulating into the drift
      * that made long selections progressively wrong.
      */
+    /**
+     * Bounds of the line containing [offset], as absolute text offsets. Falls back to the
+     * offset itself when no snapshot is available, which simply disables clamping.
+     */
+    private fun lineBounds(offset: Int): IntRange? {
+        val text = selectionText ?: return null
+        val local = offset - selectionTextStart
+        if (local < 0 || local > text.length) return null
+        var start = 0
+        for (i in local - 1 downTo 0) {
+            if (text[i] == '\n') {
+                start = i + 1
+                break
+            }
+        }
+        var end = text.length
+        for (i in local until text.length) {
+            if (text[i] == '\n') {
+                end = i
+                break
+            }
+        }
+        return (start + selectionTextStart)..(end + selectionTextStart)
+    }
+
+    /**
+     * Moves the dragged end of the selection toward the marker, closed-loop.
+     *
+     * The selection is deliberately stored *reversed* -- setSelection(movingEnd, anchor). The
+     * highlight is identical either way, but the insertion marker follows the selection's start
+     * span, so reversing it makes the app report the end being dragged instead of the fixed
+     * one. Measured on device: setSelection(204, 211) reports x=409.6, the position of 204,
+     * while setSelection(211, 204) reports x=548.6, the position of 211.
+     *
+     * That report is the feedback signal. Each round re-derives the error from it, so an
+     * inaccurate character width costs one extra round instead of accumulating into drift.
+     *
+     * The target is clamped to the moving end's own line. Changing line is what vertical
+     * movement is for; letting a horizontal correction wrap would send the loop chasing down
+     * the document. Clamping rather than detecting the wrap and reverting matters: the revert
+     * made the selection visibly jump back, and any vertical jitter released the block that
+     * suppressed it, so dragging past the end of a line flickered rapidly between the two.
+     */
     private fun steerSelection() {
         val ic = currentInputConnection ?: return
         val selStart = lastSelStart
         val selEnd = lastSelEnd
         val insH = caretX
-        val insT = caretTop
         if (selStart < 0 || insH.isNaN()) return
 
         if (selStart == selEnd) {
-            // Collapsed: either the drag has not moved yet, or we collapsed deliberately to
-            // change line. Adopt the position and carry on steering -- returning here would
-            // mean the selection could never grow in the first place.
             if (selectionAwaitingLine) {
                 // setSelection and sendKeyEvent take different routes to the editor and are not
                 // ordered, so the collapse is echoed back before the arrow has been applied.
                 // Re-applying on that echo would overwrite the arrow and the line change would
-                // be silently lost -- which is exactly what stopped selections crossing a
-                // paragraph break. Wait for a position that is actually different.
+                // be silently lost. Wait for a position that is actually different.
                 if (selStart == selectionPreStepEnd && selectionWaitTicks < 4) {
                     selectionWaitTicks++
                     return
@@ -391,30 +429,15 @@ class KeyboardService : InputMethodService() {
                 selectionAwaitingLine = false
             }
             selectionMovingEnd = selStart
-            selectionPrevMovingEnd = selStart
-            selectionLineTop = insT
-            // Re-apply the selection around the new position. This must not wait on a
-            // horizontal correction being needed: a purely vertical drag produces no horizontal
-            // error, so the selection would stay collapsed and never appear at all.
+            // Re-apply around the new position. This must not wait on a horizontal correction
+            // being needed: a purely vertical drag produces no horizontal error, so the
+            // selection would stay collapsed and never appear at all.
             if (selectionMovingEnd != selectionAnchor) {
                 ic.setSelection(selectionMovingEnd, selectionAnchor)
             }
         } else {
             selectionAwaitingLine = false
             selectionMovingEnd = selStart // reversed, so the start span is the dragged end
-
-            // The line changed without us asking: the moving end wrapped past the end of its
-            // line. Put it back and stop pushing until the finger comes back.
-            if (!selectionLineTop.isNaN() && abs(insT - selectionLineTop) > 1f &&
-                selectionPrevMovingEnd >= 0
-            ) {
-                selectionBlockedDir = if (selectionAppliedChars > 0) 1 else -1
-                selectionMovingEnd = selectionPrevMovingEnd
-                selectionAppliedChars = 0
-                ic.setSelection(selectionMovingEnd, selectionAnchor)
-                return
-            }
-            if (selectionLineTop.isNaN()) selectionLineTop = insT
 
             // Learn the real character advance from what the last correction actually moved.
             if (selectionAppliedChars != 0 && !selectionPrevInsH.isNaN()) {
@@ -424,31 +447,24 @@ class KeyboardService : InputMethodService() {
         }
 
         val error = markerX - insH
-        val chars = (error / effectiveCharWidth()).roundToInt().coerceIn(-16, 16)
-        if (DEBUG_GESTURES) android.util.Log.d(
-            TAG,
-            "steer sel=[$selStart,$selEnd] insH=$insH markerX=$markerX err=$error " +
-                "cw=${effectiveCharWidth()} chars=$chars blocked=$selectionBlockedDir " +
-                "anchor=$selectionAnchor moving=$selectionMovingEnd",
-        )
-        if (selectionBlockedDir != 0) {
-            // Only movement back the other way releases it. Comparing against zero alone would
-            // strand a selection blocked at the start of a line, since it can only ever be
-            // freed by moving right.
-            if (chars == 0 || (chars > 0) == (selectionBlockedDir > 0)) {
-                selectionAppliedChars = 0
-                return
-            }
-            selectionBlockedDir = 0
-        }
+        val chars = (error / effectiveCharWidth()).roundToInt().coerceIn(-24, 24)
         if (chars == 0) {
             selectionAppliedChars = 0
             return
         }
-        selectionPrevMovingEnd = selectionMovingEnd
+
+        val bounds = lineBounds(selectionMovingEnd)
+        val target = (selectionMovingEnd + chars).let {
+            if (bounds != null) it.coerceIn(bounds.first, bounds.last) else it.coerceAtLeast(0)
+        }
+        if (target == selectionMovingEnd) {
+            // Already at the edge of the line; the marker is free to carry on without us.
+            selectionAppliedChars = 0
+            return
+        }
         selectionPrevInsH = insH
-        selectionAppliedChars = chars
-        selectionMovingEnd = (selectionMovingEnd + chars).coerceAtLeast(0)
+        selectionAppliedChars = target - selectionMovingEnd
+        selectionMovingEnd = target
         ic.setSelection(selectionMovingEnd, selectionAnchor)
     }
 
@@ -648,7 +664,12 @@ class KeyboardService : InputMethodService() {
         selectionBankY = 0f
         selectionAppliedChars = 0
         selectionPrevInsH = Float.NaN
-        selectionBlockedDir = 0
+        currentInputConnection
+            ?.getExtractedText(ExtractedTextRequest().apply { hintMaxChars = 1 shl 16 }, 0)
+            ?.let {
+                selectionText = it.text
+                selectionTextStart = it.startOffset.coerceAtLeast(0)
+            }
         selectionAwaitingLine = false
     }
 
