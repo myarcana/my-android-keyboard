@@ -115,14 +115,9 @@ class KeyboardService : InputMethodService() {
      */
     private var verticalStuckDir = 0
 
-    /**
-     * Which way the caret has run out of *visual row*: +1 cannot go further right, -1 left.
-     *
-     * A soft wrap has no newline to detect, so a rightward step at the end of a wrapped row
-     * carries the caret down a row and back to the far left. That flips the vertical and
-     * horizontal errors in the same instant and the chase ping-pongs across the wrap.
-     */
-    private var horizontalStuckDir = 0
+    /** Horizontal extent of the editor on screen, for spotting the end of a wrapped row. */
+    private var editorLeft = 0f
+    private var editorRight = Float.NaN
 
     /**
      * While extending a selection, the finger's travel is banked here until it amounts to a
@@ -323,7 +318,6 @@ class KeyboardService : InputMethodService() {
         pendingHorizontal = 0
         pendingVertical = 0
         verticalStuckDir = 0
-        horizontalStuckDir = 0
         updateIndicator()
     }
 
@@ -345,15 +339,9 @@ class KeyboardService : InputMethodService() {
         if (verticalStuckDir != 0 && dy != 0f && (dy > 0f) != (verticalStuckDir > 0)) {
             verticalStuckDir = 0
         }
-        if (horizontalStuckDir != 0 && dx != 0f && (dx > 0f) != (horizontalStuckDir > 0)) {
-            horizontalStuckDir = 0
-        }
         // Do not let the marker travel past where the caret can actually follow.
         val effectiveDy = if (verticalStuckDir != 0 && (dy > 0f) == (verticalStuckDir > 0)) 0f else dy
-        val effectiveDx =
-            if (horizontalStuckDir != 0 && (dx > 0f) == (horizontalStuckDir > 0)) 0f else dx
-
-        markerX = (markerX + effectiveDx).coerceIn(0f, metrics.widthPixels.toFloat())
+        markerX = (markerX + dx).coerceIn(0f, metrics.widthPixels.toFloat())
         markerCenterY = (markerCenterY + effectiveDy).coerceIn(0f, metrics.heightPixels.toFloat())
         updateIndicator()
         updateEdgeScroll()
@@ -553,15 +541,6 @@ class KeyboardService : InputMethodService() {
             // not its position on screen. When the view scrolls it deliberately holds the caret
             // still on screen, so screen position says "did not move" for the one case where it
             // moved the most -- which latched vertical movement off during every scroll.
-            // A purely horizontal step that changed the line crossed a soft wrap. Stop the
-            // marker pushing further that way; the caret is at the end of its visual row, and
-            // changing row is what vertical movement is for.
-            if (pendingHorizontal != 0 && pendingVertical == 0 &&
-                abs(point[1] - previousTop) > 1f
-            ) {
-                horizontalStuckDir = if (pendingHorizontal > 0) 1 else -1
-            }
-
             if (pendingVertical != 0 && pendingFromOffset >= 0) {
                 val movedInText = info.selectionStart != pendingFromOffset
                 verticalStuckDir = if (movedInText) 0 else if (pendingVertical > 0) 1 else -1
@@ -581,6 +560,13 @@ class KeyboardService : InputMethodService() {
         pendingHorizontal = 0
         pendingVertical = 0
         pendingFromOffset = -1
+
+        info.editorBoundsInfo?.editorBounds?.let { bounds ->
+            val corners = floatArrayOf(bounds.left, bounds.top, bounds.right, bounds.bottom)
+            info.matrix.mapPoints(corners)
+            editorLeft = corners[0]
+            editorRight = corners[2]
+        }
 
         caretX = point[0]
         caretTop = point[1]
@@ -697,7 +683,6 @@ class KeyboardService : InputMethodService() {
         if (lines != 0 && !stuckThisWay && edgeScrollDirection() == 0) {
             val step = if (lines > 0) 1 else -1
             if (pendingFromOffset < 0) pendingFromOffset = caretOffset
-            horizontalStuckDir = 0
             repeat(abs(lines)) {
                 sendArrow(
                     if (step > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
@@ -716,6 +701,13 @@ class KeyboardService : InputMethodService() {
         repeat(abs(chars)) {
             // Never cross a line break sideways: up and down is what changes line.
             if (atLineEdge(forward = step > 0)) return
+            // Nor a soft wrap, which has no character to detect. A wrapped row by definition
+            // reaches the editor's edge, so a caret within a character of it is at the end of
+            // its row; stepping past would drop the caret to the far left of the next row and
+            // flip the vertical and horizontal errors at once, which is what made the caret
+            // thrash. This is deliberately stateless -- a latch released on the next vertical
+            // move and crossed straight back over.
+            if (atRowEdge(step > 0)) return
             sendArrow(
                 if (step > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                 meta,
@@ -730,6 +722,17 @@ class KeyboardService : InputMethodService() {
      * text in a proportional font. The measurement persists for the life of the service, so
      * this fallback only applies before the very first cursor move in a field.
      */
+    /** True when the caret sits within a character of the editor's left or right edge. */
+    private fun atRowEdge(forward: Boolean): Boolean {
+        if (caretX.isNaN()) return false
+        val margin = effectiveCharWidth() * 1.2f
+        return if (forward) {
+            !editorRight.isNaN() && caretX + margin >= editorRight
+        } else {
+            caretX - margin <= editorLeft
+        }
+    }
+
     private fun effectiveCharWidth(): Float =
         charWidth.takeIf { it > 0f } ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.33f
 
