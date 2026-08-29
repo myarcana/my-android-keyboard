@@ -91,12 +91,23 @@ gesture that will not be performed again.
 That copy does not survive an uninstall, and this app deliberately has no cloud backup. So:
 
 ```
-tools/gestures.sh pull     # merge the phone's copy into data/gesture-bank.jsonl
+tools/gestures.sh pull     # merge into data/gesture-bank.jsonl, and commit it
 ```
 
-The merge is keyed on each record's id and keeps both sides, because neither is the master: the
-phone has the newest sessions, the repo copy is the one that survives. `data/gesture-bank.jsonl`
-is committed. It is the archive of record.
+The merge is keyed on each record's id and keeps both sides, because neither copy is the master:
+the phone has the newest sessions, the repo has the ones that survive an uninstall.
+
+**The pull commits.** Not as a courtesy — a pull that is not committed has saved nothing, since
+an untracked file in the working tree is one `git clean` from gone, and this is data that cannot
+be regenerated. It commits `data/gesture-bank.jsonl` by pathspec, so it is safe to run with other
+work in progress: unrelated staged changes are left staged and untouched.
+
+`tools/gestures.sh lab` also reports, on launch, how many gestures are sitting on the phone that
+the repository has never seen. The way this data gets lost is a session that was recorded,
+enjoyed, and never pulled.
+
+`data/gesture-bank.jsonl` is the archive of record. Roughly 650 bytes per gesture, so a few
+thousand samples is a couple of megabytes -- small enough to keep forever, which is the point.
 
 ## The format
 

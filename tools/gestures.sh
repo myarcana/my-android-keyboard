@@ -19,6 +19,15 @@ PKG=com.offlinekeyboard.ime
 IME=$PKG/.KeyboardService
 BANK=data/gesture-bank.jsonl
 
+# Counts the bank by label. Defined once, in a variable, because it is wanted from inside a
+# command substitution where a heredoc would be more trouble than it is worth.
+SUMMARISE='
+import json, sys, collections
+rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+by = collections.Counter(r["intent"] for r in rows)
+print(f"{len(rows)} gestures: " + ", ".join(f"{n} {k.lower()}" for k, n in sorted(by.items())))
+'
+
 cd "$(dirname "$0")/.."
 
 case "${1:-help}" in
@@ -42,6 +51,18 @@ lab)
     $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
     $ADB shell ime set "$IME" >/dev/null
     echo "Gesture Lab is open. Swipe as asked; every gesture is filed under what it asked for."
+
+    # Says up front whether the last session ever reached the repository, because the way this
+    # data gets lost is a session that was recorded, enjoyed, and never pulled.
+    on_phone=$($ADB exec-out run-as $PKG cat files/gesture-bank.jsonl 2>/dev/null | grep -c . || true)
+    in_repo=0
+    [[ -f "$BANK" ]] && in_repo=$(grep -c . "$BANK")
+    if [[ "$on_phone" -gt "$in_repo" ]]; then
+        echo "note: $((on_phone - in_repo)) gestures on the phone are not in the repository yet."
+        echo "      run tools/gestures.sh pull when you are done."
+    else
+        echo "$in_repo gestures saved and committed."
+    fi
     ;;
 
 pull)
@@ -93,6 +114,23 @@ with open(bank, "w") as f:
 print(f"{bank}: {len(rows)} samples (+{added} new)")
 PY
     rm -f "$tmp"
+
+    # A pull that is not committed has not saved anything. The phone's copy dies with the app,
+    # and an untracked file in the working tree is one `git clean` away from gone -- so the
+    # commit is part of the pull rather than something to remember afterwards. Only the bank is
+    # committed, by pathspec, so this is safe to run with other work in progress.
+    if git rev-parse --git-dir >/dev/null 2>&1; then
+        if [[ -n "$(git status --porcelain -- "$BANK")" ]]; then
+            summary=$(python3 -c "$SUMMARISE" "$BANK")
+            git add "$BANK"
+            git commit -q -m "Gesture bank: $summary" -- "$BANK"
+            echo "committed $(git log -1 --format=%h): $summary"
+        else
+            echo "already committed, nothing new"
+        fi
+    else
+        echo "WARNING: not a git repository -- the bank is NOT under version control"
+    fi
     ;;
 
 stats)
