@@ -51,19 +51,28 @@ class KeyboardService : InputMethodService() {
     private var offsetX = 0f
     private var offsetY = 0f
 
+    /**
+     * Steps the caret actually took. The difference from the finger's travel is the overshoot:
+     * zero-ish while the caret keeps up, growing without limit once it is stuck at a line end.
+     */
+    private var appliedX = 0
+    private var appliedY = 0
+
+    /** Steps sent but not yet confirmed by a CursorAnchorInfo update. */
+    private var pendingX = 0
+    private var pendingY = 0
+
     /** Caret position last reported by the app, in screen coordinates. */
     private var caretX = Float.NaN
-    private var caretTop = 0f
+    private var caretTop = Float.NaN
     private var caretBottom = 0f
 
-    /** Where the caret was when this drag began: the granular cursor's origin. */
-    private var startX = Float.NaN
-    private var startTop = Float.NaN
+    /** Caret position including steps sent but not yet reported, so the marker never lags. */
+    private var predictedX = Float.NaN
+    private var predictedTop = Float.NaN
 
-    /** Learned from how far the caret actually jumps per step in the current field. */
+    /** Measured from how far the caret actually moves per step in this field. */
     private var charWidth = 0f
-    /** Held fixed for the duration of a drag, so refining the estimate cannot jolt the marker. */
-    private var dragCharWidth = 0f
     private var lineHeight = 0f
 
     override fun onCreateInputView(): View =
@@ -180,19 +189,31 @@ class KeyboardService : InputMethodService() {
      */
     private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
         val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
+
+        val hStep = if (dx > 0) 1 else -1
         repeat(abs(dx)) {
+            // A step refused at a line edge is not "applied", so it becomes overshoot and the
+            // granular cursor keeps travelling while the caret stays put.
             if (!atLineEdge(forward = dx > 0)) {
                 sendArrow(
                     if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                     meta,
                 )
+                appliedX += hStep
+                pendingX += hStep
+                if (!predictedX.isNaN()) predictedX += hStep * effectiveCharWidth()
             }
         }
+
+        val vStep = if (dy > 0) 1 else -1
         repeat(abs(dy)) {
             sendArrow(
                 if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
                 meta,
             )
+            appliedY += vStep
+            pendingY += vStep
+            if (!predictedTop.isNaN() && lineHeight > 1f) predictedTop += vStep * lineHeight
         }
     }
 
@@ -258,44 +279,53 @@ class KeyboardService : InputMethodService() {
         currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
         offsetX = 0f
         offsetY = 0f
+        appliedX = 0
+        appliedY = 0
+        pendingX = 0
+        pendingY = 0
         caretX = Float.NaN
-        startX = Float.NaN
-        startTop = Float.NaN
+        caretTop = Float.NaN
+        predictedX = Float.NaN
+        predictedTop = Float.NaN
         updateIndicator()
     }
 
     private fun stopTrackpad() {
         trackpadActive = false
-        startX = Float.NaN
-        startTop = Float.NaN
+        predictedX = Float.NaN
+        predictedTop = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
         indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
     }
 
     override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
         val point = caretPoint(info) ?: return
+        val hadCaret = !caretX.isNaN()
 
-        // The distance the caret actually travelled is the width of the character just crossed,
-        // which is the best available estimate for the next one. getCharacterBounds would be
-        // exact but is only populated for composing text, which this is not.
-        if (!caretX.isNaN()) {
-            val advance = abs(point[0] - caretX)
-            if (advance > 1f && advance < 200f) charWidth = advance
+        (point[3] - point[1]).takeIf { it > 1f }?.let { lineHeight = it }
+
+        if (hadCaret) {
+            // Measure the real advance per step. Only trust a purely horizontal move: a change
+            // of line moves x arbitrarily, which would poison the estimate.
+            if (pendingX != 0 && pendingY == 0) {
+                val advance = abs(point[0] - caretX) / abs(pendingX)
+                if (advance > 1f && advance < 200f) charWidth = advance
+            }
+            // A vertical step the caret could not take -- the ends of the text -- is not
+            // applied, so it becomes overshoot and the granular cursor carries on.
+            if (pendingY != 0 && lineHeight > 1f) {
+                val moved = ((point[1] - caretTop) / lineHeight).roundToInt()
+                appliedY -= (pendingY - moved)
+            }
         }
+        pendingX = 0
+        pendingY = 0
 
         caretX = point[0]
         caretTop = point[1]
         caretBottom = point[3]
-        (caretBottom - caretTop).takeIf { it > 1f }?.let { lineHeight = it }
-
-        // Seed the granular cursor at the caret, once, at the start of the drag. It is free
-        // thereafter, so nothing that happens to the caret can jolt it.
-        if (trackpadActive && startX.isNaN()) {
-            startX = caretX
-            startTop = caretTop
-            dragCharWidth = charWidth.takeIf { it > 0f }
-                ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.45f
-        }
+        predictedX = caretX
+        predictedTop = caretTop
         updateIndicator()
     }
 
@@ -311,24 +341,28 @@ class KeyboardService : InputMethodService() {
     }
 
     /**
-     * Places the granular cursor at the free 2D position the finger has travelled to.
+     * Places the granular cursor at the caret plus however far the finger has travelled beyond
+     * what the caret could absorb.
      *
-     * It is deliberately *not* derived from where the caret currently is. The caret stops at
-     * the end of a line and cannot leave the text at all; the granular cursor carries on in
-     * both axes, so it can sit well past the end of a short line. Because it never re-anchors
-     * to the caret, nothing the caret does can make it jump.
+     * Anchoring to the caret rather than to a fixed origin is what keeps the two in step: the
+     * marker advances by the caret's *measured* advance, so the error cannot accumulate over a
+     * long drag. The overshoot term is what still lets it roam -- once the caret is stuck at
+     * the end of a short line, or at the ends of the text, nothing is applied and the marker
+     * carries on freely in both axes.
      *
-     * Shown lazily: CursorAnchorInfo arrives asynchronously and is not available at the instant
-     * the trackpad starts, so this waits for it rather than treating a missing caret as a
-     * reason to tear the popup down.
+     * Shown lazily, because CursorAnchorInfo arrives asynchronously and is not available at the
+     * instant the trackpad starts.
      */
     private fun updateIndicator() {
         if (!trackpadActive) return
         val kv = keyboardView ?: return
-        if (startX.isNaN() || startTop.isNaN()) return
+        if (predictedX.isNaN() || predictedTop.isNaN()) return
 
         val lh = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
-        val cw = dragCharWidth.takeIf { it > 0f } ?: (lh * 0.45f)
+        val cw = effectiveCharWidth()
+
+        val overshootX = offsetX - appliedX
+        val overshootY = offsetY - appliedY
 
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
         view.lineHeightPx = lh.roundToInt()
@@ -349,9 +383,9 @@ class KeyboardService : InputMethodService() {
 
         // Clamped only to the display, so it stays visible -- not to the text or the line.
         val metrics = resources.displayMetrics
-        val screenX = (startX + offsetX * cw - view.measuredWidth / 2f)
+        val screenX = (predictedX + overshootX * cw - view.measuredWidth / 2f)
             .coerceIn(0f, (metrics.widthPixels - view.measuredWidth).toFloat())
-        val screenY = (startTop + offsetY * lh)
+        val screenY = (predictedTop + overshootY * lh)
             .coerceIn(0f, (metrics.heightPixels - view.measuredHeight).toFloat())
 
         val x = screenX.roundToInt() - originX
