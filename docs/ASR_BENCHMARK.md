@@ -86,8 +86,16 @@ apple                      2.4%      5.1%      6.0%     11.2%      6.2%    100%
 sensevoice                 ...
 ```
 
-English is scored by word (WER), everything else by character (CER) — WER is undefined for a
-sentence with no spaces, and CER over English hides word-level substitutions.
+Everything is scored by character error rate, whitespace removed, with spoken numbers folded to
+digits on both sides.
+
+English started out scored by word, on the usual reasoning that CER hides word-level
+substitutions. Measured, that was wrong. Several of these models apply inverse text
+normalisation — SenseVoice writes "four thirty" as `430`, "fifteen" as `15`, and "J K four nine
+two" as `jk492`. It heard every word correctly and chose a different way to write it down, and
+word-level alignment scored that as failure: SenseVoice and Moonshine both came out at 31%
+English, when the truth is 4% and 6%. The models also disagree about whether "terminal two" is
+one token or two. Word boundaries here measure the spacing convention, not the hearing.
 
 **CER is measured with both sides folded to Simplified**, and script correctness is reported
 separately as `trad`. This matters: a model that recognises every word perfectly but answers in
@@ -95,6 +103,11 @@ Simplified has not misheard anything. Converting it is a step the keyboard alrea
 counting it as a recognition error would rank the mainland-trained models below where they
 belong. `trad` is the share of script-specific characters that came back Traditional, over the
 zh-TW and mixed prompts — a model at 100% there needs no conversion step at all.
+
+`bench score` ends by naming any prompt that **every** model returned much longer than the
+line. One model erring is a model; all of them erring identically on one prompt is the
+recording — a false start, or the line read twice — and that error belongs to the take rather
+than to anything being measured. Re-record those and run it again.
 
 `bench run` also prints load time and RTF per model. On the Mac these are not the phone's
 numbers, but a model that is slow here will not be fast there, and load time is what the user

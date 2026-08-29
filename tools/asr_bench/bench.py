@@ -167,6 +167,23 @@ def strip_punctuation(text: str) -> str:
     return "".join(c for c in text if not unicodedata.category(c).startswith("P"))
 
 
+# Spoken numbers, for undoing inverse text normalisation. Several of these models silently
+# rewrite "four thirty" as "430", "fifteen" as "15" and "J K four nine two" as "jk492" -- they
+# heard every word correctly and chose a different way to write it down. Scored raw that cost
+# SenseVoice 28 points of English WER, which would have been read as it mishearing numbers.
+SPOKEN_NUMBERS = {
+    "zero": "0", "oh": "0", "one": "1", "two": "2", "three": "3", "four": "4", "five": "5",
+    "six": "6", "seven": "7", "eight": "8", "nine": "9", "ten": "10", "eleven": "11",
+    "twelve": "12", "thirteen": "13", "fourteen": "14", "fifteen": "15", "sixteen": "16",
+    "seventeen": "17", "eighteen": "18", "nineteen": "19", "twenty": "20", "thirty": "30",
+    "forty": "40", "fifty": "50", "sixty": "60", "seventy": "70", "eighty": "80", "ninety": "90",
+}
+
+
+def fold_numbers(text: str) -> str:
+    return " ".join(SPOKEN_NUMBERS.get(word, word) for word in text.split())
+
+
 def normalise(text: str, fold_script: bool) -> str:
     """
     Comparable form. NFKC folds full-width Latin onto ASCII, which every Chinese model emits
@@ -179,7 +196,7 @@ def normalise(text: str, fold_script: bool) -> str:
     to simplified and script correctness is reported as its own column.
     """
     text = unicodedata.normalize("NFKC", text)
-    text = strip_punctuation(text).lower()
+    text = fold_numbers(strip_punctuation(text).lower())
     if fold_script and _to_simplified:
         text = _to_simplified(text)
     return " ".join(text.split())
@@ -200,14 +217,18 @@ def edit_distance(a, b) -> int:
 
 
 def cer(reference: str, hypothesis: str) -> tuple[int, int]:
+    """
+    Character error rate, whitespace removed, for every language including English.
+
+    English was scored by word at first, on the usual reasoning that CER hides word-level
+    substitutions. Measured, that was the wrong call: these models disagree about whether
+    "terminal two" is one token or two, and write "J K four nine two" variously as "jk492",
+    "j k 492" and "J K FOUR N TWO". Word alignment then scores the spacing convention rather
+    than the hearing -- it put SenseVoice and Moonshine at 31% English, when normalising
+    numbers and dropping spaces puts them at 4% and 6%.
+    """
     ref = normalise(reference, fold_script=True).replace(" ", "")
     hyp = normalise(hypothesis, fold_script=True).replace(" ", "")
-    return edit_distance(ref, hyp), len(ref)
-
-
-def wer(reference: str, hypothesis: str) -> tuple[int, int]:
-    ref = normalise(reference, fold_script=False).split()
-    hyp = normalise(hypothesis, fold_script=False).split()
     return edit_distance(ref, hyp), len(ref)
 
 
@@ -289,8 +310,10 @@ def cmd_fetch(args) -> int:
             if destination.exists():
                 continue
             destination.parent.mkdir(parents=True, exist_ok=True)
-            downloaded = hf_hub_download(repo_id=m["repo"], filename=filename)
-            destination.write_bytes(pathlib.Path(downloaded).read_bytes())
+            # local_dir downloads straight here. Without it the file lands in the shared HF
+            # cache and is then copied, which costs a second 4.3 GB for no benefit -- these
+            # models are read once by this script and never shared with anything else.
+            hf_hub_download(repo_id=m["repo"], filename=filename, local_dir=str(target))
             print(f"  {filename}")
     return 0
 
@@ -371,13 +394,7 @@ def cmd_score(_args) -> int:
             if prompt["id"] not in results:
                 continue
             hypothesis = results[prompt["id"]]
-            # English is scored by word, everything else by character: WER is not defined for
-            # a sentence with no spaces, and CER over English hides word-level substitutions.
-            distance, length = (
-                wer(prompt["text"], hypothesis)
-                if prompt["lang"] == "en"
-                else cer(prompt["text"], hypothesis)
-            )
+            distance, length = cer(prompt["text"], hypothesis)
             errors[prompt["lang"]][0] += distance
             errors[prompt["lang"]][1] += length
             overall[0] += distance
@@ -396,9 +413,37 @@ def cmd_score(_args) -> int:
         row += f"{(100 * trad_hit / trad_total):7.0f}%" if trad_total else f"{'-':>8}"
         print(row)
 
-    print("\nen is WER, the rest CER; lower is better.")
+    print("\nCER, spoken numbers folded to digits; lower is better.")
     print("trad = share of script-specific characters returned in Traditional.")
+    warn_about_recordings(prompts)
     return 0
+
+
+def warn_about_recordings(prompts) -> None:
+    """
+    Flags a prompt that every model got long, which means the recording is wrong.
+
+    A model producing a transcript half again longer than the line is one model erring. Every
+    model doing it on the same prompt is not: the take contains a false start or a second read,
+    and the resulting error rate belongs to the recording rather than to anything being scored.
+    Without this the harness quietly blames the models for a re-take nobody noticed.
+    """
+    per_model = {name: load_results(name) for name in (p.stem for p in RESULTS.glob("*.tsv"))}
+    suspect = []
+    for prompt in prompts:
+        ratios = sorted(
+            len(normalise(results[prompt["id"]], fold_script=True).replace(" ", ""))
+            / max(1, len(normalise(prompt["text"], fold_script=True).replace(" ", "")))
+            for name, results in per_model.items()
+            if prompt["id"] in results and results[prompt["id"]]
+        )
+        if len(ratios) >= 2 and ratios[len(ratios) // 2] > 1.5:
+            suspect.append((prompt["id"], ratios[len(ratios) // 2]))
+
+    if suspect:
+        print("\nRecordings every model returned long -- re-record these, they are not model error:")
+        for pid, ratio in suspect:
+            print(f"  {pid}  {ratio:.1f}x the expected length     tools/asr_bench/record.sh {pid}")
 
 
 def main() -> int:
