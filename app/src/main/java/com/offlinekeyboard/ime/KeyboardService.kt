@@ -317,12 +317,10 @@ class KeyboardService : InputMethodService() {
     private fun extendSelection(dy: Float): Boolean {
         val lh = lineHeight.takeIf { it > 1f } ?: return false
         selectionBankY += dy
-        // One line change at a time. Collapsing again before the previous arrow has been
-        // reported would collapse onto a stale position and undo it, losing the step.
-        if (selectionAwaitingLine) {
-            if (DEBUG_GESTURES) android.util.Log.d(TAG, "vert deferred, bank=$selectionBankY")
-            return false
-        }
+        // One line change at a time: the next arrow must act on the position the previous one
+        // produced, which is not known until the app reports it.
+        if (selectionAwaitingLine) return false
+
         var moved = false
         // Round to the nearest line rather than waiting for a whole one, so the marker never
         // leads the selection by more than half a line. Strict, because at exactly half a line
@@ -332,40 +330,25 @@ class KeyboardService : InputMethodService() {
             selectionBankY -= step * lh
             if (!moved) {
                 selectionPreStepEnd = selectionMovingEnd
-                currentInputConnection?.setSelection(selectionMovingEnd, selectionMovingEnd)
+                // Put the span into its natural order so that the arrow key, which moves
+                // SELECTION_END, moves the end we are dragging. The highlighted range is
+                // unchanged by this -- only which end Android calls the start -- so unlike
+                // collapsing the selection it produces no visible flicker.
+                currentInputConnection?.setSelection(selectionAnchor, selectionMovingEnd)
                 moved = true
             }
             sendArrow(
                 if (step > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
-                0,
+                KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
             )
         }
-        if (DEBUG_GESTURES) android.util.Log.d(
-            TAG,
-            "vert dy=$dy bank=$selectionBankY lh=$lh moved=$moved await=$selectionAwaitingLine " +
-                "moving=$selectionMovingEnd",
-        )
         if (moved) {
-            selectionLineTop = Float.NaN // the line is about to change; re-learn it
             selectionAwaitingLine = true
             selectionWaitTicks = 0
         }
         return moved
     }
 
-    /**
-     * Moves the dragged end of the selection toward the marker, closed-loop.
-     *
-     * The selection is deliberately stored *reversed* -- setSelection(movingEnd, anchor). The
-     * highlight is identical either way, but the insertion marker follows the selection's
-     * start span, so reversing it makes the app report the end being dragged instead of the
-     * fixed one. Measured on device: setSelection(204, 211) reports x=409.6, the position of
-     * 204, while setSelection(211, 204) reports x=548.6, the position of 211.
-     *
-     * That report is the feedback signal. Each round re-derives the error from it, so an
-     * inaccurate character width costs one extra round instead of accumulating into the drift
-     * that made long selections progressively wrong.
-     */
     /**
      * Bounds of the line containing [offset], as absolute text offsets. Falls back to the
      * offset itself when no snapshot is available, which simply disables clamping.
@@ -416,29 +399,40 @@ class KeyboardService : InputMethodService() {
         val insH = caretX
         if (selStart < 0 || insH.isNaN()) return
 
-        if (selStart == selEnd) {
-            if (selectionAwaitingLine) {
-                // setSelection and sendKeyEvent take different routes to the editor and are not
-                // ordered, so the collapse is echoed back before the arrow has been applied.
-                // Re-applying on that echo would overwrite the arrow and the line change would
-                // be silently lost. Wait for a position that is actually different.
-                if (selStart == selectionPreStepEnd && selectionWaitTicks < 4) {
-                    selectionWaitTicks++
-                    return
-                }
-                selectionAwaitingLine = false
+        // Which span is the end we are dragging depends on the order the selection is stored
+        // in: reversed while steering horizontally, natural while an arrow key changes line.
+        val collapsed = selStart == selEnd
+        val naturalOrder = !collapsed && selStart == selectionAnchor
+        val reportedMovingEnd = if (naturalOrder) selEnd else selStart
+
+        if (selectionAwaitingLine) {
+            // setSelection and sendKeyEvent take different routes to the editor, so the span
+            // swap is echoed back before the arrow has been applied. Acting on that echo would
+            // undo the line change. Wait for a position that is actually different.
+            if (reportedMovingEnd == selectionPreStepEnd && selectionWaitTicks < 4) {
+                selectionWaitTicks++
+                return
             }
-            selectionMovingEnd = selStart
-            // Re-apply around the new position. This must not wait on a horizontal correction
-            // being needed: a purely vertical drag produces no horizontal error, so the
-            // selection would stay collapsed and never appear at all.
+            selectionAwaitingLine = false
+        }
+        selectionMovingEnd = reportedMovingEnd
+
+        if (naturalOrder) {
+            // Restore the reversed order so the reported insertion marker follows the dragged
+            // end again. Same range, so invisible. insH currently describes the anchor, so
+            // there is nothing useful to steer on until the next report.
+            ic.setSelection(selectionMovingEnd, selectionAnchor)
+            selectionAppliedChars = 0
+            return
+        }
+
+        if (collapsed) {
+            // A purely vertical drag produces no horizontal error, so the selection must be
+            // applied here rather than waiting for a correction to need it.
             if (selectionMovingEnd != selectionAnchor) {
                 ic.setSelection(selectionMovingEnd, selectionAnchor)
             }
         } else {
-            selectionAwaitingLine = false
-            selectionMovingEnd = selStart // reversed, so the start span is the dragged end
-
             // Learn the real character advance from what the last correction actually moved.
             if (selectionAppliedChars != 0 && !selectionPrevInsH.isNaN()) {
                 val advance = abs(insH - selectionPrevInsH) / abs(selectionAppliedChars)
@@ -664,6 +658,15 @@ class KeyboardService : InputMethodService() {
         selectionBankY = 0f
         selectionAppliedChars = 0
         selectionPrevInsH = Float.NaN
+        // Hold a real shift key for the duration. Arrow keys only extend a selection when the
+        // text buffer's meta state is set, and only a genuine KEYCODE_SHIFT_LEFT press does
+        // that -- META_SHIFT_ON on the arrow event alone is ignored.
+        currentInputConnection?.let { ic ->
+            val now = SystemClock.uptimeMillis()
+            ic.sendKeyEvent(
+                KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0),
+            )
+        }
         currentInputConnection
             ?.getExtractedText(ExtractedTextRequest().apply { hintMaxChars = 1 shl 16 }, 0)
             ?.let {
@@ -677,6 +680,15 @@ class KeyboardService : InputMethodService() {
     private fun endSelection() {
         if (!extendingSelection) return
         extendingSelection = false
+        currentInputConnection?.let { ic ->
+            val now = SystemClock.uptimeMillis()
+            ic.sendKeyEvent(
+                KeyEvent(
+                    now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT, 0,
+                    KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
+                ),
+            )
+        }
         if (selectionAnchor >= 0 && selectionMovingEnd >= 0) {
             currentInputConnection?.setSelection(
                 minOf(selectionAnchor, selectionMovingEnd),

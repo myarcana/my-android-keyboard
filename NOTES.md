@@ -157,6 +157,26 @@ the marker carries on. `KeyboardService.lineBounds` finds the bounds from a snap
 text taken with `getExtractedText` when the drag starts -- no editing happens mid-drag, so it
 cannot go stale.
 
+### Swap the span order rather than collapsing, to change line without flicker
+
+An arrow key moves `SELECTION_END`, so to make one move the end you are dragging, that end has
+to *be* `SELECTION_END`. Collapsing the selection first works but the highlight visibly
+disappears and comes back on every line change.
+
+Swapping the order instead is invisible: `setSelection(anchor, movingEnd)` and
+`setSelection(movingEnd, anchor)` describe the *same highlighted range*, since Android draws
+min..max. So the selection can be flipped into natural order for the arrow and back into
+reversed order for the position feedback, with nothing visible happening in between. A log of a
+vertical drag shows the range only ever growing, never collapsing:
+
+```
+[19,21] -> [21,19] -> [19,21] -> [19,24] -> [24,19] -> ...
+```
+
+Arrow keys still only extend a selection when a genuine `KEYCODE_SHIFT_LEFT` is held --
+`META_SHIFT_ON` on the arrow event alone is ignored, see below -- so the shift key is pressed
+for the duration of the drag and released when it ends, including on cancel.
+
 ### setSelection and sendKeyEvent are not ordered relative to each other
 
 They reach the editor by different routes, so a key event sent immediately after a
