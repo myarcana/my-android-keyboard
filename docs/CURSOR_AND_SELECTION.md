@@ -227,13 +227,19 @@ a long line.
   between `trackpadSlowSpeed` (0.15 px/ms) and `trackpadFastSpeed` (2.2 px/ms). Squaring keeps
   the multiplier near 1 through the whole slow range, so precision is not traded away for reach.
   A linear ramp noticeably degrades fine control.
-- The **same factor is applied to both axes**, so acceleration can never bend the direction of
-  travel — only its magnitude. There is a test for this.
+- **The axes have separate curves.** They began shared, so acceleration could only ever scale a
+  gesture and never bend it — but there is far less vertical room on a keyboard-sized trackpad
+  than horizontal, and vertical has to cover a whole document. Vertical therefore starts
+  accelerating sooner (0.10 vs 0.15 px/ms), reaches its ceiling sooner (1.1 vs 2.2 px/ms) and
+  goes further (7x vs 4x). At 0.6 px/ms vertical is already at 2.5x while horizontal is at 1.14x.
+  The cost, accepted deliberately, is that a fast diagonal drag is steeper than the finger's own
+  path.
 - Speed resets when a drag begins, so one flick cannot leak acceleration into the next drag.
 
-The base gains are `trackpadGainX` 0.78 and `trackpadGainY` 1.45 — the multiplier the curve
+The base gains are `trackpadGainX` 1.17 and `trackpadGainY` 1.45 — the multiplier the curve
 leaves untouched at low speed, and therefore what fine positioning actually feels like. They
-were raised from 0.55 / 1.2, which was accurate but tiring to use over any distance.
+were raised from 0.55 / 1.2 in two steps, both times because covering distance was tiring even
+though precision was good.
 
 Tuned values live in `GestureConfig`; measured on device, a 100px sample at ~100ms intervals
 produces multipliers ramping 1.0 → 1.04 → 1.19 → 1.30 as the average builds.

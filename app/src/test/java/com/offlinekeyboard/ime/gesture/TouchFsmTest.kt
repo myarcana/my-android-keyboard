@@ -306,7 +306,10 @@ class TouchFsmTest {
     }
 
     @Test
-    fun `acceleration does not bend the direction of travel`() {
+    fun `vertical accelerates sooner and harder than horizontal`() {
+        // There is far less vertical room on a keyboard-sized trackpad, so vertical has to
+        // cover more ground for the same thumb movement. This deliberately breaks the earlier
+        // guarantee that acceleration only scales a gesture and never bends it.
         val (f, space) = trackpadFsm()
         var x = space.centerX
         var y = space.centerY
@@ -314,13 +317,50 @@ class TouchFsmTest {
         var pan: GestureOutput.TrackpadPan? = null
         repeat(4) {
             x += 100f
-            y -= 50f
-            t += 20
+            y += 100f
+            t += 60
             pan = f.onMove(x, y, t).only<GestureOutput.TrackpadPan>()
         }
-        // undo the per-axis gains; what remains must have the finger's own 100:-50 ratio
-        val ratio = (pan!!.dx / config.trackpadGainX) / (pan!!.dy / config.trackpadGainY)
-        assertEquals(100f / -50f, ratio, 0.01f)
+        val horizontalAccel = pan!!.dx / (100f * config.trackpadGainX)
+        val verticalAccel = pan!!.dy / (100f * config.trackpadGainY)
+        assertTrue(
+            "vertical $verticalAccel should outpace horizontal $horizontalAccel",
+            verticalAccel > horizontalAccel * 1.5f,
+        )
+    }
+
+    @Test
+    fun `neither axis is accelerated at thumb speeds used for precision`() {
+        val (f, space) = trackpadFsm()
+        var x = space.centerX
+        var y = space.centerY
+        var t = 1000L
+        var pan: GestureOutput.TrackpadPan? = null
+        repeat(3) {
+            x += 40f
+            y += 40f
+            t += 1000
+            pan = f.onMove(x, y, t).only<GestureOutput.TrackpadPan>()
+        }
+        assertEquals(40f * config.trackpadGainX, pan!!.dx, 0.01f)
+        assertEquals(40f * config.trackpadGainY, pan!!.dy, 0.01f)
+    }
+
+    @Test
+    fun `vertical acceleration respects its own ceiling`() {
+        val (f, space) = trackpadFsm()
+        var y = space.centerY
+        var t = 1000L
+        var pan: GestureOutput.TrackpadPan? = null
+        repeat(6) {
+            y += 300f
+            t += 1
+            pan = f.onMove(space.centerX, y, t).only<GestureOutput.TrackpadPan>()
+        }
+        assertTrue(
+            "pan ${pan!!.dy} exceeded the vertical cap",
+            pan!!.dy <= 300f * config.trackpadGainY * config.trackpadMaxAccelY + 0.01f,
+        )
     }
 
     @Test

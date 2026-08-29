@@ -28,18 +28,26 @@ data class GestureConfig(
      * Vertical is deliberately higher -- a line is a much longer journey than a character, and
      * there is less room to move vertically on a keyboard than horizontally.
      */
-    val trackpadGainX: Float = 0.78f,
+    val trackpadGainX: Float = 1.17f,
     val trackpadGainY: Float = 1.45f,
 
     /**
-     * Pointer acceleration. Below [trackpadSlowSpeed] the gain is untouched, so slow movement
-     * keeps its fine-grained feel exactly; from there it ramps up to [trackpadMaxAccel] times
-     * at [trackpadFastSpeed], letting a quick flick cross a long line. Speeds are in pixels of
-     * finger travel per millisecond.
+     * Pointer acceleration. Below the slow speed the gain is untouched, so slow movement keeps
+     * its fine-grained feel exactly; from there it ramps up to the maximum at the fast speed,
+     * letting a quick flick cross a long line. Speeds are in pixels of finger travel per
+     * millisecond.
+     *
+     * The two axes have separate curves on purpose. There is far less vertical room on a
+     * keyboard-sized trackpad than horizontal, so vertical has to reach its multiplier sooner
+     * and go further to cover a document. The cost is that a fast diagonal drag is steeper than
+     * the finger's own path -- acceleration bends the direction rather than only scaling it.
      */
     val trackpadSlowSpeed: Float = 0.15f,
     val trackpadFastSpeed: Float = 2.2f,
     val trackpadMaxAccel: Float = 4f,
+    val trackpadSlowSpeedY: Float = 0.10f,
+    val trackpadFastSpeedY: Float = 1.1f,
+    val trackpadMaxAccelY: Float = 7f,
     /** A single move event is a noisy speed estimate, so it is smoothed. 1 = no smoothing. */
     val trackpadSpeedSmoothing: Float = 0.4f,
 )
@@ -243,13 +251,21 @@ class TouchFsm(
 
         val instant = hypot(dx, dy) / dt
         trackpadSpeed += (instant - trackpadSpeed) * config.trackpadSpeedSmoothing
-        val accel = accelerationFor(trackpadSpeed)
 
-        // The same factor on both axes, so acceleration never bends the direction of travel.
         return listOf(
             GestureOutput.TrackpadPan(
-                dx * config.trackpadGainX * accel,
-                dy * config.trackpadGainY * accel,
+                dx * config.trackpadGainX * accelerationFor(
+                    trackpadSpeed,
+                    config.trackpadSlowSpeed,
+                    config.trackpadFastSpeed,
+                    config.trackpadMaxAccel,
+                ),
+                dy * config.trackpadGainY * accelerationFor(
+                    trackpadSpeed,
+                    config.trackpadSlowSpeedY,
+                    config.trackpadFastSpeedY,
+                    config.trackpadMaxAccelY,
+                ),
             ),
         )
     }
@@ -261,12 +277,10 @@ class TouchFsm(
      * should feel exactly as it did before acceleration existed, and only deliberate fast
      * movement should cover ground.
      */
-    private fun accelerationFor(speed: Float): Float {
-        val lo = config.trackpadSlowSpeed
-        val hi = config.trackpadFastSpeed
+    private fun accelerationFor(speed: Float, lo: Float, hi: Float, max: Float): Float {
         if (hi <= lo) return 1f
         val ramp = ((speed - lo) / (hi - lo)).coerceIn(0f, 1f)
-        return 1f + (config.trackpadMaxAccel - 1f) * ramp * ramp
+        return 1f + (max - 1f) * ramp * ramp
     }
 
     fun onUp(x: Float, y: Float, t: Long): List<GestureOutput> {
