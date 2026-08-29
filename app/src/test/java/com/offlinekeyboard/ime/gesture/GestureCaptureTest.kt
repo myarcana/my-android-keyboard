@@ -276,19 +276,44 @@ class GestureCaptureTest {
             }
     }
 
+    /**
+     * The anti-rhythm property. Two drills of the same kind back to back on the same key would
+     * be sampling a habit rather than a gesture.
+     */
     @Test
-    fun `a session alternates symbol and word rather than blocking them`() {
-        val session = com.offlinekeyboard.ime.capture.Drills.session(reps = 2)
-        val paired = session.filter { drill ->
-            com.offlinekeyboard.ime.capture.Drills.PAIRS.any { it.startKeyId == drill.startKeyId }
-        }
-        paired.windowed(2).forEach { (a, b) ->
-            if (a.startKeyId == b.startKeyId) {
-                assertTrue(
-                    "two ${a.intent} drills in a row on ${a.startKeyId}",
-                    a.intent != b.intent,
-                )
+    fun `a session never asks for the same kind twice in a row on one key`() {
+        com.offlinekeyboard.ime.capture.Drills.session(reps = 3)
+            .windowed(2)
+            .forEach { (a, b) ->
+                if (a.startKeyId == b.startKeyId) {
+                    assertTrue(
+                        "two ${a.intent} drills in a row on ${a.startKeyId}",
+                        a.intent != b.intent,
+                    )
+                }
             }
-        }
+    }
+
+    /**
+     * Without taps in the bank, nothing at all penalises a sweep for lowering the flick
+     * threshold, so it lowers it until sloppy taps start flicking. Every key that gets flick
+     * drills needs tap drills too, on that same key.
+     */
+    @Test
+    fun `keys drilled as taps are also drilled as flicks`() {
+        val session = com.offlinekeyboard.ime.capture.Drills.session(reps = 1)
+        val tapped = session.filter { it.intent == GestureIntent.LETTER }.map { it.startKeyId }.toSet()
+        val flicked = session.filter { it.intent == GestureIntent.SYMBOL }.map { it.startKeyId }.toSet()
+        assertTrue("no tap drills at all -- the flick threshold has no floor", tapped.isNotEmpty())
+        assertTrue(
+            "tap drills on keys that are never flicked: ${tapped - flicked}",
+            (tapped - flicked).isEmpty(),
+        )
+    }
+
+    @Test
+    fun `every kind of label is represented in a session`() {
+        val kinds = com.offlinekeyboard.ime.capture.Drills.session(reps = 1).map { it.intent }.toSet()
+        assertEquals(GestureIntent.entries.toSet(), kinds)
     }
 }

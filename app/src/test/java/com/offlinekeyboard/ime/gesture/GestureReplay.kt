@@ -67,10 +67,11 @@ object GestureReplay {
             ?.verdict
     }
 
-    /** The intent a verdict amounts to, or null when the gesture typed neither of the two. */
+    /** The intent a verdict amounts to, or null when the gesture typed none of the three. */
     fun intentOf(verdict: GestureVerdict?): GestureIntent? = when (verdict) {
         GestureVerdict.FLICK -> GestureIntent.SYMBOL
         GestureVerdict.GLIDE -> GestureIntent.WORD
+        GestureVerdict.TAP -> GestureIntent.LETTER
         else -> null
     }
 
@@ -102,37 +103,43 @@ object GestureReplay {
     // --- scoring ----------------------------------------------------------------------------
 
     data class Score(
-        val symbolCorrect: Int,
-        val symbolTotal: Int,
-        val wordCorrect: Int,
-        val wordTotal: Int,
+        val correct: Map<GestureIntent, Int>,
+        val total: Map<GestureIntent, Int>,
     ) {
-        val symbolRecall get() = if (symbolTotal == 0) 0f else symbolCorrect.toFloat() / symbolTotal
-        val wordRecall get() = if (wordTotal == 0) 0f else wordCorrect.toFloat() / wordTotal
+        fun recall(intent: GestureIntent): Float {
+            val n = total[intent] ?: 0
+            return if (n == 0) 0f else (correct[intent] ?: 0).toFloat() / n
+        }
+
+        /** Labels this bank actually contains, so an unrecorded one cannot drag the mean down. */
+        val labels: List<GestureIntent> get() = GestureIntent.entries.filter { (total[it] ?: 0) > 0 }
 
         /**
-         * The mean of the two recalls, not plain accuracy.
+         * The mean of the per-label recalls, not plain accuracy.
          *
-         * A drill session rarely ends up perfectly balanced, and plain accuracy on an unbalanced
-         * bank rewards a heuristic that simply favours whichever label is commoner. Balanced
-         * accuracy makes both mistakes cost the same, which is the actual requirement: neither
-         * "my symbol turned into a word" nor "my word turned into a symbol" is acceptable.
+         * A drill session is never evenly split -- the catalogue has more flicks in it than
+         * words, because more keys have a symbol than have a word hanging below them. Plain
+         * accuracy on that rewards a heuristic which simply favours whichever label is commoner.
+         * Averaging the recalls makes every kind of mistake cost the same, which is the actual
+         * requirement: "my symbol turned into a word", "my word turned into a symbol" and "my
+         * tap turned into a symbol" are all equally unacceptable.
          */
-        val balanced get() = (symbolRecall + wordRecall) / 2f
+        val balanced: Float
+            get() = labels.takeIf { it.isNotEmpty() }?.map { recall(it) }?.average()?.toFloat() ?: 0f
 
-        val total get() = symbolTotal + wordTotal
-        val correct get() = symbolCorrect + wordCorrect
+        val totalCount get() = total.values.sum()
+        val correctCount get() = correct.values.sum()
     }
 
     fun score(records: List<GestureRecord>, config: GestureConfig): Score {
-        var sc = 0; var st = 0; var wc = 0; var wt = 0
+        val correct = mutableMapOf<GestureIntent, Int>()
+        val total = mutableMapOf<GestureIntent, Int>()
         records.forEach { record ->
-            val read = intentOf(replay(record, config))
-            when (record.intent) {
-                GestureIntent.SYMBOL -> { st++; if (read == GestureIntent.SYMBOL) sc++ }
-                GestureIntent.WORD -> { wt++; if (read == GestureIntent.WORD) wc++ }
+            total[record.intent] = (total[record.intent] ?: 0) + 1
+            if (intentOf(replay(record, config)) == record.intent) {
+                correct[record.intent] = (correct[record.intent] ?: 0) + 1
             }
         }
-        return Score(sc, st, wc, wt)
+        return Score(correct, total)
     }
 }

@@ -3,6 +3,7 @@ package com.offlinekeyboard.ime.capture
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import com.offlinekeyboard.ime.gesture.GestureIntent
 import com.offlinekeyboard.ime.gesture.GestureRecord
 import com.offlinekeyboard.ime.gesture.GestureTrace
 import com.offlinekeyboard.ime.gesture.GestureVerdict
@@ -70,7 +71,9 @@ object GestureCapture {
             publish(Result(Outcome.WRONG_KEY, drill, null))
             return
         }
-        if (isNegligible(trace)) {
+        // A tap drill is *asking* for a gesture that barely moves, so the guard below would
+        // throw away every sample it collected.
+        if (drill.intent != GestureIntent.LETTER && isNegligible(trace)) {
             publish(Result(Outcome.TOO_SMALL, drill, null))
             return
         }

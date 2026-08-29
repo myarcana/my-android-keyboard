@@ -108,20 +108,24 @@ object GestureBank {
     /** Counts by label, and how often the shipped heuristic agreed with the label. */
     data class Summary(
         val total: Int,
-        val symbols: Int,
-        val words: Int,
+        val byIntent: Map<GestureIntent, Int>,
         val agreed: Int,
         val decided: Int,
     ) {
         val accuracy: Float get() = if (decided == 0) 0f else agreed.toFloat() / decided
+
+        /** "12 symbol / 8 word / 6 tap", for the line under the drill. */
+        val breakdown: String
+            get() = GestureIntent.entries.joinToString(" / ") { intent ->
+                "${byIntent[intent] ?: 0} ${if (intent == GestureIntent.LETTER) "tap" else intent.name.lowercase()}"
+            }
     }
 
     fun summarise(records: List<GestureRecord>): Summary {
         val decided = records.filter { it.verdictIntent != null }
         return Summary(
             total = records.size,
-            symbols = records.count { it.intent == GestureIntent.SYMBOL },
-            words = records.count { it.intent == GestureIntent.WORD },
+            byIntent = records.groupingBy { it.intent }.eachCount(),
             agreed = decided.count { it.verdictIntent == it.intent },
             decided = decided.size,
         )

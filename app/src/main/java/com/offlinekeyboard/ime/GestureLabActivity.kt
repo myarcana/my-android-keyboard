@@ -78,6 +78,7 @@ class GestureLabActivity : Activity() {
     private val muted get() = if (night) Color.parseColor("#8E8EA0") else Color.parseColor("#6B6B7B")
     private val symbolHue = Color.parseColor("#2F6FED")
     private val wordHue = Color.parseColor("#D97706")
+    private val letterHue = Color.parseColor("#6B4FBB")
     private val goodHue = Color.parseColor("#0F8A4F")
     private val badHue = Color.parseColor("#C62828")
 
@@ -133,7 +134,11 @@ class GestureLabActivity : Activity() {
             GestureCapture.disarm()
             return
         }
-        val hue = if (drill.intent == GestureIntent.SYMBOL) symbolHue else wordHue
+        val hue = when (drill.intent) {
+            GestureIntent.SYMBOL -> symbolHue
+            GestureIntent.WORD -> wordHue
+            GestureIntent.LETTER -> letterHue
+        }
         chip.text = drill.intent.name
         chip.background = pill(hue)
         instruction.text = drill.instruction
@@ -195,7 +200,7 @@ class GestureLabActivity : Activity() {
             runOnUiThread {
                 bankLine.text = buildString {
                     append("bank ${summary.total}")
-                    append("  (${summary.symbols} symbol / ${summary.words} word)")
+                    append("  (${summary.breakdown})")
                     if (summary.decided > 0) {
                         append("   ·   current heuristic ")
                         append("%.0f%%".format(summary.accuracy * 100))

@@ -100,26 +100,23 @@ object Drills {
     /**
      * Builds a session queue.
      *
-     * Symbol and word alternate within a pair rather than being blocked together. A block of
-     * eight flicks in a row is not eight samples of a flick, it is one sample of a rhythm the
-     * hand falls into -- and a heuristic tuned on that would work only for someone doing drills.
-     * Pair order is shuffled for the same reason.
+     * The three kinds alternate *within a key* rather than being blocked together, and this is
+     * the part that most affects whether the bank is worth anything. A run of eight flicks is not
+     * eight samples of a flick, it is one sample of a rhythm the hand falls into, and a threshold
+     * fitted to that works only for someone doing drills. Interleaving also means every key
+     * carries taps, flicks and glides from the same minute of the same hand, so the boundary
+     * between them is fitted to one column of evidence instead of three unrelated ones.
+     *
+     * Every key gets tap drills, including the ones with no word hanging below them. The flick
+     * threshold trades off against taps rather than against glides, so a bank without taps gives
+     * a sweep no reason not to drive that threshold to zero -- and it will, since every sample it
+     * can see is improved by doing so. The first collected session had exactly this hole.
      */
     fun session(reps: Int, random: kotlin.random.Random = kotlin.random.Random.Default): List<Drill> =
         buildList {
             PAIRS.shuffled(random).forEach { pair ->
                 repeat(reps) { rep ->
-                    add(
-                        Drill(
-                            id = "${pair.startKeyId}:symbol",
-                            startKeyId = pair.startKeyId,
-                            intent = GestureIntent.SYMBOL,
-                            expected = pair.symbol,
-                            instruction = "Swipe down on ${pair.startKeyId.uppercase()} " +
-                                "to type  ${pair.symbol}",
-                            why = pair.why,
-                        ),
-                    )
+                    add(symbolDrill(pair.startKeyId, pair.symbol, pair.why))
                     val word = pair.words[rep % pair.words.size]
                     add(
                         Drill(
@@ -131,21 +128,33 @@ object Drills {
                             why = pair.why,
                         ),
                     )
+                    add(tapDrill(pair.startKeyId))
                 }
             }
             SYMBOL_ONLY.shuffled(random).forEach { (key, symbol, why) ->
                 repeat(reps) {
-                    add(
-                        Drill(
-                            id = "$key:symbol",
-                            startKeyId = key,
-                            intent = GestureIntent.SYMBOL,
-                            expected = symbol,
-                            instruction = "Swipe down on ${key.uppercase()} to type  $symbol",
-                            why = why,
-                        ),
-                    )
+                    add(symbolDrill(key, symbol, why))
+                    add(tapDrill(key))
                 }
             }
         }
+
+    private fun symbolDrill(key: String, symbol: String, why: String) = Drill(
+        id = "$key:symbol",
+        startKeyId = key,
+        intent = GestureIntent.SYMBOL,
+        expected = symbol,
+        instruction = "Swipe down on ${key.uppercase()} to type  $symbol",
+        why = why,
+    )
+
+    private fun tapDrill(key: String) = Drill(
+        id = "$key:letter",
+        startKeyId = key,
+        intent = GestureIntent.LETTER,
+        expected = key,
+        instruction = "Just tap ${key.uppercase()}",
+        why = "an ordinary tap at your ordinary speed -- this is what stops the flick threshold " +
+            "being tuned down into your normal typing",
+    )
 }

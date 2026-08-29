@@ -7,7 +7,25 @@ import kotlin.math.roundToInt
  * What the user was *asked* to do. This is the ground truth the bank exists to capture, and the
  * only thing in a record that cannot be recomputed later.
  */
-enum class GestureIntent { SYMBOL, WORD }
+enum class GestureIntent {
+    /** A swipe down for the symbol behind the key. */
+    SYMBOL,
+
+    /** A glide that spells a word. */
+    WORD,
+
+    /**
+     * A plain tap for the letter on the key.
+     *
+     * Not a distraction from the symbol-versus-word question: it is the other side of it. The
+     * flick threshold trades off against taps, not against glides, so a bank with no taps in it
+     * gives a sweep no reason at all not to drive that threshold to zero -- and it will, because
+     * every sample it can see is improved by doing so. The first session had exactly this hole,
+     * and the sweep duly recommended halving the threshold with no evidence about what that
+     * would do to ordinary typing.
+     */
+    LETTER,
+}
 
 /** What the state machine actually decided, at the moment the finger lifted. */
 enum class GestureVerdict { TAP, FLICK, GLIDE, ACCENT, TRACKPAD, NONE }
@@ -82,6 +100,7 @@ data class GestureRecord(
         get() = when (trace.verdict) {
             GestureVerdict.FLICK -> GestureIntent.SYMBOL
             GestureVerdict.GLIDE -> GestureIntent.WORD
+            GestureVerdict.TAP -> GestureIntent.LETTER
             else -> null
         }
 }

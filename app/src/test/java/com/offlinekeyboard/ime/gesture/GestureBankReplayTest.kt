@@ -39,8 +39,9 @@ class GestureBankReplayTest {
 
         println("\n" + "=".repeat(78))
         println("Gesture bank: ${records.size} samples from $file")
-        val symbols = records.count { it.intent == GestureIntent.SYMBOL }
-        println("  SYMBOL $symbols    WORD ${records.size - symbols}")
+        println("  " + GestureIntent.entries.joinToString("    ") { intent ->
+            "$intent ${records.count { it.intent == intent }}"
+        })
         println("  keys: " + records.groupingBy { it.trace.startKeyId }.eachCount()
             .toList().sortedByDescending { it.second }
             .joinToString(" ") { "${it.first}=${it.second}" })
@@ -132,7 +133,11 @@ class GestureBankReplayTest {
         val tied: List<GestureConfig>,
     )
 
-    private val flickGrid = steps(0.25f, 0.85f, 0.05f)
+    // Starts well below anything sane on purpose. A sweep that settles against the edge of its
+    // own grid has not found an optimum, it has found the edge -- so the grid has to be wide
+    // enough for the answer to sit inside it, and the tap samples are what stop it running away
+    // downward.
+    private val flickGrid = steps(0.10f, 0.85f, 0.05f)
     private val dominanceGrid = steps(0.75f, 3.0f, 0.25f)
     private val glideGrid = steps(0.8f, 2.6f, 0.2f)
     private val promoteGrid = steps(1.2f, 4.2f, 0.2f)
@@ -223,11 +228,11 @@ class GestureBankReplayTest {
     private fun isBetter(a: GestureReplay.Score, b: GestureReplay.Score): Boolean = when {
         a.balanced > b.balanced + 1e-6f -> true
         a.balanced < b.balanced - 1e-6f -> false
-        else -> a.correct > b.correct
+        else -> a.correctCount > b.correctCount
     }
 
     private fun isTied(a: GestureReplay.Score, b: GestureReplay.Score): Boolean =
-        kotlin.math.abs(a.balanced - b.balanced) <= 1e-6f && a.correct == b.correct
+        kotlin.math.abs(a.balanced - b.balanced) <= 1e-6f && a.correctCount == b.correctCount
 
     /**
      * How much each threshold matters, one at a time around the winner. A parameter whose column
@@ -243,7 +248,7 @@ class GestureBankReplayTest {
             }
             println("  %-20s %s".format(name, cells))
         }
-        row("flickDistanceRatio", steps(0.25f, 0.85f, 0.1f)) { best.copy(flickDistanceRatio = it) }
+        row("flickDistanceRatio", steps(0.10f, 0.85f, 0.1f)) { best.copy(flickDistanceRatio = it) }
         row("verticalDominance", steps(0.75f, 3.0f, 0.25f)) { best.copy(verticalDominance = it) }
         row("glideDistanceRatio", steps(0.8f, 2.6f, 0.3f)) { best.copy(glideDistanceRatio = it) }
         row("flickToGlideRatio", steps(1.2f, 4.2f, 0.5f)) { best.copy(flickToGlideRatio = it) }
@@ -288,11 +293,14 @@ class GestureBankReplayTest {
             .format(c.flickDistanceRatio, c.verticalDominance, c.glideDistanceRatio, c.flickToGlideRatio)
 
     private fun describe(s: GestureReplay.Score) =
-        "symbol %d/%d (%.0f%%)   word %d/%d (%.0f%%)   balanced %.1f%%".format(
-            s.symbolCorrect, s.symbolTotal, s.symbolRecall * 100,
-            s.wordCorrect, s.wordTotal, s.wordRecall * 100,
-            s.balanced * 100,
-        )
+        s.labels.joinToString("   ") { intent ->
+            "%s %d/%d (%.0f%%)".format(
+                intent.name.lowercase(),
+                s.correct[intent] ?: 0,
+                s.total[intent] ?: 0,
+                s.recall(intent) * 100,
+            )
+        } + "   balanced %.1f%%".format(s.balanced * 100)
 
     private fun steps(from: Float, to: Float, step: Float): List<Float> =
         generateSequence(from) { it + step }

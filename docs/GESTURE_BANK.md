@@ -53,6 +53,18 @@ half of telling a symbol from a word is knowing what an uncontested flick looks 
 `GestureCaptureTest` asserts both conditions against the catalogue, so a plausible-looking but
 harmless word cannot drift back in.
 
+### Why plain taps are drilled too
+
+The third label, `LETTER`, is not a distraction from the symbol-versus-word question — it is the
+other side of it. **The flick threshold trades off against taps, not against glides.** A bank with
+no taps in it gives the sweep no reason at all not to drive that threshold to zero, because every
+sample it can see is improved by doing so.
+
+The first collected session had exactly this hole, and the sweep duly recommended more than
+halving the threshold — down to 12 pixels, below Android's own touch slop — on the strength of
+evidence that contained not one ordinary keypress. Every key that gets flick drills now gets tap
+drills on that same key, in the same minute of the same hand, and a test enforces it.
+
 ## Collecting
 
 ```
@@ -132,16 +144,17 @@ It prints:
   must reproduce the verdict the phone reached; if they do not, the harness has drifted from the
   keyboard and every other number in the report is fiction. This is the one thing the test
   asserts, and it asserts it *after* printing, so a drift can be read rather than merely failing.
-- **the current thresholds' score**, as symbol recall, word recall and the mean of the two.
-  Balanced rather than plain accuracy: a drill session is never perfectly balanced, and plain
-  accuracy rewards a heuristic that simply favours whichever label is commoner. Both mistakes
-  have to cost the same, because neither is acceptable.
-- **the best of ~17,000 threshold sets**, and how many tie with it. The winner reported is the
+- **the current thresholds' score**, as a recall per label and the mean of them.
+  Balanced rather than plain accuracy: a drill session is never evenly split, and plain accuracy
+  rewards a heuristic that simply favours whichever label is commoner. Every kind of mistake has
+  to cost the same, because none of them is acceptable.
+- **the best of ~21,000 threshold sets**, and how many tie with it. The winner reported is the
   *middle* of the tying region, not the first point in it — a threshold on the edge of a plateau
   is one unusual swipe from being wrong.
 - **room on each axis**, and a one-at-a-time sensitivity table. A parameter whose row is flat is
   not doing any work, and should be left where it is rather than moved to whatever the sweep
-  happened to pick.
+  happened to pick. If a plateau runs to the edge of a grid, the grid was the constraint and not
+  the data — widen it and re-run before believing the number.
 - **the gestures still misread**, which is the next thing to think about.
 
 Then move the numbers in `GestureConfig` and re-run. The sweep proposes; it does not decide,

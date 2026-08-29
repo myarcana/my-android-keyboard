@@ -66,11 +66,15 @@ features: a feature is a guess about what matters, and the whole premise is that
 The bank is the durable part -- thresholds will be replaced, and the recordings will still score
 whatever replaces them.
 
-Two details that keep it honest. Drills alternate symbol and word within a key, because eight
-flicks in a row are one sample of a rhythm rather than eight samples of a flick. And the sweep
-reports the *middle* of the tying region rather than the first point in it -- hundreds of
+Three details keep it honest. Drills alternate symbol, word and plain tap within a key, because
+eight flicks in a row are one sample of a rhythm rather than eight samples of a flick. The sweep
+reports the *middle* of the tying region rather than the first point in it -- thousands of
 threshold sets score identically on any real bank, and one on the edge of that region is a single
-unusual swipe from being wrong.
+unusual swipe from being wrong. And plain taps are drilled at all, which is the one that was
+missed first time round: **the flick threshold trades off against taps, not against glides**, so a
+bank without them lets the sweep drive that threshold to zero unopposed. It did exactly that --
+recommending 12 pixels, under Android's own touch slop -- on 48 samples containing no ordinary
+keypress at all.
 
 ### Where a row ends can only be learned by watching it wrap
 
