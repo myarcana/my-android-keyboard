@@ -120,6 +120,16 @@ class KeyboardService : InputMethodService() {
     private var editorRight = Float.NaN
 
     /**
+     * Where rows actually wrap, learned by watching one wrap happen.
+     *
+     * editorBoundsInfo is not published by every editor -- the test pad reports none at all --
+     * and even when it is, rows wrap at a word boundary well short of the editor's edge. Traced
+     * on device the caret wrapped at x=931 while the editor was 1080 wide, so an edge-based
+     * guess never fires and the caret walks off the row every time.
+     */
+    private var rowRightEdge = Float.NaN
+
+    /**
      * While extending a selection, the finger's travel is banked here until it amounts to a
      * whole character or line. See [extendSelection] for why this is not the closed loop that
      * plain cursor movement uses.
@@ -534,12 +544,24 @@ class KeyboardService : InputMethodService() {
                 "insH=${info.insertionMarkerHorizontal} insT=${info.insertionMarkerTop} " +
                 "markerY=$markerCenterY",
         )
+        val point = caretPoint(info) ?: return
+
+        // A rightward step that landed on a lower row wrapped: wherever the caret was before it
+        // is where this text wraps. Remember it, so no further step tries to cross.
+        if (pendingHorizontal > 0 && pendingVertical == 0 &&
+            !caretX.isNaN() && !caretTop.isNaN() && point[1] > caretTop + 1f
+        ) {
+            rowRightEdge = caretX
+            trace("LEARN rowRightEdge=$rowRightEdge")
+        }
+
         trace(
             "CARET sel=[${info.selectionStart},${info.selectionEnd}] " +
-                "x=${info.insertionMarkerHorizontal} top=${info.insertionMarkerTop} " +
-                "markX=$markerX markY=$markerCenterY editorR=$editorRight",
+                "screenX=${point[0]} screenTop=${point[1]} " +
+                "markX=$markerX markY=$markerCenterY " +
+                "lh=$lineHeight cw=$charWidth editorL=$editorLeft editorR=$editorRight " +
+                "pendH=$pendingHorizontal pendV=$pendingVertical",
         )
-        val point = caretPoint(info) ?: return
         val previousX = caretX
         val previousTop = caretTop
         if (info.selectionStart == info.selectionEnd) caretOffset = info.selectionStart
@@ -693,7 +715,12 @@ class KeyboardService : InputMethodService() {
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
-        if (lines != 0) trace("VMOVE lines=$lines vStuck=$verticalStuckDir")
+        if (lines != 0) {
+            trace(
+                "VWANT lines=$lines vStuck=$verticalStuckDir " +
+                    "edgeScroll=${edgeScrollDirection()} scrollPinned=$scrollPinned",
+            )
+        }
         // While parked past an edge the repeating scroll owns vertical movement; an
         // error-driven step here would race it and overshoot.
         val stuckThisWay = verticalStuckDir != 0 && (lines > 0) == (verticalStuckDir > 0)
@@ -743,14 +770,20 @@ class KeyboardService : InputMethodService() {
         val step = if (chars > 0) 1 else -1
         repeat(abs(chars)) {
             // Never cross a line break sideways: up and down is what changes line.
-            if (atLineEdge(forward = step > 0)) return
+            if (atLineEdge(forward = step > 0)) {
+                trace("HBLOCK lineEdge dir=$step")
+                return
+            }
             // Nor a soft wrap, which has no character to detect. A wrapped row by definition
             // reaches the editor's edge, so a caret within a character of it is at the end of
             // its row; stepping past would drop the caret to the far left of the next row and
             // flip the vertical and horizontal errors at once, which is what made the caret
             // thrash. This is deliberately stateless -- a latch released on the next vertical
             // move and crossed straight back over.
-            if (atRowEdge(step > 0)) return
+            if (atRowEdge(step > 0)) {
+                trace("HBLOCK rowEdge dir=$step caretX=$caretX editorR=$editorRight")
+                return
+            }
             sendArrow(
                 if (step > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                 meta,
@@ -768,12 +801,10 @@ class KeyboardService : InputMethodService() {
     /** True when the caret sits within a character of the editor's left or right edge. */
     private fun atRowEdge(forward: Boolean): Boolean {
         if (caretX.isNaN()) return false
-        val margin = effectiveCharWidth() * 1.2f
-        return if (forward) {
-            !editorRight.isNaN() && caretX + margin >= editorRight
-        } else {
-            caretX - margin <= editorLeft
-        }
+        val margin = effectiveCharWidth()
+        if (!forward) return caretX - margin <= editorLeft
+        val right = if (!rowRightEdge.isNaN()) rowRightEdge else editorRight
+        return !right.isNaN() && caretX + margin >= right
     }
 
     private fun effectiveCharWidth(): Float =

@@ -39,6 +39,18 @@ Clamping instead — refusing to go past a line's bounds, refusing to let the ma
 the caret cannot follow, refusing a step that would leave the visual row — has nothing to get
 stuck or released at the wrong moment.
 
+### Where a row ends can only be learned by watching it wrap
+
+Nothing tells you where a soft wrap falls. `editorBoundsInfo` is not published by every editor,
+and even when it is, it gives the editor's edge -- rows wrap at a word boundary well short of
+it. Traced on device, the caret wrapped at x=931 inside an editor 1080 wide, so every
+edge-based guess was 150px too late and never fired once.
+
+The wrap teaches it instead: a rightward step that lands on a lower row means the previous
+position was the row's end. Remembering that one number is enough to refuse every later
+crossing. Measured values on the test pad are 832 and 856 -- word-dependent, as expected, and
+nowhere near the editor's edge.
+
 ### Never act on a stale reading more than once
 
 Every arrow in a burst is computed from a single reading of the caret's position, so a long
