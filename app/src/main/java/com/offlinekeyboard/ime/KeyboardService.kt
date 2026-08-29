@@ -73,6 +73,8 @@ class KeyboardService : InputMethodService() {
     /** Arrow keys sent but not yet reflected in a CursorAnchorInfo update. */
     private var pendingHorizontal = 0
     private var pendingVertical = 0
+    /** How long we have waited for that reflection, so an impossible move cannot wedge us. */
+    private var chaseWaitTicks = 0
     /** The caret cannot go further vertically -- the end of the text -- so stop trying. */
     private var verticalStuck = false
 
@@ -298,9 +300,12 @@ class KeyboardService : InputMethodService() {
             // Steer on the pan as well as on cursor updates: CURSOR_UPDATE_MONITOR only fires
             // when the cursor actually moves, so waiting for one would deadlock -- no movement,
             // no update, no movement.
-            // Steering in the same tick as a line change would act on stale positions and
-            // undo the arrow key, which is why selections could not cross a paragraph break.
-            if (!extendSelection(dy) && !selectionAwaitingLine) steerSelection()
+            //
+            // steerSelection must be reached even while a line change is outstanding, because
+            // that is where the wait is timed out. Gating it here meant an arrow that moved
+            // nothing -- at the top or bottom of the text -- left the latch set forever, and
+            // the selection stopped responding entirely.
+            if (!extendSelection(dy)) steerSelection()
         } else {
             chaseCaret()
         }
@@ -510,7 +515,19 @@ class KeyboardService : InputMethodService() {
         // Selections are steered by steerSelection, which stores them reversed so the reported
         // marker follows the dragged end rather than the fixed one.
         if (extendingSelection) return
-        if (pendingHorizontal != 0 || pendingVertical != 0) return // await the last round's result
+        // Await the previous round's result -- but not forever. An arrow at the very top or
+        // bottom of the text moves nothing, so no cursor update is ever delivered, and waiting
+        // unconditionally wedges the chase permanently: the caret simply stops following the
+        // marker from then on.
+        if (pendingHorizontal != 0 || pendingVertical != 0) {
+            if (chaseWaitTicks < 3) {
+                chaseWaitTicks++
+                return
+            }
+            pendingHorizontal = 0
+            pendingVertical = 0
+        }
+        chaseWaitTicks = 0
         val meta = 0
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
