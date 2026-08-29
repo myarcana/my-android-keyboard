@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Subtypes are the languages shown in the system keyboard switcher and cycled by the globe key.
+  Traditional Chinese gets two, because Taiwan's standard input is Zhuyin but Pinyin is also
+  wanted: the layout differs between them even though both produce Traditional characters.
+-->
+<input-method xmlns:android="http://schemas.android.com/apk/res/android"
+    android:supportsSwitchingToNextInputMethod="true">
+
+    <subtype
+        android:label="@string/subtype_en"
+        android:imeSubtypeLocale="en_US"
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeExtraValue="layout=qwerty"
+        android:isAsciiCapable="true" />
+
+    <subtype
+        android:label="@string/subtype_zh_tw_zhuyin"
+        android:imeSubtypeLocale="zh_TW"
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeExtraValue="layout=zhuyin,script=traditional" />
+
+    <subtype
+        android:label="@string/subtype_zh_tw_pinyin"
+        android:imeSubtypeLocale="zh_TW"
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeExtraValue="layout=qwerty,script=traditional" />
+
+    <subtype
+        android:label="@string/subtype_zh_cn"
+        android:imeSubtypeLocale="zh_CN"
+        android:imeSubtypeMode="keyboard"
+        android:imeSubtypeExtraValue="layout=qwerty,script=simplified" />
+</input-method>

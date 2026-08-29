@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!--
+      Deliberately NO permissions are declared here.
+
+      In particular there is no android.permission.INTERNET: this keyboard must be structurally
+      incapable of sending anything that is typed or spoken anywhere. RECORD_AUDIO will be added
+      in Phase 4 for on-device dictation, and nothing else is expected to be needed.
+      The checkHasNoInternet Gradle task enforces this at build time.
+    -->
+
+    <application
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true">
+
+        <service
+            android:name=".KeyboardService"
+            android:exported="true"
+            android:label="@string/ime_name"
+            android:permission="android.permission.BIND_INPUT_METHOD">
+            <intent-filter>
+                <action android:name="android.view.InputMethod" />
+            </intent-filter>
+            <meta-data
+                android:name="android.view.im"
+                android:resource="@xml/method" />
+        </service>
+    </application>
+</manifest>

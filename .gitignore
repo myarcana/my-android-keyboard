@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+*.iml
+.idea/
+.DS_Store
+.cxx/
+
+# Vendored engine sources and ASR/IME models are large and fetched by tools/, not committed.
+third_party/*/
+models/
