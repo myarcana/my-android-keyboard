@@ -20,13 +20,18 @@ import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.gesture.PathPoint
 import com.offlinekeyboard.ime.gesture.TouchFsm
 import com.offlinekeyboard.ime.layout.IosLayouts
-import com.offlinekeyboard.ime.layout.IosMetrics
+import com.offlinekeyboard.ime.layout.Metrics
 import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 
-/** iOS keyboard colours, light and dark. */
+/**
+ * Palette sampled pixel-by-pixel from Gboard on the target device, so the keyboard sits in the
+ * same visual language as the rest of the system rather than approximating it by eye.
+ *
+ * The dark values are estimates -- resample them against Gboard in dark mode when tuning.
+ */
 private data class Theme(
     val background: Int,
     val key: Int,
@@ -40,26 +45,26 @@ private data class Theme(
 ) {
     companion object {
         val LIGHT = Theme(
-            background = Color.parseColor("#D1D4DA"),
+            background = Color.parseColor("#ECEDFB"),
             key = Color.WHITE,
-            specialKey = Color.parseColor("#ADB3BC"),
-            keyPressed = Color.parseColor("#BFC4CC"),
-            text = Color.BLACK,
-            secondaryText = Color.parseColor("#8E8E93"),
+            specialKey = Color.parseColor("#E2DFFF"),
+            keyPressed = Color.parseColor("#CFCBEE"),
+            text = Color.parseColor("#181B25"),
+            secondaryText = Color.parseColor("#6B6B7B"),
             popup = Color.WHITE,
-            popupSelected = Color.parseColor("#1A86FF"),
-            glideTrail = Color.parseColor("#801A86FF"),
+            popupSelected = Color.parseColor("#6750A4"),
+            glideTrail = Color.parseColor("#996750A4"),
         )
         val DARK = Theme(
-            background = Color.parseColor("#2C2C2E"),
-            key = Color.parseColor("#6C6C70"),
-            specialKey = Color.parseColor("#4A4A4E"),
-            keyPressed = Color.parseColor("#8A8A8E"),
-            text = Color.WHITE,
-            secondaryText = Color.parseColor("#B0B0B4"),
-            popup = Color.parseColor("#6C6C70"),
-            popupSelected = Color.parseColor("#1A86FF"),
-            glideTrail = Color.parseColor("#801A86FF"),
+            background = Color.parseColor("#1B1B1F"),
+            key = Color.parseColor("#303034"),
+            specialKey = Color.parseColor("#45464F"),
+            keyPressed = Color.parseColor("#5A5A63"),
+            text = Color.parseColor("#E5E1E6"),
+            secondaryText = Color.parseColor("#A0A0AC"),
+            popup = Color.parseColor("#303034"),
+            popupSelected = Color.parseColor("#6750A4"),
+            glideTrail = Color.parseColor("#99B0A0E8"),
         )
     }
 }
@@ -70,6 +75,14 @@ private data class Theme(
  * One [TouchFsm] per pointer, so two-thumb typing works: each finger runs its own independent
  * tap/flick/glide/trackpad state machine.
  */
+private val ICON_KEYS = setOf(
+    KeyType.SHIFT,
+    KeyType.BACKSPACE,
+    KeyType.GLOBE,
+    KeyType.MIC,
+    KeyType.RETURN,
+)
+
 class KeyboardView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -118,6 +131,11 @@ class KeyboardView @JvmOverloads constructor(
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+    private val icon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
     private val trail = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -143,8 +161,8 @@ class KeyboardView @JvmOverloads constructor(
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         val w = MeasureSpec.getSize(widthSpec)
-        val h = IosMetrics.HEIGHT_IN_KEY_WIDTHS *
-            (w / IosMetrics.REFERENCE_WIDTH * IosMetrics.KEY_WIDTH)
+        val h = Metrics.HEIGHT_IN_KEY_WIDTHS *
+            (w / Metrics.REFERENCE_WIDTH * Metrics.KEY_WIDTH)
         // Keys occupy the top; the inset is empty space reserved below them, which keeps
         // drawing and touch coordinates identical (both measured from the top).
         setMeasuredDimension(w, h.toInt() + navBarInset)
@@ -166,7 +184,7 @@ class KeyboardView @JvmOverloads constructor(
             return
         }
 
-        val radius = 5f * (width / IosMetrics.REFERENCE_WIDTH)
+        val radius = g.cornerRadius
         g.keyRects.forEach { rect -> drawKey(canvas, rect, radius, t, g) }
 
         if (glidePath.size > 1) drawGlideTrail(canvas, g, t)
@@ -189,37 +207,34 @@ class KeyboardView @JvmOverloads constructor(
             fill,
         )
 
+        // iPadOS flick secondary, small and tucked above the primary glyph
         rect.key.secondary?.let { secondary ->
             label.color = t.secondaryText
-            label.textSize = g.keyUnit * 0.34f
-            canvas.drawText(secondary, rect.centerX, rect.top + g.keyHeight * 0.30f, label)
+            label.textSize = g.keyUnit * 0.30f
+            canvas.drawText(secondary, rect.centerX, rect.top + g.keyHeight * 0.28f, label)
         }
 
-        val text = primaryLabel(rect)
-        if (text.isNotEmpty()) {
-            label.color = t.text
-            label.textSize = if (rect.key.type == KeyType.CHARACTER) {
-                g.keyUnit * 0.66f
-            } else {
-                g.keyUnit * 0.42f
-            }
-            val baseline = if (rect.key.secondary != null) {
-                rect.centerY + g.keyHeight * 0.26f
-            } else {
-                rect.centerY - (label.descent() + label.ascent()) / 2f
-            }
-            canvas.drawText(text, rect.centerX, baseline, label)
+        if (rect.key.type in ICON_KEYS) {
+            icon.color = t.text
+            icon.strokeWidth = g.keyUnit * 0.055f
+            KeyIcons.draw(canvas, rect.key.type, rect.centerX, rect.centerY, g.keyUnit * 0.46f, icon)
+            return
         }
-    }
 
-    private fun primaryLabel(rect: KeyRect): String = when (rect.key.type) {
-        KeyType.SHIFT -> "⇧"
-        KeyType.BACKSPACE -> "⌫"
-        KeyType.GLOBE -> "🌐"
-        KeyType.MIC -> "🎤"
-        KeyType.RETURN -> "return"
-        KeyType.SPACE -> ""
-        else -> rect.key.primary
+        val text = rect.key.primary
+        if (text.isBlank()) return
+        label.color = t.text
+        label.textSize = if (rect.key.type == KeyType.CHARACTER) {
+            g.keyUnit * 0.62f
+        } else {
+            g.keyUnit * 0.42f
+        }
+        val baseline = if (rect.key.secondary != null) {
+            rect.centerY + g.keyHeight * 0.24f
+        } else {
+            rect.centerY - (label.descent() + label.ascent()) / 2f
+        }
+        canvas.drawText(text, rect.centerX, baseline, label)
     }
 
     private fun drawGlideTrail(canvas: Canvas, g: LayoutGeometry, t: Theme) {

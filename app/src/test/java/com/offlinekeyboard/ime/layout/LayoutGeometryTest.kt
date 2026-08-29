@@ -9,7 +9,7 @@ import kotlin.math.abs
 
 class LayoutGeometryTest {
 
-    private fun geometry(width: Float = IosMetrics.REFERENCE_WIDTH) =
+    private fun geometry(width: Float = Metrics.REFERENCE_WIDTH) =
         LayoutGeometry(IosLayouts.QWERTY_LOWER, width)
 
     @Test
@@ -23,7 +23,7 @@ class LayoutGeometryTest {
         val g = geometry()
         val row = g.keyRects.take(10)
         assertEquals(g.margin, row.first().left, 0.01f)
-        assertEquals(IosMetrics.REFERENCE_WIDTH - g.margin, row.last().right, 0.01f)
+        assertEquals(Metrics.REFERENCE_WIDTH - g.margin, row.last().right, 0.01f)
     }
 
     @Test
@@ -33,19 +33,19 @@ class LayoutGeometryTest {
         val homeRow = g.keyRects.drop(10).take(9)
         assertTrue("home row starts inside the top row", homeRow.first().left > topRow.first().left)
         val leftInset = homeRow.first().left - g.margin
-        val rightInset = (IosMetrics.REFERENCE_WIDTH - g.margin) - homeRow.last().right
+        val rightInset = (Metrics.REFERENCE_WIDTH - g.margin) - homeRow.last().right
         assertEquals("insets must be symmetric", leftInset, rightInset, 0.01f)
     }
 
     @Test
-    fun `key aspect ratio matches iOS at any width`() {
+    fun `key aspect ratio is preserved at any width`() {
         for (width in listOf(320f, 360f, 390f, 412f, 480f)) {
             val g = geometry(width)
             val q = g.keyRects.first()
             val aspect = q.height / q.width
             assertEquals(
                 "aspect must hold at width=$width",
-                IosMetrics.KEY_ASPECT.toDouble(),
+                Metrics.KEY_ASPECT.toDouble(),
                 aspect.toDouble(),
                 0.001,
             )
@@ -61,10 +61,17 @@ class LayoutGeometryTest {
     }
 
     @Test
-    fun `reference keyboard is the familiar iOS height`() {
+    fun `reference keyboard matches the measured Gboard height`() {
         val g = geometry()
-        // 4 rows at 54pt pitch plus outer padding.
-        assertTrue("height was ${g.heightPx}", abs(g.heightPx - 228f) < 1f)
+        // 50 strip + 4x40 keys + 3x10.33 row gaps + 7.7 bottom = 248.7dp
+        assertTrue("height was ${g.heightPx}", abs(g.heightPx - 248.7f) < 1f)
+    }
+
+    @Test
+    fun `keys start below the suggestion strip`() {
+        val g = geometry()
+        assertTrue("strip must reserve space", g.stripHeight > 0f)
+        assertEquals(g.stripHeight, g.keyRects.first().top, 0.01f)
     }
 
     @Test

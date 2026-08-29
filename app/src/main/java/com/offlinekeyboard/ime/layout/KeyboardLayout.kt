@@ -24,31 +24,39 @@ data class Row(val keys: List<Key>)
 data class Layout(val id: String, val rows: List<Row>)
 
 /**
- * iOS portrait keyboard proportions, in points as measured on a 390pt-wide iPhone.
+ * Keyboard proportions, in dp, measured off Gboard on the target device (1080px / 360dp wide)
+ * by scanning screenshot pixel runs for key edges.
  *
- * Everything downstream is derived from these as ratios, so the layout keeps iOS's exact
- * proportions at any screen width rather than only matching on one device. The four rows at
- * 54pt pitch (42pt key + 12pt gap) reproduce the familiar 216pt iOS keyboard height.
+ * The *arrangement* of keys is iOS's (see [IosLayouts]); the sizing and spacing are Gboard's,
+ * which is what was asked for. Measured values, all divided by the device's 3x density:
+ *   key 92px wide, 120px tall; 14.9px gaps; 151px row pitch; 150px suggestion strip.
  *
- * These are the numbers to adjust when calibrating against a real iOS screenshot; nothing
- * else should hardcode sizes.
+ * Everything downstream derives from these as ratios of the keyboard width, so the proportions
+ * hold at any screen size rather than only matching this one phone. This is the only place
+ * sizes are declared -- adjust here when recalibrating.
  */
-object IosMetrics {
-    const val REFERENCE_WIDTH = 390f
-    const val SIDE_MARGIN = 3f
-    const val KEY_GAP = 6f
-    /** (390 - 2*3 - 9*6) / 10 */
-    const val KEY_WIDTH = 33f
-    const val KEY_HEIGHT = 42f
-    const val ROW_GAP = 12f
+object Metrics {
+    const val REFERENCE_WIDTH = 360f
+    const val SIDE_MARGIN = 4.33f
+    const val KEY_GAP = 4.96f
+    const val KEY_WIDTH = 30.67f
+    const val KEY_HEIGHT = 40f
+    const val ROW_GAP = 10.33f
+    /** Suggestion bar: emoji in English, candidates in Chinese. Never English word suggestions. */
+    const val STRIP_HEIGHT = 50f
+    const val BOTTOM_PADDING = 7.7f
+    const val CORNER_RADIUS = 8f
     const val ROW_COUNT = 4
 
-    /** Key aspect ratio; preserved at every width so the keys never look squashed. */
+    /** Key aspect ratio; preserved at every width so keys never look squashed. */
     const val KEY_ASPECT = KEY_HEIGHT / KEY_WIDTH
 
     /** Total keyboard height as a multiple of the width of one key unit. */
     const val HEIGHT_IN_KEY_WIDTHS =
-        (ROW_COUNT * KEY_HEIGHT + (ROW_COUNT - 1) * ROW_GAP + 2 * ROW_GAP) / KEY_WIDTH
+        (
+            STRIP_HEIGHT + ROW_COUNT * KEY_HEIGHT +
+                (ROW_COUNT - 1) * ROW_GAP + BOTTOM_PADDING
+            ) / KEY_WIDTH
 }
 
 /** A key placed in pixel space. */
@@ -74,13 +82,16 @@ data class KeyRect(
  */
 class LayoutGeometry(val layout: Layout, val widthPx: Float) {
 
-    private val scale = widthPx / IosMetrics.REFERENCE_WIDTH
-    val margin = IosMetrics.SIDE_MARGIN * scale
-    val gap = IosMetrics.KEY_GAP * scale
-    val keyUnit = IosMetrics.KEY_WIDTH * scale
-    val keyHeight = IosMetrics.KEY_HEIGHT * scale
-    val rowGap = IosMetrics.ROW_GAP * scale
-    val heightPx = IosMetrics.HEIGHT_IN_KEY_WIDTHS * keyUnit
+    private val scale = widthPx / Metrics.REFERENCE_WIDTH
+    val margin = Metrics.SIDE_MARGIN * scale
+    val gap = Metrics.KEY_GAP * scale
+    val keyUnit = Metrics.KEY_WIDTH * scale
+    val keyHeight = Metrics.KEY_HEIGHT * scale
+    val rowGap = Metrics.ROW_GAP * scale
+    val cornerRadius = Metrics.CORNER_RADIUS * scale
+    /** Reserved above the keys for the suggestion bar. */
+    val stripHeight = Metrics.STRIP_HEIGHT * scale
+    val heightPx = Metrics.HEIGHT_IN_KEY_WIDTHS * keyUnit
 
     val keyRects: List<KeyRect> = buildList {
         val usable = widthPx - 2 * margin
@@ -89,7 +100,7 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
                 row.keys.sumOf { it.widthUnits.toDouble() }.toFloat() * keyUnit +
                     (row.keys.size - 1) * gap
             var x = margin + (usable - contentWidth) / 2f
-            val top = rowGap + rowIndex * (keyHeight + rowGap)
+            val top = stripHeight + rowIndex * (keyHeight + rowGap)
             row.keys.forEach { key ->
                 val w = key.widthUnits * keyUnit
                 add(KeyRect(key, x, top, x + w, top + keyHeight))

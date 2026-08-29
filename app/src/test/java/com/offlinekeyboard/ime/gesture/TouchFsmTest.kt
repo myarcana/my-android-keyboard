@@ -1,7 +1,7 @@
 package com.offlinekeyboard.ime.gesture
 
 import com.offlinekeyboard.ime.layout.IosLayouts
-import com.offlinekeyboard.ime.layout.IosMetrics
+import com.offlinekeyboard.ime.layout.Metrics
 import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 import org.junit.Assert.assertEquals
@@ -12,7 +12,7 @@ import org.junit.Test
 
 class TouchFsmTest {
 
-    private val geometry = LayoutGeometry(IosLayouts.QWERTY_LOWER, IosMetrics.REFERENCE_WIDTH)
+    private val geometry = LayoutGeometry(IosLayouts.QWERTY_LOWER, Metrics.REFERENCE_WIDTH)
     private val config = GestureConfig()
 
     private fun fsm() = TouchFsm(geometry, config)
@@ -233,7 +233,7 @@ class TouchFsmTest {
 
         val stepX = config.trackpadStepXRatio * geometry.keyUnit
         val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX + stepX, space.centerY + stepY, 600)
+        val out = f.onMove(space.centerX + stepX * 1.2f, space.centerY + stepY * 1.2f, 600)
         val moves = out.filterIsInstance<GestureOutput.CursorMove>()
         assertTrue("expected a horizontal step", moves.any { it.dx == 1 })
         assertTrue("expected a vertical step", moves.any { it.dy == 1 })
@@ -315,7 +315,7 @@ class TouchFsmTest {
 
         f.onSecondaryTap()
 
-        val afterSelect = f.onMove(space.centerX + stepX * 2f, space.centerY, 700)
+        val afterSelect = f.onMove(space.centerX + stepX * 2.4f, space.centerY, 700)
             .filterIsInstance<GestureOutput.CursorMove>()
         assertTrue("expected steps after selecting", afterSelect.isNotEmpty())
         assertTrue("steps must extend the selection", afterSelect.all { it.extend })
@@ -326,7 +326,7 @@ class TouchFsmTest {
         val (f, space) = trackpadFsm()
         f.onSecondaryTap()
         val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX, space.centerY + stepY, 700)
+        val out = f.onMove(space.centerX, space.centerY + stepY * 1.2f, 700)
             .filterIsInstance<GestureOutput.CursorMove>()
         assertEquals(1, out.size)
         assertEquals(1, out.single().dy)

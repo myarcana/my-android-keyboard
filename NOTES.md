@@ -96,6 +96,41 @@ translation and no touch offset to get wrong.
 
 ---
 
+## Measuring a reference keyboard instead of eyeballing it
+
+The palette and geometry in `Metrics` and `KeyboardView`'s `Theme` were measured off Gboard on
+the device, not guessed. Screenshot it, then read pixels with ImageMagick.
+
+Sample a colour at a point:
+
+```sh
+magick gboard.png -format "%[pixel:p{57,1682}]" info:
+```
+
+Find key edges by scanning a row (or column) and printing where the colour changes — this
+gives exact key widths, gaps and margins:
+
+```sh
+# horizontal: key edges across row 1
+magick gboard.png -crop 1080x1+0+1682 +repage txt:- \
+  | awk -F'[,:]' 'NR>1{print $1, $3}' \
+  | awk '{if($2!=prev){print $1": "$2; prev=$2}}'
+
+# vertical: row tops and bottoms, at an x inside keys on every row
+magick gboard.png -crop 1x820+575+1440 +repage txt:- \
+  | awk -F'[,:]' 'NR>1{print $2, $3}' \
+  | awk '{v=$2; if(v!=prev){print (1440+$1)": "v; prev=v}}'
+```
+
+Pick the scan column carefully: near a key's rounded corner the run is shorter than the key,
+and the inset home row is background at the far left, both of which give wrong answers. Use a
+column that lands inside a key on all four rows (x=575 works on this device).
+
+The same technique verifies our own output — screenshot both keyboards and compare the edge
+lists directly.
+
+---
+
 ## Toolchain
 
 Version constraints are documented in `README.md` and are not arbitrary — AGP 9 (not 8),
