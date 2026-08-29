@@ -343,6 +343,24 @@ class TouchFsmTest {
     }
 
     @Test
+    fun `cancelling during selection still ends the trackpad`() {
+        val (f, _) = trackpadFsm()
+        f.onSecondaryTap()
+        val out = f.onCancel()
+        assertTrue(
+            "a held shift key would otherwise never be released",
+            out.has<GestureOutput.TrackpadEnded>(),
+        )
+        assertEquals(GestureState.IDLE, f.state)
+    }
+
+    @Test
+    fun `cancelling during plain trackpad also ends it`() {
+        val (f, _) = trackpadFsm()
+        assertTrue(f.onCancel().has<GestureOutput.TrackpadEnded>())
+    }
+
+    @Test
     fun `lifting off ends selection mode`() {
         val (f, space) = trackpadFsm()
         f.onSecondaryTap()

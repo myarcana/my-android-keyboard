@@ -16,6 +16,11 @@ import com.offlinekeyboard.ime.view.KeyboardView
  * Deliberately absent: autocorrect. A tapped key produces exactly that character, always.
  * Word decoding will exist only to turn a glide gesture into a word (Phase 2).
  */
+private const val TAG = "OfflineKeyboard"
+
+/** Logs every gesture output to logcat; the only way to observe multi-touch, which adb cannot drive. */
+private const val DEBUG_GESTURES = true
+
 class KeyboardService : InputMethodService() {
 
     private var keyboardView: KeyboardView? = null
@@ -24,6 +29,9 @@ class KeyboardService : InputMethodService() {
 
     private var shift = ShiftState.OFF
     private var lastShiftTapAt = 0L
+
+    /** True while a physical shift key is being held down to drag a selection. */
+    private var extendingSelection = false
 
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
@@ -50,12 +58,15 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun handleOutputs(outputs: List<GestureOutput>) {
+        if (DEBUG_GESTURES) outputs.forEach { android.util.Log.d(TAG, "gesture: $it") }
         outputs.forEach { out ->
             when (out) {
                 is GestureOutput.CommitPrimary -> commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
                 is GestureOutput.CommitAccent -> commit(out.text)
                 is GestureOutput.CursorMove -> moveCursor(out.dx, out.dy, out.extend)
+                GestureOutput.SelectionStarted -> beginSelection()
+                GestureOutput.TrackpadEnded -> endSelection()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
                 is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
                 else -> Unit
@@ -141,5 +152,36 @@ class KeyboardService : InputMethodService() {
         val now = SystemClock.uptimeMillis()
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, meta))
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, meta))
+    }
+
+    /**
+     * Press and hold a real shift key for as long as the selection gesture lasts.
+     *
+     * Setting META_SHIFT_ON on the arrow events is not enough on its own. TextView decides
+     * whether an arrow extends a selection in ArrowKeyMovementMethod.isSelecting(), which reads
+     * the *text buffer's* meta state via MetaKeyKeyListener -- and that is only ever set by
+     * genuine KEYCODE_SHIFT_LEFT key events passing through. A synthesised metaState on the
+     * arrow itself is ignored, so the caret just moved and nothing was ever selected.
+     */
+    private fun beginSelection() {
+        if (extendingSelection) return
+        extendingSelection = true
+        val ic = currentInputConnection ?: return
+        val now = SystemClock.uptimeMillis()
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0))
+    }
+
+    /** Always paired with [beginSelection], including when the gesture is cancelled. */
+    private fun endSelection() {
+        if (!extendingSelection) return
+        extendingSelection = false
+        val ic = currentInputConnection ?: return
+        val now = SystemClock.uptimeMillis()
+        ic.sendKeyEvent(
+            KeyEvent(
+                now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT, 0,
+                KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
+            ),
+        )
     }
 }

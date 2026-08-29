@@ -267,9 +267,13 @@ class TouchFsm(
 
     fun onCancel(): List<GestureOutput> {
         val wasGlide = state == GestureState.GLIDE
+        // Must still emit TrackpadEnded: the service holds a physical shift key down for the
+        // duration of a selection, and would otherwise never release it.
+        val wasTrackpad = state == GestureState.TRACKPAD || state == GestureState.SELECTING
         reset()
         return buildList {
             if (wasGlide) add(GestureOutput.FlickPreviewCleared)
+            if (wasTrackpad) add(GestureOutput.TrackpadEnded)
             add(GestureOutput.KeyHighlighted(null))
         }
     }

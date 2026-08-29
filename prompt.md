@@ -11,3 +11,4 @@ we want to make a custom keyboard for my android phone that has all of these fea
 - has 100% offline dictation for Taiwanese Chinese, mainland Chinese, and English
 - the "predictive text" bar only shows emoji or Chinese, not actual words
 - switching keyboard languages does not delete what was typed so far, e.g. switching from pinyin back to English should leave the latin letters that may have been typed, not delete them just because a character was never finalized
+- holding on backspace and swiping up should delete everything typed in the text field or line

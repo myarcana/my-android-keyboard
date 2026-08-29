@@ -28,6 +28,7 @@ fi
 
 # A screen that has timed out produces an all-black screenshot, which looks like a crash.
 $ADB shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+$ADB shell wm dismiss-keyguard >/dev/null 2>&1 || true   # this phone has no PIN
 
 $ADB install -r app/build/outputs/apk/debug/app-debug.apk >/dev/null
 $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
