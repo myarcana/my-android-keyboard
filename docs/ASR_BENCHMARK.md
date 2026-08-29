@@ -146,6 +146,51 @@ Two consequences:
 
 The non-Whisper candidates use different code paths and are unaffected. Their numbers stand.
 
+## Result, 30 August 2026
+
+```
+model                       en     zh-TW     zh-CN     mixed       all    trad
+------------------------------------------------------------------------------
+apple                     5.1%      4.3%      7.8%     58.9%     18.4%     79%
+sensevoice                4.0%      3.2%      1.9%      7.9%      4.5%      0%
+qwen3-asr-0.6b            0.0%      2.1%      1.9%     20.5%      5.6%      0%
+breeze-asr-25 *           1.8%      7.4%     12.6%      0.7%      4.2%    100%
+firered2-ctc             13.0%      5.3%      1.9%     24.5%     12.8%      0%
+moonshine-base-en         5.8%         -         -         -         -      0%
+dolphin-small           100.0%     12.8%      2.9%     66.9%     62.8%     21%
+```
+
+**Ship SenseVoice, for every mode.** 239 MB, the smallest candidate, and it beats Apple in all
+four columns — 4.5% against 18.4% overall.
+
+Three things this measured that no leaderboard would have:
+
+**Code-switching is the whole game, and it is where Apple collapses.** Every model handles clean
+Mandarin; four of them sit at 1.9–3.2% on zh-CN. Mixed zh/en separates them completely, and
+Apple scores 58.9% — `這個 bug 我已經 fix 好了` came back as `这个包裹我已经好了你退下的`. Apple
+dictation makes you pick a language, and picking one breaks the sentences this keyboard exists
+to type. That single column is the case for building this at all.
+
+**Public Mandarin rankings invert here.** FireRedASR2 is 2026 SOTA on published Mandarin
+benchmarks and lands at 24.5% on code-switched speech; Qwen3-ASR at 20.5%. SenseVoice, a 2024
+model a third of their size, gets 7.9%.
+
+**The per-language routing in the plan is unnecessary.** It assumed a dedicated English model
+alongside a Chinese one. SenseVoice beats Moonshine at English (4.0% against 5.8%) while also
+doing Chinese, so the second model does not earn its 287 MB. One model, all three languages.
+
+Two alternatives worth remembering rather than adopting:
+
+- **Qwen3-ASR-0.6B** is word-perfect on English — 0.0%, differing from the prompts only in
+  punctuation — and best on Taiwanese Mandarin at 2.1%. It costs 996 MB and gives up
+  code-switching (20.5%). Worth revisiting only if English dictation becomes the dominant use.
+- **Breeze-ASR-25** is the best thing here on both English (1.8%) and code-switching (0.7%),
+  and the only model returning Traditional characters, and it scored that *through* the broken
+  Whisper path below. It is blocked on the runtime, not on merit.
+
+`trad` confirms the OpenCC `s2twp` step stays: SenseVoice returns Simplified for everything.
+Apple sits at 79%, so it does not reliably honour Traditional either.
+
 ## Deciding
 
 The bar is the `apple` row. Beat it in all four columns and the choice is made. The likely

@@ -18,6 +18,7 @@ Requires the venv described in docs/ASR_BENCHMARK.md.
 
 import argparse
 import pathlib
+import re
 import sys
 import time
 import unicodedata
@@ -209,6 +210,43 @@ def fold_numbers(text: str) -> str:
     return " ".join(SPOKEN_NUMBERS.get(word, word) for word in text.split())
 
 
+CJK_DIGITS = {"〇": 0, "零": 0, "一": 1, "二": 2, "兩": 2, "两": 2, "三": 3, "四": 4, "五": 5,
+              "六": 6, "七": 7, "八": 8, "九": 9}
+CJK_NUMBER_RUN = re.compile(f"[{''.join(CJK_DIGITS)}十]+")
+
+
+def _cjk_run_to_digits(run: str) -> str:
+    """一 -> 1, 十 -> 10, 十五 -> 15, 二十 -> 20, 二十五 -> 25. Two digits is plenty here."""
+    if "十" not in run:
+        return "".join(str(CJK_DIGITS[c]) for c in run)
+    tens, _, units = run.partition("十")
+    if any(c not in CJK_DIGITS for c in tens + units):
+        return run
+    value = (CJK_DIGITS[tens] if tens else 1) * 10 + (CJK_DIGITS[units] if units else 0)
+    return str(value)
+
+
+def fold_cjk_numbers(text: str) -> str:
+    """
+    Chinese numerals to digits, so 十點 and 10點 compare equal.
+
+    The same formatting problem as spoken English numbers, from the other direction: the prompt
+    says 三点 and Apple writes 3:00, Breeze writes 3 點 and SenseVoice writes 三点. All four heard
+    the same thing. Correctness of the conversion matters less than applying it identically to
+    both sides -- 一起 becoming 1起 is harmless as long as it happens to reference and hypothesis
+    alike, which is the only property being relied on.
+    """
+    return CJK_NUMBER_RUN.sub(lambda m: _cjk_run_to_digits(m.group()), text)
+
+
+# A whole hour written as a clock time. Stripping punctuation alone turns Apple's "3:00" into
+# "300" against the prompt's 三点, three characters of error for a time it heard correctly.
+# Other clock times already survive: "4:30" and "11:40" lose their colon and land on the same
+# digits the spoken forms fold to.
+# Not \b: between a CJK character and a digit there is no word boundary, so 下午3:00 misses.
+WHOLE_HOUR = re.compile(r"(?<!\d)(\d{1,2}):00(?!\d)")
+
+
 def normalise(text: str, fold_script: bool) -> str:
     """
     Comparable form. NFKC folds full-width Latin onto ASCII, which every Chinese model emits
@@ -220,8 +258,8 @@ def normalise(text: str, fold_script: bool) -> str:
     mainland-trained models below where they belong, so CER is measured with both sides folded
     to simplified and script correctness is reported as its own column.
     """
-    text = unicodedata.normalize("NFKC", text)
-    text = fold_numbers(strip_punctuation(text).lower())
+    text = WHOLE_HOUR.sub(r"\1", unicodedata.normalize("NFKC", text))
+    text = fold_cjk_numbers(fold_numbers(strip_punctuation(text).lower()))
     if fold_script and _to_simplified:
         text = _to_simplified(text)
     return " ".join(text.split())
@@ -304,6 +342,8 @@ def load_results(name: str) -> dict[str, str]:
         if not line.strip():
             continue
         parts = line.split("\t")
+        if parts[0] in ("id", "#"):
+            continue  # a header row, which a hand-written apple.tsv is likely to have
         out[parts[0]] = parts[1] if len(parts) > 1 else ""
     return out
 
@@ -396,6 +436,38 @@ def cmd_apple(args) -> int:
     return 0
 
 
+def suspect_recordings(prompts) -> dict[str, float]:
+    """
+    Prompts whose recording is wrong, judged by every model getting them long.
+
+    A model producing a transcript half again longer than the line is one model erring. Every
+    model doing it on the same prompt is not: the take contains a false start or a second read,
+    and the resulting error belongs to the recording rather than to anything being scored.
+
+    The `apple` row is excluded from the judgement and from the exclusion it drives. It is not a
+    transcript of these recordings -- it is Apple hearing the prompts spoken live, on a separate
+    occasion -- so it neither votes on whether a take is doubled nor gets penalised for one. That
+    asymmetry is exactly why a bad take has to come out of the table rather than stay in it: the
+    models would be carrying an error Apple never had the chance to make.
+    """
+    from_recordings = {
+        name: load_results(name)
+        for name in (path.stem for path in RESULTS.glob("*.tsv"))
+        if name != "apple"
+    }
+    suspect = {}
+    for prompt in prompts:
+        expected = max(1, len(normalise(prompt["text"], fold_script=True).replace(" ", "")))
+        ratios = sorted(
+            len(normalise(results[prompt["id"]], fold_script=True).replace(" ", "")) / expected
+            for results in from_recordings.values()
+            if prompt["id"] in results and results[prompt["id"]]
+        )
+        if len(ratios) >= 2 and ratios[len(ratios) // 2] > 1.5:
+            suspect[prompt["id"]] = ratios[len(ratios) // 2]
+    return suspect
+
+
 def cmd_score(_args) -> int:
     prompts = load_prompts()
     names = sorted(p.stem for p in RESULTS.glob("*.tsv")) if RESULTS.exists() else []
@@ -404,6 +476,9 @@ def cmd_score(_args) -> int:
         return 1
     if _to_simplified is None:
         print("note: opencc not installed, script folding is off\n", file=sys.stderr)
+
+    bad = suspect_recordings(prompts)
+    prompts = [p for p in prompts if p["id"] not in bad]
 
     groups = ["en", "zh-TW", "zh-CN", "mixed"]
     header = f"{'model':20}" + "".join(f"{g:>10}" for g in groups) + f"{'all':>10}{'trad':>8}"
@@ -442,35 +517,12 @@ def cmd_score(_args) -> int:
     print("trad = share of script-specific characters returned in Traditional.")
     if any(MODELS.get(n, {}).get("family") == "whisper" for n in names):
         print("\n* " + WHISPER_RUNTIME_CAVEAT.replace("\n", "\n  "))
-    warn_about_recordings(prompts)
+    if bad:
+        print("\nExcluded -- the recording is wrong, not the models. Re-record and run again:")
+        for pid, ratio in bad.items():
+            print(f"  {pid}  every model returned {ratio:.1f}x the expected length"
+                  f"     tools/asr_bench/record.sh {pid}")
     return 0
-
-
-def warn_about_recordings(prompts) -> None:
-    """
-    Flags a prompt that every model got long, which means the recording is wrong.
-
-    A model producing a transcript half again longer than the line is one model erring. Every
-    model doing it on the same prompt is not: the take contains a false start or a second read,
-    and the resulting error rate belongs to the recording rather than to anything being scored.
-    Without this the harness quietly blames the models for a re-take nobody noticed.
-    """
-    per_model = {name: load_results(name) for name in (p.stem for p in RESULTS.glob("*.tsv"))}
-    suspect = []
-    for prompt in prompts:
-        ratios = sorted(
-            len(normalise(results[prompt["id"]], fold_script=True).replace(" ", ""))
-            / max(1, len(normalise(prompt["text"], fold_script=True).replace(" ", "")))
-            for name, results in per_model.items()
-            if prompt["id"] in results and results[prompt["id"]]
-        )
-        if len(ratios) >= 2 and ratios[len(ratios) // 2] > 1.5:
-            suspect.append((prompt["id"], ratios[len(ratios) // 2]))
-
-    if suspect:
-        print("\nRecordings every model returned long -- re-record these, they are not model error:")
-        for pid, ratio in suspect:
-            print(f"  {pid}  {ratio:.1f}x the expected length     tools/asr_bench/record.sh {pid}")
 
 
 def main() -> int:
