@@ -145,9 +145,26 @@ Note that arrow keys will not work with a reversed selection: shift+arrow moves
 
 ### CURSOR_UPDATE_MONITOR only fires when the cursor actually moves
 
-Driving a control loop purely from `onUpdateCursorAnchorInfo` deadlocks: no movement means no
-update, which means no movement. Anything that steers the cursor must also run when the *input*
-changes -- for this keyboard, on every pan -- and use the last reported position.
+This bites in two separate ways, both of which cost real time here.
+
+**It deadlocks a control loop.** Driving one purely from `onUpdateCursorAnchorInfo` means no
+movement produces no update, which produces no movement. Anything steering the cursor must also
+run when the *input* changes -- for this keyboard, on every pan -- using the last reported
+position.
+
+**It never delivers a starting position.** Requesting `MONITOR` alone gives you nothing until
+something else moves the cursor, so a gesture that begins with no editing in between gets no
+seed and is silently inert. Always ask for both:
+
+```kotlin
+ic.requestCursorUpdates(
+    InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
+)
+```
+
+The symptom of getting this wrong is oddly specific and easy to misread: the feature works once,
+then needs the user to tap in the text before it will work again -- because the tap is what
+finally moves the cursor and triggers an update.
 
 ### Implicit broadcasts do not reach a backgrounded app
 

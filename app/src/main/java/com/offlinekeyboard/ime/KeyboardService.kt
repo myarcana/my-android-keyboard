@@ -250,8 +250,12 @@ class KeyboardService : InputMethodService() {
 
     private fun startTrackpad() {
         trackpadActive = true
+        // IMMEDIATE as well as MONITOR. MONITOR alone only delivers when the cursor *moves*,
+        // so a second trackpad gesture with no editing in between would never receive a seed
+        // position, leaving the marker unplaced and the whole gesture inert. That is why it
+        // previously took a tap in the text to "wake up" between drags.
         val ok = currentInputConnection?.requestCursorUpdates(
-            InputConnection.CURSOR_UPDATE_MONITOR,
+            InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
         )
         if (DEBUG_GESTURES) android.util.Log.d(TAG, "requestCursorUpdates -> $ok")
         markerX = Float.NaN
