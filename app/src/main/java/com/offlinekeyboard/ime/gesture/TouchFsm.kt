@@ -23,9 +23,11 @@ data class GestureConfig(
     val glideDistanceRatio: Float = 1.2f,
     /** Longer path length that promotes an in-progress flick into a glide. */
     val flickToGlideRatio: Float = 2.0f,
-    /** Travel per cursor step in trackpad mode. */
+    /** Travel per cursor step in trackpad mode. Vertical is deliberately the more sensitive
+     *  of the two: a line is a much longer journey than a character, so the same finger travel
+     *  should cover more of it. */
     val trackpadStepXRatio: Float = 0.5f,
-    val trackpadStepYRatio: Float = 0.9f,
+    val trackpadStepYRatio: Float = 0.45f,
 )
 
 sealed interface GestureOutput {
@@ -55,6 +57,13 @@ sealed interface GestureOutput {
     data class CursorMove(val dx: Int, val dy: Int, val extend: Boolean = false) : GestureOutput
     /** Selection began: the anchor is dropped wherever the caret currently sits. */
     data object SelectionStarted : GestureOutput
+
+    /**
+     * Sub-step position of the finger, as a signed fraction of one step in each axis.
+     * The caret can only sit between characters, but the finger is somewhere continuous in
+     * between; this is what drives the granular position indicator.
+     */
+    data class CursorProgress(val fractionX: Float, val fractionY: Float) : GestureOutput
     data object TrackpadEnded : GestureOutput
 
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
@@ -228,6 +237,10 @@ class TouchFsm(
             residualY -= step * trackpadStepY
             out += GestureOutput.CursorMove(0, step, extending)
         }
+        out += GestureOutput.CursorProgress(
+            residualX / trackpadStepX,
+            residualY / trackpadStepY,
+        )
         return out
     }
 
