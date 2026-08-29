@@ -1,5 +1,9 @@
 package com.offlinekeyboard.ime
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.inputmethodservice.InputMethodService
 import android.os.SystemClock
 import android.view.Gravity
@@ -8,6 +12,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.CursorAnchorInfo
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.widget.PopupWindow
 import com.offlinekeyboard.ime.view.CursorIndicatorView
@@ -27,8 +32,12 @@ import com.offlinekeyboard.ime.view.KeyboardView
  */
 private const val TAG = "OfflineKeyboard"
 
-/** Logs every gesture output to logcat; the only way to observe multi-touch, which adb cannot drive. */
-private const val DEBUG_GESTURES = true
+/**
+ * Debug tooling: logs every gesture output, and registers a broadcast receiver that stands in
+ * for the second finger of the selection gesture, which adb cannot send. Tied to the build type
+ * so the receiver -- which is necessarily exported -- never exists in a release build.
+ */
+private val DEBUG_GESTURES = BuildConfig.DEBUG
 
 class KeyboardService : InputMethodService() {
 
@@ -66,6 +75,69 @@ class KeyboardService : InputMethodService() {
     private var pendingVertical = 0
     /** The caret cannot go further vertically -- the end of the text -- so stop trying. */
     private var verticalStuck = false
+
+    /**
+     * While extending a selection, the finger's travel is banked here until it amounts to a
+     * whole character or line. See [extendSelection] for why this is not the closed loop that
+     * plain cursor movement uses.
+     */
+    private var selectionBankY = 0f
+
+    /** Caret offset in the text, tracked from CursorAnchorInfo while the caret is collapsed. */
+    private var caretOffset = -1
+
+    /** The selection's fixed end, and the end being dragged. */
+    private var selectionAnchor = -1
+    private var selectionMovingEnd = -1
+    private var selectionPrevMovingEnd = -1
+    /** Top of the line the moving end is on, to detect it wrapping onto another line. */
+    private var selectionLineTop = Float.NaN
+    private var selectionAppliedChars = 0
+    private var selectionPrevInsH = Float.NaN
+    /** Set when the moving end has run out of line; cleared when the finger comes back. */
+    private var selectionBlocked = false
+    /** Last reported selection spans, so steering can run on a pan as well as on an update. */
+    private var lastSelStart = -1
+    private var lastSelEnd = -1
+
+    /** Debug only: stands in for the second finger, which adb cannot send. */
+    private val debugSelectReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            android.util.Log.d(TAG, "debug broadcast: ${intent?.action}")
+            when (intent?.action) {
+                "com.offlinekeyboard.ime.DEBUG_REVSEL" -> {
+                    // Does a reversed selection make the app report the *moving* end?
+                    val a = intent.getIntExtra("a", 204)
+                    val b = intent.getIntExtra("b", 211)
+                    currentInputConnection?.requestCursorUpdates(
+                        InputConnection.CURSOR_UPDATE_MONITOR,
+                    )
+                    currentInputConnection?.setSelection(a, b)
+                    android.util.Log.d(TAG, "debug setSelection($a, $b)")
+                }
+                else -> keyboardView?.debugStartSelection()
+            }
+        }
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        if (DEBUG_GESTURES) {
+            registerReceiver(
+                debugSelectReceiver,
+                IntentFilter().apply {
+                    addAction("com.offlinekeyboard.ime.DEBUG_SELECT")
+                    addAction("com.offlinekeyboard.ime.DEBUG_REVSEL")
+                },
+                Context.RECEIVER_EXPORTED,
+            )
+        }
+    }
+
+    override fun onDestroy() {
+        if (DEBUG_GESTURES) runCatching { unregisterReceiver(debugSelectReceiver) }
+        super.onDestroy()
+    }
 
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
@@ -178,7 +250,10 @@ class KeyboardService : InputMethodService() {
 
     private fun startTrackpad() {
         trackpadActive = true
-        currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
+        val ok = currentInputConnection?.requestCursorUpdates(
+            InputConnection.CURSOR_UPDATE_MONITOR,
+        )
+        if (DEBUG_GESTURES) android.util.Log.d(TAG, "requestCursorUpdates -> $ok")
         markerX = Float.NaN
         markerCenterY = Float.NaN
         caretX = Float.NaN
@@ -205,13 +280,133 @@ class KeyboardService : InputMethodService() {
         markerCenterY = (markerCenterY + dy).coerceIn(0f, metrics.heightPixels.toFloat())
         verticalStuck = false
         updateIndicator()
-        chaseCaret()
+        if (extendingSelection) {
+            // Steer on the pan as well as on cursor updates: CURSOR_UPDATE_MONITOR only fires
+            // when the cursor actually moves, so waiting for one would deadlock -- no movement,
+            // no update, no movement.
+            extendSelection(dy)
+            steerSelection()
+        } else {
+            chaseCaret()
+        }
+    }
+
+    /**
+     * Vertical half of dragging a selection. Horizontal is handled by the closed loop in
+     * [steerSelection]; only line changes need a keystroke, because an offset cannot express
+     * "one visual line down" when lines soft-wrap.
+     *
+     * To move a line the selection is briefly collapsed onto the moving end so a plain arrow
+     * key acts on it, and is re-applied once the new position is reported.
+     */
+    private fun extendSelection(dy: Float) {
+        val lh = lineHeight.takeIf { it > 1f } ?: return
+        selectionBankY += dy
+        var moved = false
+        while (abs(selectionBankY) >= lh) {
+            val step = if (selectionBankY > 0) 1 else -1
+            selectionBankY -= step * lh
+            if (!moved) {
+                currentInputConnection?.setSelection(selectionMovingEnd, selectionMovingEnd)
+                moved = true
+            }
+            sendArrow(
+                if (step > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
+                0,
+            )
+        }
+        if (moved) {
+            selectionLineTop = Float.NaN // the line is about to change; re-learn it
+            selectionBlocked = false
+        }
+    }
+
+    /**
+     * Moves the dragged end of the selection toward the marker, closed-loop.
+     *
+     * The selection is deliberately stored *reversed* -- setSelection(movingEnd, anchor). The
+     * highlight is identical either way, but the insertion marker follows the selection's
+     * start span, so reversing it makes the app report the end being dragged instead of the
+     * fixed one. Measured on device: setSelection(204, 211) reports x=409.6, the position of
+     * 204, while setSelection(211, 204) reports x=548.6, the position of 211.
+     *
+     * That report is the feedback signal. Each round re-derives the error from it, so an
+     * inaccurate character width costs one extra round instead of accumulating into the drift
+     * that made long selections progressively wrong.
+     */
+    private fun steerSelection() {
+        val ic = currentInputConnection ?: return
+        val selStart = lastSelStart
+        val selEnd = lastSelEnd
+        val insH = caretX
+        val insT = caretTop
+        if (selStart < 0 || insH.isNaN()) return
+
+        if (selStart == selEnd) {
+            // Collapsed: either the drag has not moved yet, or we collapsed deliberately to
+            // change line. Adopt the position and carry on steering -- returning here would
+            // mean the selection could never grow in the first place.
+            selectionMovingEnd = selStart
+            selectionPrevMovingEnd = selStart
+            selectionLineTop = insT
+        } else {
+            selectionMovingEnd = selStart // reversed, so the start span is the dragged end
+
+            // The line changed without us asking: the moving end wrapped past the end of its
+            // line. Put it back and stop pushing until the finger comes back.
+            if (!selectionLineTop.isNaN() && abs(insT - selectionLineTop) > 1f &&
+                selectionPrevMovingEnd >= 0
+            ) {
+                selectionBlocked = true
+                selectionMovingEnd = selectionPrevMovingEnd
+                ic.setSelection(selectionMovingEnd, selectionAnchor)
+                return
+            }
+            if (selectionLineTop.isNaN()) selectionLineTop = insT
+
+            // Learn the real character advance from what the last correction actually moved.
+            if (selectionAppliedChars != 0 && !selectionPrevInsH.isNaN()) {
+                val advance = abs(insH - selectionPrevInsH) / abs(selectionAppliedChars)
+                if (advance > 1f && advance < 200f) charWidth = advance
+            }
+        }
+
+        val error = markerX - insH
+        val chars = (error / effectiveCharWidth()).roundToInt().coerceIn(-16, 16)
+        if (DEBUG_GESTURES) android.util.Log.d(
+            TAG,
+            "steer sel=[$selStart,$selEnd] insH=$insH markerX=$markerX err=$error " +
+                "cw=${effectiveCharWidth()} chars=$chars blocked=$selectionBlocked " +
+                "anchor=$selectionAnchor moving=$selectionMovingEnd",
+        )
+        if (selectionBlocked) {
+            // Only resume once the finger has come back past the stuck position.
+            if (chars >= 0) {
+                selectionAppliedChars = 0
+                return
+            }
+            selectionBlocked = false
+        }
+        if (chars == 0) {
+            selectionAppliedChars = 0
+            return
+        }
+        selectionPrevMovingEnd = selectionMovingEnd
+        selectionPrevInsH = insH
+        selectionAppliedChars = chars
+        selectionMovingEnd = (selectionMovingEnd + chars).coerceAtLeast(0)
+        ic.setSelection(selectionMovingEnd, selectionAnchor)
     }
 
     override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
+        if (DEBUG_GESTURES) android.util.Log.d(
+            TAG,
+            "anchor sel=[${info.selectionStart},${info.selectionEnd}] insH=${info.insertionMarkerHorizontal}",
+        )
         val point = caretPoint(info) ?: return
         val previousX = caretX
         val previousTop = caretTop
+        if (info.selectionStart == info.selectionEnd) caretOffset = info.selectionStart
 
         (point[3] - point[1]).takeIf { it > 1f }?.let { lineHeight = it }
 
@@ -239,28 +434,20 @@ class KeyboardService : InputMethodService() {
             markerCenterY = caretTop + lineHeight / 2f
         }
 
+        lastSelStart = info.selectionStart
+        lastSelEnd = info.selectionEnd
+
         updateIndicator()
-        chaseCaret()
+        if (extendingSelection) steerSelection() else chaseCaret()
     }
 
-    /**
-     * Moves the caret toward wherever the marker is now.
-     *
-     * This is a feedback loop, not dead reckoning: every round re-derives the error from the
-     * position the *app* reports for its own caret, so a wrong character-width estimate costs
-     * an extra round rather than accumulating. That is what stops the two drifting apart.
-     *
-     * Vertical is resolved first and then the round ends, because changing line moves the caret
-     * horizontally too; the next update handles the new horizontal error.
-     */
     private fun chaseCaret() {
         if (!trackpadActive || caretX.isNaN() || markerX.isNaN()) return
+        // Selections are steered by steerSelection, which stores them reversed so the reported
+        // marker follows the dragged end rather than the fixed one.
+        if (extendingSelection) return
         if (pendingHorizontal != 0 || pendingVertical != 0) return // await the last round's result
-        val meta = if (extendingSelection) {
-            KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
-        } else {
-            0
-        }
+        val meta = 0
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
@@ -292,8 +479,14 @@ class KeyboardService : InputMethodService() {
         }
     }
 
+    /**
+     * Measured from the caret's real movement once the caret has moved horizontally at all;
+     * until then, a third of the line height, which is about the average advance of lowercase
+     * text in a proportional font. The measurement persists for the life of the service, so
+     * this fallback only applies before the very first cursor move in a field.
+     */
     private fun effectiveCharWidth(): Float =
-        charWidth.takeIf { it > 0f } ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.45f
+        charWidth.takeIf { it > 0f } ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.33f
 
     /**
      * Horizontal movement stops at the start and end of a line rather than wrapping onto the
@@ -378,33 +571,43 @@ class KeyboardService : InputMethodService() {
     }
 
     /**
-     * Press and hold a real shift key for as long as the selection gesture lasts.
+     * Begins a selection at the current caret position.
      *
-     * Setting META_SHIFT_ON on the arrow events is not enough on its own. TextView decides
-     * whether an arrow extends a selection in ArrowKeyMovementMethod.isSelecting(), which reads
-     * the *text buffer's* meta state via MetaKeyKeyListener -- and that is only ever set by
-     * genuine KEYCODE_SHIFT_LEFT key events passing through. A synthesised metaState on the
-     * arrow itself is ignored, so the caret just moved and nothing was ever selected.
+     * No shift key is held. Selection is applied directly with setSelection, which is what lets
+     * it be stored reversed so the app reports the dragged end -- see [steerSelection].
      */
     private fun beginSelection() {
         if (extendingSelection) return
+        // CursorAnchorInfo is asynchronous and may not have arrived yet, so fall back to
+        // asking the editor directly rather than refusing to start.
+        val start = caretOffset.takeIf { it >= 0 }
+            ?: currentInputConnection
+                ?.getExtractedText(ExtractedTextRequest(), 0)
+                ?.let { it.startOffset + it.selectionStart }
+            ?: return
+        if (start < 0) return
         extendingSelection = true
-        val ic = currentInputConnection ?: return
-        val now = SystemClock.uptimeMillis()
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0))
+        selectionAnchor = start
+        selectionMovingEnd = start
+        selectionPrevMovingEnd = start
+        selectionLineTop = caretTop
+        selectionBankY = 0f
+        selectionAppliedChars = 0
+        selectionPrevInsH = Float.NaN
+        selectionBlocked = false
     }
 
-    /** Always paired with [beginSelection], including when the gesture is cancelled. */
+    /** Leaves the selection in place, normalised to the conventional order. */
     private fun endSelection() {
         if (!extendingSelection) return
         extendingSelection = false
-        val ic = currentInputConnection ?: return
-        val now = SystemClock.uptimeMillis()
-        ic.sendKeyEvent(
-            KeyEvent(
-                now, now, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_SHIFT_LEFT, 0,
-                KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON,
-            ),
-        )
+        if (selectionAnchor >= 0 && selectionMovingEnd >= 0) {
+            currentInputConnection?.setSelection(
+                minOf(selectionAnchor, selectionMovingEnd),
+                maxOf(selectionAnchor, selectionMovingEnd),
+            )
+        }
+        selectionAnchor = -1
+        selectionMovingEnd = -1
     }
 }

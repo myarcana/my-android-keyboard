@@ -394,6 +394,17 @@ class KeyboardView @JvmOverloads constructor(
         onOutput(outputs)
     }
 
+    /**
+     * Debug only. adb can drive a single pointer, so the two-finger selection gesture cannot be
+     * scripted; this lets a broadcast stand in for the second finger while testing.
+     */
+    fun debugStartSelection() {
+        val trackpad = pointers.values.firstOrNull {
+            it.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD
+        } ?: return
+        emit(trackpad.onSecondaryTap())
+    }
+
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         uiHandler.removeCallbacksAndMessages(null)

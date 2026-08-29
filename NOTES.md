@@ -124,6 +124,43 @@ anywhere on screen. Two traps when doing that:
 Verify with `adb logcat -s OfflineKeyboard`; `DEBUG_GESTURES` in `KeyboardService` logs every
 gesture output.
 
+### CursorAnchorInfo reports the selection's *start*, not the end you are dragging
+
+`insertionMarkerHorizontal` follows `getSelectionStart()`. With a selection in place that is the
+**left** end, so while extending rightwards the reported position never moves and any control
+loop steering on it runs away. Measured on device:
+
+```
+setSelection(204, 211) -> insH = 409.6   (position of 204)
+setSelection(211, 204) -> insH = 548.6   (position of 211)
+```
+
+Setting the selection *reversed* therefore makes the app report the end being dragged. The
+highlight renders identically -- Android draws min..max -- so this is invisible to the user and
+restores a usable feedback signal. `KeyboardService.steerSelection` relies on it.
+
+Note that arrow keys will not work with a reversed selection: shift+arrow moves
+`SELECTION_END`, which is the anchor in that arrangement. Move the dragged end with
+`setSelection` instead, and collapse briefly if you need a line-aware vertical step.
+
+### CURSOR_UPDATE_MONITOR only fires when the cursor actually moves
+
+Driving a control loop purely from `onUpdateCursorAnchorInfo` deadlocks: no movement means no
+update, which means no movement. Anything that steers the cursor must also run when the *input*
+changes -- for this keyboard, on every pan -- and use the last reported position.
+
+### Implicit broadcasts do not reach a backgrounded app
+
+`adb shell am broadcast -a <action>` is silently dropped. Add `-p <package>`:
+
+```sh
+adb shell am broadcast -a com.offlinekeyboard.ime.DEBUG_SELECT -p com.offlinekeyboard.ime
+```
+
+That broadcast is a debug-only stand-in for the second finger of the selection gesture, which
+adb cannot send. It is registered only when `BuildConfig.DEBUG`, so it never exists in a
+release build.
+
 ### Driving gestures from adb
 
 `adb shell input swipe` is useless for testing a long-press-then-drag: it interpolates
