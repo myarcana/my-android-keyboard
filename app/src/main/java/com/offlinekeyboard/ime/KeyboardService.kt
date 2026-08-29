@@ -2,8 +2,17 @@ package com.offlinekeyboard.ime
 
 import android.inputmethodservice.InputMethodService
 import android.os.SystemClock
+import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.CursorAnchorInfo
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
+import android.widget.PopupWindow
+import com.offlinekeyboard.ime.view.CursorIndicatorView
+import kotlin.math.abs
+import kotlin.math.roundToInt
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
@@ -33,6 +42,16 @@ class KeyboardService : InputMethodService() {
     /** True while a physical shift key is being held down to drag a selection. */
     private var extendingSelection = false
 
+    // --- granular cursor indicator ---
+    private var indicator: CursorIndicatorView? = null
+    private var indicatorPopup: PopupWindow? = null
+    private var anchorInfo: CursorAnchorInfo? = null
+    private var progressX = 0f
+    private var progressY = 0f
+    /** Learned from how far the caret actually jumps per step in the current field. */
+    private var charWidthEstimate = 0f
+    private var lastCaretX = Float.NaN
+
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
             keyboardView = view
@@ -40,7 +59,13 @@ class KeyboardService : InputMethodService() {
             applyLayout()
         }
 
-    override fun onStartInputView(info: android.view.inputmethod.EditorInfo?, restarting: Boolean) {
+    override fun onFinishInputView(finishingInput: Boolean) {
+        super.onFinishInputView(finishingInput)
+        endSelection()
+        stopTrackpad()
+    }
+
+    override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         shift = ShiftState.OFF
         applyLayout()
@@ -66,7 +91,16 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitAccent -> commit(out.text)
                 is GestureOutput.CursorMove -> moveCursor(out.dx, out.dy, out.extend)
                 GestureOutput.SelectionStarted -> beginSelection()
-                GestureOutput.TrackpadEnded -> endSelection()
+                GestureOutput.TrackpadStarted -> startTrackpad()
+                is GestureOutput.CursorProgress -> {
+                    progressX = out.fractionX
+                    progressY = out.fractionY
+                    updateIndicator()
+                }
+                GestureOutput.TrackpadEnded -> {
+                    endSelection()
+                    stopTrackpad()
+                }
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
                 is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
                 else -> Unit
@@ -132,18 +166,39 @@ class KeyboardService : InputMethodService() {
      */
     private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
         val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
-        repeat(kotlin.math.abs(dx)) {
-            sendArrow(
-                if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
-                meta,
-            )
+        repeat(abs(dx)) {
+            if (!atLineEdge(forward = dx > 0)) {
+                sendArrow(
+                    if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
+                    meta,
+                )
+            }
         }
-        repeat(kotlin.math.abs(dy)) {
+        repeat(abs(dy)) {
             sendArrow(
                 if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
                 meta,
             )
         }
+    }
+
+    /**
+     * Horizontal movement stops at the start and end of a line rather than wrapping onto the
+     * neighbouring one: left/right is for moving within a line, up/down is for changing line.
+     *
+     * "Line" here means a hard break. A soft-wrapped line has no character to detect, so
+     * movement still flows across a wrap -- which is the same position in the text, just drawn
+     * on the next row.
+     */
+    private fun atLineEdge(forward: Boolean): Boolean {
+        val ic = currentInputConnection ?: return false
+        val neighbour = if (forward) {
+            ic.getTextAfterCursor(1, 0)
+        } else {
+            ic.getTextBeforeCursor(1, 0)
+        }
+        // Empty means the very start or end of the field: nothing to move onto either.
+        return neighbour.isNullOrEmpty() || neighbour.toString() == "\n"
     }
 
     /** sendDownUpKeyEvents cannot carry a meta state, so build the events by hand. */
@@ -169,6 +224,101 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0))
+    }
+
+    // --- granular cursor indicator -------------------------------------------------------
+
+    /**
+     * Requirement: show where the *granular* cursor is while the trackpad is in use.
+     *
+     * The caret can only sit between characters, but the finger is somewhere continuous in
+     * between. An IME cannot draw inside the target app's text field, so the indicator lives in
+     * a PopupWindow, positioned in screen coordinates from the caret location the app reports
+     * through CursorAnchorInfo.
+     */
+    private fun startTrackpad() {
+        currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
+        progressX = 0f
+        progressY = 0f
+        lastCaretX = Float.NaN
+        val kv = keyboardView ?: return
+        val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
+        val popup = indicatorPopup ?: PopupWindow(view).apply {
+            isTouchable = false
+            isFocusable = false
+            isClippingEnabled = false
+            width = ViewGroup.LayoutParams.WRAP_CONTENT
+            height = ViewGroup.LayoutParams.WRAP_CONTENT
+            setBackgroundDrawable(null)
+            indicatorPopup = this
+        }
+        if (!popup.isShowing) {
+            runCatching { popup.showAtLocation(kv, Gravity.NO_GRAVITY, 0, 0) }
+        }
+        updateIndicator()
+    }
+
+    private fun stopTrackpad() {
+        currentInputConnection?.requestCursorUpdates(0)
+        indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
+    }
+
+    override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
+        anchorInfo = info
+        caretPoint(info)?.let { p ->
+            // Learn the character width from how far the caret jumps per step, since
+            // getCharacterBounds is only populated for composing text.
+            if (!lastCaretX.isNaN()) {
+                val d = abs(p[0] - lastCaretX)
+                if (d > 1f && d < 200f) charWidthEstimate = d
+            }
+            lastCaretX = p[0]
+        }
+        updateIndicator()
+    }
+
+    /** Caret as [x, top, x, bottom] in screen coordinates, or null if the app reports none. */
+    private fun caretPoint(info: CursorAnchorInfo): FloatArray? {
+        val h = info.insertionMarkerHorizontal
+        val t = info.insertionMarkerTop
+        val b = info.insertionMarkerBottom
+        if (h.isNaN() || t.isNaN() || b.isNaN()) return null
+        val pts = floatArrayOf(h, t, h, b)
+        info.matrix.mapPoints(pts)
+        return pts
+    }
+
+    private fun updateIndicator() {
+        val popup = indicatorPopup?.takeIf { it.isShowing } ?: return
+        val view = indicator ?: return
+        val info = anchorInfo
+        val point = info?.let { caretPoint(it) }
+        if (point == null) {
+            // The app does not report caret position; nothing sensible to point at.
+            runCatching { popup.dismiss() }
+            return
+        }
+        val caretX = point[0]
+        val top = point[1]
+        val bottom = point[3]
+        val lineHeight = (bottom - top).takeIf { it > 1f } ?: (24f * resources.displayMetrics.density)
+        val charWidth = charWidthEstimate.takeIf { it > 0f } ?: (lineHeight * 0.45f)
+
+        view.label = "${(progressX * 100).roundToInt()}% \u00b7 ${(progressY * 100).roundToInt()}%"
+        view.measure(
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        )
+        val gx = caretX + progressX * charWidth
+        val gy = top + progressY * lineHeight
+        runCatching {
+            popup.update(
+                (gx - view.measuredWidth / 2f).roundToInt(),
+                (gy - view.measuredHeight).roundToInt(),
+                -1,
+                -1,
+            )
+        }
     }
 
     /** Always paired with [beginSelection], including when the gesture is cancelled. */

@@ -297,6 +297,36 @@ class TouchFsmTest {
     }
 
     @Test
+    fun `vertical travel is twice as sensitive as horizontal per key dimension`() {
+        // A line is a longer journey than a character, so the same finger movement covers more.
+        assertTrue(
+            "vertical step must be the smaller fraction",
+            config.trackpadStepYRatio < config.trackpadStepXRatio,
+        )
+    }
+
+    @Test
+    fun `trackpad reports sub-step progress between caret positions`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        // move a third of a step: too little to move the caret, but the finger has travelled
+        val out = f.onMove(space.centerX + stepX / 3f, space.centerY, 600)
+        assertTrue("caret must not move yet", out.filterIsInstance<GestureOutput.CursorMove>().isEmpty())
+        val progress = out.only<GestureOutput.CursorProgress>()
+        assertEquals(0.333f, progress.fractionX, 0.02f)
+        assertEquals(0f, progress.fractionY, 0.02f)
+    }
+
+    @Test
+    fun `progress resets toward zero after a step is emitted`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        val out = f.onMove(space.centerX + stepX * 1.2f, space.centerY, 600)
+        assertEquals(1, out.filterIsInstance<GestureOutput.CursorMove>().size)
+        assertEquals(0.2f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
+    }
+
+    @Test
     fun `tapping again during trackpad mode starts a selection`() {
         val (f, _) = trackpadFsm()
         val out = f.onSecondaryTap()
