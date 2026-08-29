@@ -29,15 +29,51 @@ class TestPadActivity : Activity() {
             setPadding(32, 32, 32, 32)
             setBackgroundColor(Color.TRANSPARENT)
             setText(
-                buildString {
-                    appendLine("Type here.")
-                    appendLine()
-                    appendLine("Flick down on a key for its symbol.")
-                    appendLine("Keep swiping and it becomes a glide.")
-                    appendLine("Hold space to move the cursor in 2D.")
-                },
+                """
+                Cursor test pad.
+
+                a
+                bb
+                ccc
+                dd
+                e
+
+                Short lines above, so the ends of a line are easy to reach: left and right
+                should stop dead at each end instead of hopping onto the line above or below.
+
+                Here is a deliberately long line that will soft-wrap across several rows of the
+                display even though it is a single line of text with no line break in it, which
+                is the case where horizontal movement should still flow freely from one visual
+                row to the next because nothing has actually ended.
+
+                x
+                yy
+
+                iiiiiiiiii
+                WWWWWWWWWW
+
+                Two lines above are the same length in characters but very different in width,
+                which is what the granular marker uses to work out how far through a character
+                the finger has travelled.
+
+                one
+                two
+                three
+                four
+                five
+                six
+                seven
+                eight
+                nine
+                ten
+
+                Ten short lines above give vertical movement something to travel through: hold
+                space and slide up and down to cross them.
+
+                End of the pad.
+                """.trimIndent(),
             )
-            setSelection(text.length)
+            setSelection(0)
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
