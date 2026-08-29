@@ -187,6 +187,11 @@ class TouchFsmTest {
 
     // --- requirement 5: spacebar trackpad -----------------------------------------------
 
+    private fun trackpadOf(f: TouchFsm, space: com.offlinekeyboard.ime.layout.KeyRect) {
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onLongPressTimeout(config.longPressMs)
+    }
+
     private fun trackpadFsm(): Pair<TouchFsm, com.offlinekeyboard.ime.layout.KeyRect> {
         val space = key("space")
         val f = fsm()
@@ -222,8 +227,8 @@ class TouchFsmTest {
     @Test
     fun `each pan reports only the movement since the last one`() {
         val (f, space) = trackpadFsm()
-        f.onMove(space.centerX + 50f, space.centerY, 600)
-        val second = f.onMove(space.centerX + 80f, space.centerY, 620)
+        f.onMove(space.centerX + 50f, space.centerY, 1000)
+        val second = f.onMove(space.centerX + 80f, space.centerY, 2000)
             .only<GestureOutput.TrackpadPan>()
         assertEquals(30f * config.trackpadGainX, second.dx, 0.01f)
     }
@@ -246,11 +251,89 @@ class TouchFsmTest {
         val (f, space) = trackpadFsm()
         var total = 0f
         var x = space.centerX
+        var t = 1000L
         repeat(20) {
             x += 60f
-            total += f.onMove(x, space.centerY, 600).only<GestureOutput.TrackpadPan>().dx
+            t += 1000 // slow enough that acceleration leaves the gain alone
+            total += f.onMove(x, space.centerY, t).only<GestureOutput.TrackpadPan>().dx
         }
         assertEquals(20 * 60f * config.trackpadGainX, total, 0.5f)
+    }
+
+    // --- velocity sensitivity ------------------------------------------------------------
+
+    /** Drags [distance] repeatedly with [dt] between samples, returning the last pan. */
+    private fun drag(f: TouchFsm, from: Float, y: Float, distance: Float, dt: Long, steps: Int):
+        GestureOutput.TrackpadPan {
+        var x = from
+        var t = 1000L
+        var last: GestureOutput.TrackpadPan? = null
+        repeat(steps) {
+            x += distance
+            t += dt
+            last = f.onMove(x, y, t).only<GestureOutput.TrackpadPan>()
+        }
+        return last!!
+    }
+
+    @Test
+    fun `slow movement is not accelerated at all`() {
+        val (f, space) = trackpadFsm()
+        // 60px over a full second: precise positioning must feel exactly as it did before
+        val pan = drag(f, space.centerX, space.centerY, 60f, 1000, 3)
+        assertEquals(60f * config.trackpadGainX, pan.dx, 0.01f)
+    }
+
+    @Test
+    fun `fast movement travels much further for the same finger distance`() {
+        val (f, space) = trackpadFsm()
+        val slow = drag(fsm().also { trackpadOf(it, space) }, space.centerX, space.centerY, 120f, 1000, 3)
+        val fast = drag(f, space.centerX, space.centerY, 120f, 20, 4)
+        assertTrue(
+            "fast pan ${fast.dx} should far exceed slow pan ${slow.dx}",
+            fast.dx > slow.dx * 3f,
+        )
+    }
+
+    @Test
+    fun `acceleration never exceeds the configured maximum`() {
+        val (f, space) = trackpadFsm()
+        val pan = drag(f, space.centerX, space.centerY, 300f, 1, 6)
+        assertTrue(
+            "pan ${pan.dx} exceeded the cap",
+            pan.dx <= 300f * config.trackpadGainX * config.trackpadMaxAccel + 0.01f,
+        )
+    }
+
+    @Test
+    fun `acceleration does not bend the direction of travel`() {
+        val (f, space) = trackpadFsm()
+        var x = space.centerX
+        var y = space.centerY
+        var t = 1000L
+        var pan: GestureOutput.TrackpadPan? = null
+        repeat(4) {
+            x += 100f
+            y -= 50f
+            t += 20
+            pan = f.onMove(x, y, t).only<GestureOutput.TrackpadPan>()
+        }
+        // undo the per-axis gains; what remains must have the finger's own 100:-50 ratio
+        val ratio = (pan!!.dx / config.trackpadGainX) / (pan!!.dy / config.trackpadGainY)
+        assertEquals(100f / -50f, ratio, 0.01f)
+    }
+
+    @Test
+    fun `speed does not carry over into the next drag`() {
+        val (f, space) = trackpadFsm()
+        drag(f, space.centerX, space.centerY, 300f, 1, 5) // fast
+        f.onUp(space.centerX, space.centerY, 5000)
+
+        f.onDown(space.centerX, space.centerY, 6000)
+        f.onLongPressTimeout(6000 + config.longPressMs)
+        val pan = f.onMove(space.centerX + 60f, space.centerY, 8000)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(60f * config.trackpadGainX, pan.dx, 0.01f)
     }
 
     @Test

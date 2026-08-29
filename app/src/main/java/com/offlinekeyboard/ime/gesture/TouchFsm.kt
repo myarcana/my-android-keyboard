@@ -30,6 +30,18 @@ data class GestureConfig(
      */
     val trackpadGainX: Float = 0.55f,
     val trackpadGainY: Float = 1.2f,
+
+    /**
+     * Pointer acceleration. Below [trackpadSlowSpeed] the gain is untouched, so slow movement
+     * keeps its fine-grained feel exactly; from there it ramps up to [trackpadMaxAccel] times
+     * at [trackpadFastSpeed], letting a quick flick cross a long line. Speeds are in pixels of
+     * finger travel per millisecond.
+     */
+    val trackpadSlowSpeed: Float = 0.15f,
+    val trackpadFastSpeed: Float = 2.2f,
+    val trackpadMaxAccel: Float = 4f,
+    /** A single move event is a noisy speed estimate, so it is smoothed. 1 = no smoothing. */
+    val trackpadSpeedSmoothing: Float = 0.4f,
 )
 
 sealed interface GestureOutput {
@@ -91,6 +103,8 @@ class TouchFsm(
     private var pathLength = 0f
     private var accentIndex = 0
     private var trackpadAnchor: PathPoint? = null
+    /** Smoothed finger speed in px/ms, for pointer acceleration. */
+    private var trackpadSpeed = 0f
 
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
@@ -117,6 +131,7 @@ class TouchFsm(
             key.key.type == KeyType.SPACE -> {
                 state = GestureState.TRACKPAD
                 trackpadAnchor = path.last()
+                trackpadSpeed = 0f
                 listOf(GestureOutput.TrackpadStarted)
             }
             key.key.accents.isNotEmpty() -> {
@@ -147,7 +162,7 @@ class TouchFsm(
             GestureState.FLICK -> onMoveWhileFlicking()
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x)
-            GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y)
+            GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
             GestureState.IDLE -> emptyList()
         }
     }
@@ -218,13 +233,40 @@ class TouchFsm(
      * what keeps the marker smooth. Turning that position into a caret position is the
      * service's job, and it does it by watching where the app reports the caret to be.
      */
-    private fun onMoveWhileTrackpad(x: Float, y: Float): List<GestureOutput> {
+    private fun onMoveWhileTrackpad(x: Float, y: Float, t: Long): List<GestureOutput> {
         val anchor = trackpadAnchor ?: return emptyList()
-        val dx = (x - anchor.x) * config.trackpadGainX
-        val dy = (y - anchor.y) * config.trackpadGainY
-        trackpadAnchor = PathPoint(x, y, anchor.t)
+        val dx = x - anchor.x
+        val dy = y - anchor.y
+        val dt = (t - anchor.t).coerceAtLeast(1L)
+        trackpadAnchor = PathPoint(x, y, t)
         if (dx == 0f && dy == 0f) return emptyList()
-        return listOf(GestureOutput.TrackpadPan(dx, dy))
+
+        val instant = hypot(dx, dy) / dt
+        trackpadSpeed += (instant - trackpadSpeed) * config.trackpadSpeedSmoothing
+        val accel = accelerationFor(trackpadSpeed)
+
+        // The same factor on both axes, so acceleration never bends the direction of travel.
+        return listOf(
+            GestureOutput.TrackpadPan(
+                dx * config.trackpadGainX * accel,
+                dy * config.trackpadGainY * accel,
+            ),
+        )
+    }
+
+    /**
+     * Maps finger speed to a gain multiplier.
+     *
+     * Squared rather than linear so the curve leaves slow movement alone: precise positioning
+     * should feel exactly as it did before acceleration existed, and only deliberate fast
+     * movement should cover ground.
+     */
+    private fun accelerationFor(speed: Float): Float {
+        val lo = config.trackpadSlowSpeed
+        val hi = config.trackpadFastSpeed
+        if (hi <= lo) return 1f
+        val ramp = ((speed - lo) / (hi - lo)).coerceIn(0f, 1f)
+        return 1f + (config.trackpadMaxAccel - 1f) * ramp * ramp
     }
 
     fun onUp(x: Float, y: Float, t: Long): List<GestureOutput> {
@@ -282,6 +324,7 @@ class TouchFsm(
         pathLength = 0f
         accentIndex = 0
         trackpadAnchor = null
+        trackpadSpeed = 0f
     }
 
     /** Keys the glide path passed through, nearest-centre per sample, de-duplicated. */

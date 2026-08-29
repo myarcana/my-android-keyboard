@@ -177,6 +177,33 @@ anywhere on screen. Two traps:
 The marker is a bare bar of the reported line height, with no label: a cursor should read as a
 cursor. It is clamped only to the display, never to the text.
 
+## 12. Velocity sensitivity (pointer acceleration)
+
+The gain from finger movement to marker movement is not constant: slow movement is left exactly
+alone so fine positioning feels unchanged, and fast movement is multiplied so a flick can cross
+a long line.
+
+- Speed is measured per move event as `hypot(dx, dy) / dt` in **pixels per millisecond**. This
+  required fixing a latent bug: the trackpad anchor was being rewritten as
+  `PathPoint(x, y, anchor.t)`, preserving the *original* timestamp, so no per-event interval
+  existed at all.
+- A single event is a noisy estimate, so speed is smoothed with an exponential moving average
+  (`trackpadSpeedSmoothing`, 0.4).
+- The curve is **squared, not linear**: `1 + (max - 1) * ramp²` where `ramp` is the position
+  between `trackpadSlowSpeed` (0.15 px/ms) and `trackpadFastSpeed` (2.2 px/ms). Squaring keeps
+  the multiplier near 1 through the whole slow range, so precision is not traded away for reach.
+  A linear ramp noticeably degrades fine control.
+- The **same factor is applied to both axes**, so acceleration can never bend the direction of
+  travel — only its magnitude. There is a test for this.
+- Speed resets when a drag begins, so one flick cannot leak acceleration into the next drag.
+
+Tuned values live in `GestureConfig`; measured on device, a 100px sample at ~100ms intervals
+produces multipliers ramping 1.0 → 1.04 → 1.19 → 1.30 as the average builds.
+
+Note that this is hard to exercise from `adb`: each `input motionevent` costs a round trip of
+roughly 100ms, so scripted drags are always in the slow part of the curve. Acceleration has to
+be verified from the logged pan magnitudes, or by hand.
+
 ---
 
 ## Testing techniques
