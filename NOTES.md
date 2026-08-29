@@ -47,6 +47,21 @@ adb shell ime set com.offlinekeyboard.ime/.KeyboardService
 
 `adb install -r` replaces the APK without needing a force-stop, so there is no reason to do it.
 
+### The phone must be unlocked for screenshots
+
+A screen that has timed out screenshots as pure black, which looks alarmingly like a crash.
+`adb shell input keyevent KEYCODE_WAKEUP` turns the screen on but lands on the lock screen,
+and adb cannot get past a PIN. `tools/deploy.sh` sends WAKEUP, but **the phone still has to be
+unlocked by hand** for the screenshot to show anything useful. Consider raising the screen
+timeout while working: `adb shell settings put system screen_off_timeout 1800000`.
+
+### Multi-touch gestures cannot be scripted
+
+`adb shell input` is single-pointer only, so gestures needing two fingers — notably the
+second-finger tap that starts selection during spacebar trackpad mode — cannot be driven from
+adb. They are covered by JVM unit tests against the state machine; on-device confirmation has
+to be done by hand.
+
 ### Screenshots catch the launch animation
 
 `adb exec-out screencap -p` immediately after `am start` usually captures the window

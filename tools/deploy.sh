@@ -26,6 +26,9 @@ if [[ "$($ADB shell settings get global verifier_verify_adb_installs | tr -d '\r
     $ADB shell settings put global package_verifier_user_consent -1
 fi
 
+# A screen that has timed out produces an all-black screenshot, which looks like a crash.
+$ADB shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
+
 $ADB install -r app/build/outputs/apk/debug/app-debug.apk >/dev/null
 $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
 $ADB shell ime set "$IME" >/dev/null
