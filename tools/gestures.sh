@@ -117,16 +117,29 @@ PY
 
     # A pull that is not committed has not saved anything. The phone's copy dies with the app,
     # and an untracked file in the working tree is one `git clean` away from gone -- so the
-    # commit is part of the pull rather than something to remember afterwards. Only the bank is
-    # committed, by pathspec, so this is safe to run with other work in progress.
+    # commit is part of the pull rather than something to remember afterwards.
+    #
+    # This deliberately does NOT use git's partial-commit form (`git commit -- <path>`), which
+    # would be the obvious way to commit one file regardless of what else is staged. That form
+    # builds a temporary index, and this repo's commit-msg hook -- which walks every object in
+    # the repository -- cannot resolve a reference in it and aborts the commit. So instead the
+    # bank is staged and the index is checked: if anything else is staged, nothing is committed
+    # and it says so, rather than sweeping unrelated work into a data commit.
     if git rev-parse --git-dir >/dev/null 2>&1; then
-        if [[ -n "$(git status --porcelain -- "$BANK")" ]]; then
-            summary=$(python3 -c "$SUMMARISE" "$BANK")
-            git add "$BANK"
-            git commit -q -m "Gesture bank: $summary" -- "$BANK"
-            echo "committed $(git log -1 --format=%h): $summary"
-        else
+        if [[ -z "$(git status --porcelain -- "$BANK")" ]]; then
             echo "already committed, nothing new"
+        else
+            git add "$BANK"
+            staged=$(git diff --cached --name-only)
+            if [[ "$staged" != "$BANK" ]]; then
+                echo "NOT committed: other changes are staged as well --"
+                echo "$staged" | grep -v "^$BANK$" | sed 's/^/    /'
+                echo "  The bank is staged and safe. Commit or unstage those, then run pull again."
+            else
+                summary=$(python3 -c "$SUMMARISE" "$BANK")
+                git commit -q -m "Gesture bank: $summary"
+                echo "committed $(git log -1 --format=%h): $summary"
+            fi
         fi
     else
         echo "WARNING: not a git repository -- the bank is NOT under version control"
