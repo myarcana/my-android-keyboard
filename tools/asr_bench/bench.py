@@ -295,29 +295,36 @@ def cer(reference: str, hypothesis: str) -> tuple[int, int]:
     return edit_distance(ref, hyp), len(ref)
 
 
-TRADITIONAL_ONLY = set("這個們來時對開會後點鐘號經過還說話語聲車東馬鳥魚長門問間關電視覺學國圖書館體驗豐灣臺灣灣號")
+try:
+    # The exact conversion the keyboard applies in Traditional mode, so this column measures
+    # how much work that step would still have to do rather than an abstract notion of script.
+    _to_taiwan = OpenCC("s2twp").convert
+except Exception:  # pragma: no cover - optional dependency
+    _to_taiwan = None
 
 
 def script_hits(reference: str, hypothesis: str) -> tuple[int, int]:
     """
-    How much of a Traditional prompt came back in Traditional characters.
+    Of the characters where the two scripts actually differ, how many came back Traditional.
 
-    Only counts positions where the two scripts actually differ, since most characters are
-    shared and would otherwise drown the signal.
+    Most Han characters are shared, so counting all of them buries the signal: every model
+    scores 72-75% just by writing Chinese. Only characters that differ carry information about
+    which script was chosen.
+
+    "Would s2twp change it" is the test for a simplified character, rather than "does s2t change
+    it". The latter marks 吃 as simplified because OpenCC knows the archaic variant 喫, and 吃 is
+    what Taiwan actually writes -- it would dock a model for being correct. s2twp leaves it
+    alone, which is the same judgement the keyboard will make.
     """
-    if not _to_simplified:
+    if not _to_simplified or not _to_taiwan:
         return 0, 0
-    hit = total = 0
+    traditional = simplified = 0
     for char in strip_punctuation(hypothesis):
-        simplified = _to_simplified(char)
-        if simplified == char:
-            continue  # already simplified, or a character the two scripts share
-        total += 1
-        hit += 1
-    for char in strip_punctuation(reference):
         if _to_simplified(char) != char:
-            total = max(total, 1)
-    return hit, total
+            traditional += 1
+        elif _to_taiwan(char) != char:
+            simplified += 1
+    return traditional, traditional + simplified
 
 
 # --- data ---------------------------------------------------------------------------------
@@ -514,7 +521,7 @@ def cmd_score(_args) -> int:
         print(row)
 
     print("\nCER, spoken numbers folded to digits; lower is better.")
-    print("trad = share of script-specific characters returned in Traditional.")
+    print("trad = of the characters where the scripts differ, the share returned in Traditional.")
     if any(MODELS.get(n, {}).get("family") == "whisper" for n in names):
         print("\n* " + WHISPER_RUNTIME_CAVEAT.replace("\n", "\n  "))
     if bad:

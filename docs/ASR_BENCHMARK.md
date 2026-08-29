@@ -151,13 +151,13 @@ The non-Whisper candidates use different code paths and are unaffected. Their nu
 ```
 model                       en     zh-TW     zh-CN     mixed       all    trad
 ------------------------------------------------------------------------------
-apple                     5.1%      4.3%      7.8%     58.9%     18.4%     79%
+apple                     5.1%      4.3%      7.8%     58.9%     18.4%     61%
 sensevoice                4.0%      3.2%      1.9%      7.9%      4.5%      0%
 qwen3-asr-0.6b            0.0%      2.1%      1.9%     20.5%      5.6%      0%
 breeze-asr-25 *           1.8%      7.4%     12.6%      0.7%      4.2%    100%
 firered2-ctc             13.0%      5.3%      1.9%     24.5%     12.8%      0%
-moonshine-base-en         5.8%         -         -         -         -      0%
-dolphin-small           100.0%     12.8%      2.9%     66.9%     62.8%     21%
+moonshine-base-en         5.8%         -         -         -         -      -
+dolphin-small           100.0%     12.8%      2.9%     66.9%     62.8%      8%
 ```
 
 **Ship SenseVoice, for every mode.** 239 MB, the smallest candidate, and it beats Apple in all
@@ -188,8 +188,24 @@ Two alternatives worth remembering rather than adopting:
   and the only model returning Traditional characters, and it scored that *through* the broken
   Whisper path below. It is blocked on the runtime, not on merit.
 
-`trad` confirms the OpenCC `s2twp` step stays: SenseVoice returns Simplified for everything.
-Apple sits at 79%, so it does not reliably honour Traditional either.
+### Which models write Taiwanese characters
+
+`trad` counts only the characters where the two scripts differ — most Han characters are shared,
+and counting those buries the signal under a 72–75% floor every model reaches just by writing
+Chinese. A character is simplified if the keyboard's own `s2twp` conversion would change it,
+which is the same judgement the keyboard will make at runtime.
+
+**Only Breeze-ASR-25 writes Taiwanese.** 100%, with nothing at all for `s2twp` to change across
+the zh-TW and mixed prompts. Every other candidate is Simplified: SenseVoice, Qwen3-ASR and
+FireRedASR2 at 0%, Dolphin at 8%.
+
+Apple manages 61%, which is worse than it sounds — it is not partially converting, it is
+switching wholesale. It writes clean Traditional for plain Mandarin (`我剛剛把資料傳到你的信箱了`)
+and drops to Simplified the moment the sentence code-switches (`這個 bug 我已經 fix 好了` comes
+back as `这个包裹我已经好了`). Losing the script and losing the words happen together.
+
+So the `s2twp` step stays, and it is doing real work rather than tidying edge cases: 39 of 150
+Han characters in SenseVoice's Taiwanese output need converting.
 
 ## Deciding
 
