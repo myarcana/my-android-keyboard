@@ -128,6 +128,8 @@ class KeyboardService : InputMethodService() {
      * guess never fires and the caret walks off the row every time.
      */
     private var rowRightEdge = Float.NaN
+    /** The row it was learned on. Rows wrap at word boundaries, so it is valid for that row only. */
+    private var rowRightEdgeTop = Float.NaN
 
     /**
      * While extending a selection, the finger's travel is banked here until it amounts to a
@@ -552,7 +554,11 @@ class KeyboardService : InputMethodService() {
             !caretX.isNaN() && !caretTop.isNaN() && point[1] > caretTop + 1f
         ) {
             rowRightEdge = caretX
-            trace("LEARN rowRightEdge=$rowRightEdge")
+            rowRightEdgeTop = caretTop
+            trace("LEARN rowRightEdge=$rowRightEdge onRowTop=$rowRightEdgeTop")
+            // Step back onto the row we just left, rather than waiting for the vertical
+            // correction to drag the caret all the way back to that row's start.
+            sendArrow(KeyEvent.KEYCODE_DPAD_LEFT, 0)
         }
 
         trace(
@@ -803,7 +809,12 @@ class KeyboardService : InputMethodService() {
         if (caretX.isNaN()) return false
         val margin = effectiveCharWidth()
         if (!forward) return caretX - margin <= editorLeft
-        val right = if (!rowRightEdge.isNaN()) rowRightEdge else editorRight
+        // Only on the row it was learned on. Applying one row's wrap point to every row was a
+        // regression: rows wrap at word boundaries, so any row running past that value became
+        // impossible to move through.
+        val learnedHere = !rowRightEdge.isNaN() && !rowRightEdgeTop.isNaN() &&
+            abs(caretTop - rowRightEdgeTop) < 1f
+        val right = if (learnedHere) rowRightEdge else editorRight
         return !right.isNaN() && caretX + margin >= right
     }
 

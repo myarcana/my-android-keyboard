@@ -47,9 +47,16 @@ it. Traced on device, the caret wrapped at x=931 inside an editor 1080 wide, so 
 edge-based guess was 150px too late and never fired once.
 
 The wrap teaches it instead: a rightward step that lands on a lower row means the previous
-position was the row's end. Remembering that one number is enough to refuse every later
-crossing. Measured values on the test pad are 832 and 856 -- word-dependent, as expected, and
-nowhere near the editor's edge.
+position was the row's end. Measured values on the test pad are 832 and 856 -- word-dependent,
+as expected, and nowhere near the editor's edge.
+
+That number belongs to **the row it was learned on**, and only that row. Applying it document
+wide was a regression: every row running past the learned value became impossible to move
+through, because the block fired part way along it. It is scoped by the row's top coordinate,
+so arriving on another row simply has nothing learned yet.
+
+The wrap that teaches it is also undone immediately with a single step back, rather than left
+for the vertical correction to drag the caret to the row's start and walk it out again.
 
 ### Never act on a stale reading more than once
 
