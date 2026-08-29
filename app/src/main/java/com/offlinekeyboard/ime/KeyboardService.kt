@@ -77,8 +77,13 @@ class KeyboardService : InputMethodService() {
     private var chaseWaitTicks = 0
     /** Caret offset when the outstanding vertical arrows were sent, to tell moved from stuck. */
     private var pendingFromOffset = -1
-    /** The caret cannot go further vertically -- the end of the text -- so stop trying. */
-    private var verticalStuck = false
+    /**
+     * Which way the caret has run out of text: +1 cannot go further down, -1 cannot go further
+     * up, 0 free. Directional and sticky, so the marker can be stopped from travelling further
+     * that way -- distance it accumulates beyond the end of the text has to be un-travelled
+     * before anything responds again, which reads as the cursor freezing and then snapping.
+     */
+    private var verticalStuckDir = 0
 
     /**
      * While extending a selection, the finger's travel is banked here until it amounts to a
@@ -278,7 +283,7 @@ class KeyboardService : InputMethodService() {
         caretTop = Float.NaN
         pendingHorizontal = 0
         pendingVertical = 0
-        verticalStuck = false
+        verticalStuckDir = 0
         updateIndicator()
     }
 
@@ -294,9 +299,15 @@ class KeyboardService : InputMethodService() {
     private fun panMarker(dx: Float, dy: Float) {
         if (!trackpadActive || markerX.isNaN()) return
         val metrics = resources.displayMetrics
+        // Movement back the other way frees it again.
+        if (verticalStuckDir != 0 && dy != 0f && (dy > 0f) != (verticalStuckDir > 0)) {
+            verticalStuckDir = 0
+        }
+        // Do not let the marker travel past where the caret can actually follow.
+        val effectiveDy = if (verticalStuckDir != 0 && (dy > 0f) == (verticalStuckDir > 0)) 0f else dy
+
         markerX = (markerX + dx).coerceIn(0f, metrics.widthPixels.toFloat())
-        markerCenterY = (markerCenterY + dy).coerceIn(0f, metrics.heightPixels.toFloat())
-        verticalStuck = false
+        markerCenterY = (markerCenterY + effectiveDy).coerceIn(0f, metrics.heightPixels.toFloat())
         updateIndicator()
         if (extendingSelection) {
             // Steer on the pan as well as on cursor updates: CURSOR_UPDATE_MONITOR only fires
@@ -307,7 +318,7 @@ class KeyboardService : InputMethodService() {
             // that is where the wait is timed out. Gating it here meant an arrow that moved
             // nothing -- at the top or bottom of the text -- left the latch set forever, and
             // the selection stopped responding entirely.
-            if (!extendSelection(dy)) steerSelection()
+            if (!extendSelection(effectiveDy)) steerSelection()
         } else {
             chaseCaret()
         }
@@ -495,7 +506,11 @@ class KeyboardService : InputMethodService() {
             // still on screen, so screen position says "did not move" for the one case where it
             // moved the most -- which latched vertical movement off during every scroll.
             if (pendingVertical != 0 && pendingFromOffset >= 0) {
-                verticalStuck = info.selectionStart == pendingFromOffset
+                verticalStuckDir = if (info.selectionStart == pendingFromOffset) {
+                    if (pendingVertical > 0) 1 else -1
+                } else {
+                    0
+                }
             }
 
             // Deliberately no attempt to move the marker with the scrolling text. Doing so
@@ -540,6 +555,15 @@ class KeyboardService : InputMethodService() {
                 chaseWaitTicks++
                 return
             }
+            // Timing out *is* the signal that the arrows achieved nothing: a move that changes
+            // the caret always reports back. Nothing reported means the caret is against the
+            // start or end of the text, which is the only way to learn it -- waiting for an
+            // update that will never come would leave the marker free to keep travelling
+            // beyond the text, and every pixel of that has to be un-travelled before the caret
+            // responds again.
+            if (pendingVertical != 0) {
+                verticalStuckDir = if (pendingVertical > 0) 1 else -1
+            }
             pendingHorizontal = 0
             pendingVertical = 0
         }
@@ -548,7 +572,8 @@ class KeyboardService : InputMethodService() {
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
         val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
-        if (lines != 0 && !verticalStuck) {
+        val stuckThisWay = verticalStuckDir != 0 && (lines > 0) == (verticalStuckDir > 0)
+        if (lines != 0 && !stuckThisWay) {
             val step = if (lines > 0) 1 else -1
             if (pendingFromOffset < 0) pendingFromOffset = caretOffset
             repeat(abs(lines)) {

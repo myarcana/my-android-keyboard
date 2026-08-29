@@ -180,6 +180,21 @@ with the caret offset unchanged.
 Leaving the marker fixed on screen gives the behaviour that is actually wanted: the caret moves
 freely within the visible text, and only pushes the view once it reaches the edge.
 
+## 10b. Never accumulate travel the caret cannot follow
+
+The marker roams freely, which is the point — but if it roams in a direction the caret has run
+out of text in, every pixel of that travel has to be un-travelled before anything responds
+again. The symptom is the cursor freezing and then snapping, and it shows up **only at the top**
+of a document: offset 0 is a hard stop, whereas at the bottom of a long document the caret keeps
+moving and nothing accumulates. That asymmetry is the tell.
+
+So the "cannot go further" state is directional and sticky, and while it is set the marker is
+not allowed to travel further that way. Movement back the other way releases it immediately.
+
+Learning that state is the subtle part. It cannot come from a cursor update, because an arrow
+that moves nothing produces no update — the absence of a report *is* the signal. It is therefore
+inferred from the wait timing out, which is the only evidence available.
+
 ## 11. Drawing outside the keyboard **[platform]**
 
 An IME cannot draw inside the target app's text field, but it can place a `PopupWindow`
