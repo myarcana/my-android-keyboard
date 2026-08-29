@@ -47,14 +47,20 @@ sealed interface GestureOutput {
     data class GlideCompleted(val path: List<PathPoint>) : GestureOutput
 
     data object TrackpadStarted : GestureOutput
-    /** Cursor steps; +x is right, +y is down. Emitted one step at a time. */
-    data class CursorMove(val dx: Int, val dy: Int) : GestureOutput
+    /**
+     * Cursor steps; +x is right, +y is down. Emitted one step at a time.
+     * When [extend] is set the step drags the free end of a selection instead of moving the
+     * caret, which the service sends as a shifted arrow key.
+     */
+    data class CursorMove(val dx: Int, val dy: Int, val extend: Boolean = false) : GestureOutput
+    /** Selection began: the anchor is dropped wherever the caret currently sits. */
+    data object SelectionStarted : GestureOutput
     data object TrackpadEnded : GestureOutput
 
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
 }
 
-enum class GestureState { IDLE, PRESSED, FLICK, GLIDE, ACCENTS, TRACKPAD }
+enum class GestureState { IDLE, PRESSED, FLICK, GLIDE, ACCENTS, TRACKPAD, SELECTING }
 
 /**
  * One state machine per pointer. Pure logic: no Android types, an injected timestamp on every
@@ -139,7 +145,7 @@ class TouchFsm(
             GestureState.FLICK -> onMoveWhileFlicking()
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x)
-            GestureState.TRACKPAD -> onMoveWhileTrackpad(x, y)
+            GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y)
             GestureState.IDLE -> emptyList()
         }
     }
@@ -192,6 +198,19 @@ class TouchFsm(
      * Requirement 5: two-dimensional cursor movement. Vertical steps are emitted as their own
      * events so the host can send DPAD_UP/DOWN -- only the text view knows where lines wrap.
      */
+    private val extending get() = state == GestureState.SELECTING
+
+    /**
+     * A second finger tapped while the trackpad is active. The caret stops being a caret and
+     * becomes one end of a selection: the anchor stays where it is and subsequent movement
+     * drags the other end.
+     */
+    fun onSecondaryTap(): List<GestureOutput> {
+        if (state != GestureState.TRACKPAD) return emptyList()
+        state = GestureState.SELECTING
+        return listOf(GestureOutput.SelectionStarted)
+    }
+
     private fun onMoveWhileTrackpad(x: Float, y: Float): List<GestureOutput> {
         val anchor = trackpadAnchor ?: return emptyList()
         residualX += x - anchor.x
@@ -202,12 +221,12 @@ class TouchFsm(
         while (abs(residualX) >= trackpadStepX) {
             val step = if (residualX > 0) 1 else -1
             residualX -= step * trackpadStepX
-            out += GestureOutput.CursorMove(step, 0)
+            out += GestureOutput.CursorMove(step, 0, extending)
         }
         while (abs(residualY) >= trackpadStepY) {
             val step = if (residualY > 0) 1 else -1
             residualY -= step * trackpadStepY
-            out += GestureOutput.CursorMove(0, step)
+            out += GestureOutput.CursorMove(0, step, extending)
         }
         return out
     }
@@ -239,7 +258,7 @@ class TouchFsm(
                     }
                 }
             }
-            GestureState.TRACKPAD -> listOf(GestureOutput.TrackpadEnded)
+            GestureState.TRACKPAD, GestureState.SELECTING -> listOf(GestureOutput.TrackpadEnded)
             GestureState.IDLE -> emptyList()
         }
         reset()

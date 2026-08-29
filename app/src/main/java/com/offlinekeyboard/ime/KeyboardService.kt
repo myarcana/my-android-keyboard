@@ -1,6 +1,7 @@
 package com.offlinekeyboard.ime
 
 import android.inputmethodservice.InputMethodService
+import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.View
 import com.offlinekeyboard.ime.gesture.GestureOutput
@@ -54,7 +55,7 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitPrimary -> commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
                 is GestureOutput.CommitAccent -> commit(out.text)
-                is GestureOutput.CursorMove -> moveCursor(out.dx, out.dy)
+                is GestureOutput.CursorMove -> moveCursor(out.dx, out.dy, out.extend)
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
                 is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
                 else -> Unit
@@ -113,13 +114,32 @@ class KeyboardService : InputMethodService() {
     /**
      * Requirement 5. Vertical movement goes through DPAD key events rather than setSelection,
      * because only the text view knows where its lines wrap.
+     *
+     * With [extend] set, the same arrows are sent with shift held, which every text view reads
+     * as "drag the free end of the selection" -- so selection follows lines exactly the way
+     * caret movement does, with no separate code path.
      */
-    private fun moveCursor(dx: Int, dy: Int) {
+    private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
+        val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
         repeat(kotlin.math.abs(dx)) {
-            sendDownUpKeyEvents(if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT)
+            sendArrow(
+                if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
+                meta,
+            )
         }
         repeat(kotlin.math.abs(dy)) {
-            sendDownUpKeyEvents(if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP)
+            sendArrow(
+                if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
+                meta,
+            )
         }
+    }
+
+    /** sendDownUpKeyEvents cannot carry a meta state, so build the events by hand. */
+    private fun sendArrow(keyCode: Int, meta: Int) {
+        val ic = currentInputConnection ?: return
+        val now = SystemClock.uptimeMillis()
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, meta))
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, meta))
     }
 }

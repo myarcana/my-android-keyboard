@@ -34,6 +34,25 @@ Check the current state with `adb shell settings get global verifier_verify_adb_
 `adb shell dumpsys package com.offlinekeyboard.ime | grep lastUpdateTime`, then dismiss the
 dialog with `adb shell input keyevent KEYCODE_BACK`.
 
+### Never `am force-stop` the keyboard's own package
+
+Force-stopping `com.offlinekeyboard.ime` kills the running IME, and Android immediately falls
+back to another installed keyboard (Gboard here). The next screenshot then shows *Gboard*,
+which is easy to mistake for "my layout changes did nothing". Reinstalling alone does not
+switch back — re-select it explicitly:
+
+```sh
+adb shell ime set com.offlinekeyboard.ime/.KeyboardService
+```
+
+`adb install -r` replaces the APK without needing a force-stop, so there is no reason to do it.
+
+### Screenshots catch the launch animation
+
+`adb exec-out screencap -p` immediately after `am start` usually captures the window
+transition, not the keyboard — the keyboard appears part-way up the screen with rows missing.
+Take a second screenshot; do not conclude the layout is broken from the first one.
+
 ### Other adb hangs on this device
 
 - `adb shell ime enable <id>` hung indefinitely once. Enabling the keyboard through

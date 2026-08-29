@@ -285,4 +285,69 @@ class TouchFsmTest {
         val out = f.onUp(q.centerX, q.centerY, 260)
         assertEquals("q", out.only<GestureOutput.CommitPrimary>().text)
     }
+
+    // --- selection from trackpad mode ---------------------------------------------------
+
+    private fun trackpadFsm(): Pair<TouchFsm, com.offlinekeyboard.ime.layout.KeyRect> {
+        val space = key("space")
+        val f = fsm()
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onLongPressTimeout(config.longPressMs)
+        return f to space
+    }
+
+    @Test
+    fun `tapping again during trackpad mode starts a selection`() {
+        val (f, _) = trackpadFsm()
+        val out = f.onSecondaryTap()
+        assertEquals(GestureState.SELECTING, f.state)
+        assertTrue(out.has<GestureOutput.SelectionStarted>())
+    }
+
+    @Test
+    fun `movement after starting a selection extends it instead of moving the caret`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+
+        val beforeSelect = f.onMove(space.centerX + stepX, space.centerY, 600)
+            .filterIsInstance<GestureOutput.CursorMove>()
+        assertTrue("caret moves plainly first", beforeSelect.all { !it.extend })
+
+        f.onSecondaryTap()
+
+        val afterSelect = f.onMove(space.centerX + stepX * 2f, space.centerY, 700)
+            .filterIsInstance<GestureOutput.CursorMove>()
+        assertTrue("expected steps after selecting", afterSelect.isNotEmpty())
+        assertTrue("steps must extend the selection", afterSelect.all { it.extend })
+    }
+
+    @Test
+    fun `selection extends vertically across lines too`() {
+        val (f, space) = trackpadFsm()
+        f.onSecondaryTap()
+        val stepY = config.trackpadStepYRatio * geometry.keyHeight
+        val out = f.onMove(space.centerX, space.centerY + stepY, 700)
+            .filterIsInstance<GestureOutput.CursorMove>()
+        assertEquals(1, out.size)
+        assertEquals(1, out.single().dy)
+        assertTrue(out.single().extend)
+    }
+
+    @Test
+    fun `a second tap does nothing unless the trackpad is active`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        assertTrue(f.onSecondaryTap().isEmpty())
+        assertEquals(GestureState.PRESSED, f.state)
+    }
+
+    @Test
+    fun `lifting off ends selection mode`() {
+        val (f, space) = trackpadFsm()
+        f.onSecondaryTap()
+        val out = f.onUp(space.centerX, space.centerY, 900)
+        assertTrue(out.has<GestureOutput.TrackpadEnded>())
+        assertEquals(GestureState.IDLE, f.state)
+    }
 }

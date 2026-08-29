@@ -92,10 +92,17 @@ class KeyboardView @JvmOverloads constructor(
     private val pointers = mutableMapOf<Int, TouchFsm>()
     private val longPressRunnables = mutableMapOf<Int, Runnable>()
 
+    /**
+     * Pointers that were swallowed by an active trackpad rather than starting their own
+     * gesture, so their eventual UP does not type anything.
+     */
+    private val consumedPointers = mutableSetOf<Int>()
+
     private var highlightedKeyId: String? = null
     private var accentPopup: Triple<KeyRect, List<String>, Int>? = null
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
+    private var selecting = false
 
     /**
      * Height of the system navigation bar. From targetSdk 35 the IME window is laid out
@@ -267,7 +274,12 @@ class KeyboardView @JvmOverloads constructor(
     private fun drawTrackpadHint(canvas: Canvas, g: LayoutGeometry, t: Theme) {
         label.color = t.secondaryText
         label.textSize = g.keyUnit * 0.5f
-        canvas.drawText("←   ↑   ↓   →", width / 2f, keyAreaBottom / 2f, label)
+        canvas.drawText(
+            if (selecting) "◀  select  ▶" else "←   ↑   ↓   →",
+            width / 2f,
+            keyAreaBottom / 2f,
+            label,
+        )
     }
 
     // --- touch ----------------------------------------------------------------------------
@@ -279,10 +291,20 @@ class KeyboardView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = event.actionIndex
                 val id = event.getPointerId(i)
-                val fsm = TouchFsm(g, config)
-                pointers[id] = fsm
-                emit(fsm.onDown(event.getX(i), event.getY(i), event.eventTime))
-                scheduleLongPress(id, fsm)
+                // A second finger while the spacebar trackpad is live starts a selection
+                // rather than pressing a key.
+                val trackpad = pointers.values.firstOrNull {
+                    it.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD
+                }
+                if (trackpad != null) {
+                    consumedPointers += id
+                    emit(trackpad.onSecondaryTap())
+                } else {
+                    val fsm = TouchFsm(g, config)
+                    pointers[id] = fsm
+                    emit(fsm.onDown(event.getX(i), event.getY(i), event.eventTime))
+                    scheduleLongPress(id, fsm)
+                }
             }
 
             MotionEvent.ACTION_MOVE -> {
@@ -298,6 +320,7 @@ class KeyboardView @JvmOverloads constructor(
                 val i = event.actionIndex
                 val id = event.getPointerId(i)
                 cancelLongPress(id)
+                if (consumedPointers.remove(id)) return true
                 pointers.remove(id)?.let { fsm ->
                     emit(fsm.onUp(event.getX(i), event.getY(i), event.eventTime))
                 }
@@ -307,6 +330,7 @@ class KeyboardView @JvmOverloads constructor(
                 pointers.keys.toList().forEach { cancelLongPress(it) }
                 pointers.values.forEach { emit(it.onCancel()) }
                 pointers.clear()
+                consumedPointers.clear()
             }
         }
         return true
@@ -344,7 +368,10 @@ class KeyboardView @JvmOverloads constructor(
                 is GestureOutput.GlideUpdated -> { glidePath = out.path; repaint = true }
                 is GestureOutput.GlideCompleted -> { glidePath = emptyList(); repaint = true }
                 GestureOutput.TrackpadStarted -> { trackpadActive = true; repaint = true }
-                GestureOutput.TrackpadEnded -> { trackpadActive = false; repaint = true }
+                GestureOutput.SelectionStarted -> { selecting = true; repaint = true }
+                GestureOutput.TrackpadEnded -> {
+                    trackpadActive = false; selecting = false; repaint = true
+                }
                 else -> Unit
             }
         }
