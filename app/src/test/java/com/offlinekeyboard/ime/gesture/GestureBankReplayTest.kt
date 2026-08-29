@@ -150,7 +150,16 @@ class GestureBankReplayTest {
      * collect, which is exactly what a principled bound is for.
      */
     private val flickGrid = steps(0.20f, 0.85f, 0.05f)
-    private val dominanceGrid = steps(0.75f, 3.0f, 0.25f)
+    /**
+     * How much more vertical than horizontal a flick has to be.
+     *
+     * The upper bound was 3.0 and that was too low to contain the answer. On the o key the
+     * flicks run from 6.6 to 74, and "ok" -- which leaves for a key half a width to the left --
+     * runs 1.6 to 4.3, so the separating value is somewhere around 5 and the sweep could not
+     * reach it. There is no platform limit to appeal to here, so the grid simply has to be wide
+     * enough that the data, and not the grid, picks the number.
+     */
+    private val dominanceGrid = steps(0.75f, 9.0f, 0.25f)
     private val glideGrid = steps(0.8f, 2.6f, 0.2f)
     private val promoteGrid = steps(1.2f, 4.2f, 0.2f)
 
@@ -218,18 +227,42 @@ class GestureBankReplayTest {
         }!!
     }
 
-    /** The room a threshold has before the score changes: the useful half of a sweep result. */
+    /**
+     * The room a threshold has before the score changes: the useful half of a sweep result.
+     *
+     * It also calls out any axis whose winning range runs into the end of its own grid. That is
+     * not a result, it is a boundary -- the data was still asking for more when the search
+     * stopped -- and it is easy to read straight past. This report has already hidden the answer
+     * twice that way: once on the flick distance, once on the vertical dominance, where the true
+     * separating value sat at about 5 and the grid stopped at 3.
+     */
     private fun reportPlateau(tied: List<GestureConfig>) {
         if (tied.size <= 1) return
         println("  ${tied.size} threshold sets score identically. Room on each axis:")
-        fun span(name: String, get: (GestureConfig) -> Float) {
+        val warnings = mutableListOf<String>()
+        fun span(name: String, grid: List<Float>, get: (GestureConfig) -> Float) {
             val values = tied.map(get)
-            println("    %-20s %.2f .. %.2f".format(name, values.min(), values.max()))
+            val lo = values.min()
+            val hi = values.max()
+            val edge = when {
+                lo <= grid.first() && hi >= grid.last() -> " <- spans the whole grid: no signal"
+                lo <= grid.first() -> " <- AT THE BOTTOM OF THE GRID"
+                hi >= grid.last() -> " <- AT THE TOP OF THE GRID"
+                else -> ""
+            }
+            if (edge.isNotEmpty()) warnings += name
+            println("    %-20s %.2f .. %.2f%s".format(name, lo, hi, edge))
         }
-        span("flickDistanceRatio") { it.flickDistanceRatio }
-        span("verticalDominance") { it.verticalDominance }
-        span("glideDistanceRatio") { it.glideDistanceRatio }
-        span("flickToGlideRatio") { it.flickToGlideRatio }
+        span("flickDistanceRatio", flickGrid) { it.flickDistanceRatio }
+        span("verticalDominance", dominanceGrid) { it.verticalDominance }
+        span("glideDistanceRatio", glideGrid) { it.glideDistanceRatio }
+        span("flickToGlideRatio", promoteGrid) { it.flickToGlideRatio }
+        if (warnings.isNotEmpty()) {
+            println()
+            println("  The winning range reaches the end of the grid for: ${warnings.joinToString()}.")
+            println("  Widen that grid and re-run, or justify the bound -- a sweep that stops at")
+            println("  its own edge has found the edge and not an optimum.")
+        }
     }
 
     /**
@@ -261,7 +294,7 @@ class GestureBankReplayTest {
             println("  %-20s %s".format(name, cells))
         }
         row("flickDistanceRatio", steps(0.20f, 0.85f, 0.1f)) { best.copy(flickDistanceRatio = it) }
-        row("verticalDominance", steps(0.75f, 3.0f, 0.25f)) { best.copy(verticalDominance = it) }
+        row("verticalDominance", steps(0.75f, 9.0f, 1.0f)) { best.copy(verticalDominance = it) }
         row("glideDistanceRatio", steps(0.8f, 2.6f, 0.3f)) { best.copy(glideDistanceRatio = it) }
         row("flickToGlideRatio", steps(1.2f, 4.2f, 0.5f)) { best.copy(flickToGlideRatio = it) }
     }

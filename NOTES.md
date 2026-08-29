@@ -214,15 +214,42 @@ Palette: `#ECEDFB` ground, white keys, `#E2DFFF` special keys, `#181B25` text.
 | parameter | value | why |
 |---|---|---|
 | `longPressMs` | 500 | matches the platform |
-| `flickDistanceRatio` | 0.45 × key height | far enough not to trigger on a sloppy tap |
-| `verticalDominance` | 1.5 | a flick must be clearly vertical, or it is a glide |
-| `glideDistanceRatio` | 1.2 × key width | when a press becomes a glide |
-| `flickToGlideRatio` | 2.0 × key width | a longer path promotes a flick to a glide |
+| `flickDistanceRatio` | 0.20 × key height | Android's touch slop; below it the OS calls the finger still |
+| `verticalDominance` | 4.25 | what separates a flick from gliding "ok" |
+| `glideDistanceRatio` | 1.4 × key width | when a press becomes a glide |
+| `flickToGlideRatio` | 2.8 × key width | a longer path promotes a flick to a glide |
 
 The bottom four are the tuning surface for flick-versus-glide, and they are the four stored with
-every gesture recording so an old verdict stays interpretable. They are still at their original
-by-feel values: replace them with what `tools/gestures.sh analyse` reports once the bank has
-enough samples to be worth trusting, and record here what the bank said, not just the number.
+every gesture recording so an old verdict stays interpretable. They are no longer by-feel: these
+are what 128 labelled gestures said, taking balanced accuracy from 89.1% to 99.0%. What each one
+is actually doing, because the numbers alone do not say:
+
+**`flickDistanceRatio` 0.45 → 0.20.** The old value lost ten of sixty-four flicks outright --
+six on `m`, where the bottom row leaves nowhere to swipe to and the whole gesture fits in 38 to
+46px against a 54px threshold. The measured classes do not overlap even slightly: taps travel
+**zero** pixels (five to eleven move events at the identical coordinate) and the weakest real
+flick is 27.8px. With an empty 27.8px gap, the data cannot pick a value inside it, so the
+platform does: 8dp of touch slop over a 40dp key is 0.20, and below that Android still considers
+the finger stationary. A keyboard that has decided you flicked while the OS says you have not
+moved is broken rather than badly tuned.
+
+**`verticalDominance` 1.5 → 4.25.** This one separates a flick from gliding "ok", and nothing
+else does. On the o key, flicks leave at |dy|/|dx| of 6.6 and up; "ok" leaves at 1.6 to 4.3,
+because k sits half a key left, so the word departs about 25 degrees off vertical. Curvature
+looked like the obvious discriminator and is exactly wrong: "ok" is the *straightest* gesture in
+the bank (straightness 0.999, bow 0.03 keys), straighter than the average flick, several of which
+hook through 80 degrees as the finger lifts.
+
+**`flickToGlideRatio` 2.0 → 2.8.** The original complaint -- a vigorous flick promoted into a
+glide -- though it turned out to be the smaller half of the problem: two failures against ten
+under-travelled flicks.
+
+**`glideDistanceRatio` 1.2 → 1.4.** Barely earns its change; it was flat across most of its range
+in every sweep so far.
+
+One gesture in the bank is still misread: an "ok" that left at a ratio of 4.3, right against the
+threshold. That is the honest state of it -- see docs/GESTURE_BANK.md on why "ok" probably wants
+the lexicon at decode time rather than another number.
 
 ### Trackpad gain and acceleration
 

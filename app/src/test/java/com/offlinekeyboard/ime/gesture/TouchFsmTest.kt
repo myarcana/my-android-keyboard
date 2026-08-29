@@ -97,16 +97,20 @@ class TouchFsmTest {
         val q = key("q")
         val f = fsm()
         f.onDown(q.centerX, q.centerY, 0)
-        f.onMove(q.centerX, q.centerY + 25f, 40)
+        val drop = config.flickDistanceRatio * geometry.keyHeight * 1.5f
+        f.onMove(q.centerX, q.centerY + drop, 40)
         assertEquals(GestureState.FLICK, f.state)
 
-        // keep going -- past the longer flick-to-glide threshold
-        val promoted = f.onMove(q.centerX + 60f, q.centerY + 30f, 80)
+        // Keep going, past the longer flick-to-glide threshold. Derived from the config rather
+        // than hard-coded: these numbers are tuned against recorded gestures and do move, and a
+        // fixture that silently stops exercising the transition is worse than no fixture.
+        val far = config.flickToGlideRatio * geometry.keyUnit + geometry.keyUnit
+        val promoted = f.onMove(q.centerX + far, q.centerY + drop, 80)
         assertEquals(GestureState.GLIDE, f.state)
         assertTrue(promoted.has<GestureOutput.FlickPreviewCleared>())
         assertTrue(promoted.has<GestureOutput.GlideStarted>())
 
-        val out = f.onUp(q.centerX + 60f, q.centerY + 30f, 120)
+        val out = f.onUp(q.centerX + far, q.centerY + drop, 120)
         assertTrue("promoted gesture must end as a glide", out.has<GestureOutput.GlideCompleted>())
         assertTrue("and must not type the flick symbol", !out.has<GestureOutput.CommitSecondary>())
     }

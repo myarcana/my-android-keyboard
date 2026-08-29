@@ -15,14 +15,32 @@ data class PathPoint(val x: Float, val y: Float, val t: Long)
  */
 data class GestureConfig(
     val longPressMs: Long = 500L,
-    /** Downward travel needed to read as a flick, as a fraction of key height. */
-    val flickDistanceRatio: Float = 0.45f,
-    /** |dy| must exceed this multiple of |dx| for a flick; otherwise it reads as a glide. */
-    val verticalDominance: Float = 1.5f,
+    /**
+     * Downward travel needed to read as a flick, as a fraction of key height.
+     *
+     * Measured, not guessed: see docs/GESTURE_BANK.md. At the original 0.45 -- 54px on the
+     * target phone -- ten of sixty-four recorded flicks never registered at all, six of them on
+     * m, where the bottom row leaves nowhere to swipe to. The recorded flicks reach down to
+     * 27.8px, and recorded taps travel *zero* pixels, with five to eleven move events all at the
+     * identical coordinate. The gap between the two classes is empty, so the number is set by
+     * the platform instead: 8dp of touch slop over a 40dp key is 0.20, and below that Android
+     * itself still calls the finger stationary.
+     */
+    val flickDistanceRatio: Float = 0.20f,
+    /**
+     * |dy| must exceed this multiple of |dx| for a flick; otherwise it reads as a glide.
+     *
+     * This is what separates a flick from "ok". On the o key, flicks leave at a ratio of 6.6 or
+     * more, while gliding "ok" leaves at 1.6 to 4.3 -- because k is half a key to the left, so
+     * the word departs about 25 degrees off vertical and the flick does not. Nothing else
+     * separates those two: "ok" is in fact the *straightest* gesture in the bank, straighter
+     * than the average flick, several of which hook through 80 degrees at the lift.
+     */
+    val verticalDominance: Float = 4.25f,
     /** Path length that turns a press into a glide, as a fraction of key width. */
-    val glideDistanceRatio: Float = 1.2f,
+    val glideDistanceRatio: Float = 1.4f,
     /** Longer path length that promotes an in-progress flick into a glide. */
-    val flickToGlideRatio: Float = 2.0f,
+    val flickToGlideRatio: Float = 2.8f,
     /**
      * Upward travel on backspace that clears the line, as a fraction of key height. Larger than
      * [flickDistanceRatio] because this gesture destroys text: a thumb drifting off the key
