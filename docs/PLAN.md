@@ -119,9 +119,15 @@ expected key grid, which is why we vendor as source rather than link a prebuilt.
 
 ## Phase 3 — Chinese input
 
-Vendor librime. Its dependency set (boost, leveldb, marisa, opencc, yaml-cpp, glog) is the
-single largest build-system risk in this plan; crib the NDK toolchain and Gradle module
-layout from `fcitx5-android`, which has already solved exactly this.
+**This is no longer a from-source build.** `fcitx5-android/prebuilt` publishes per-ABI static
+libraries for exactly the set we need — `librime.a` (18.6 MB on arm64-v8a) plus boost, opencc,
+marisa, leveldb, glog, yaml-cpp and zstd, each with headers — and it is current (July 2026).
+Consuming it turns this plan's largest risk into a checkout and a CMake `find_library`.
+
+One catch, and it is the thing to check first: those artifacts were built with **NDK
+28.0.13004108** and we pin 27.3.13750724. CMake matches exactly (3.31.6). Mixing NDK versions
+across a C++ static library boundary is not officially supported, so the first step of this
+phase is to install NDK 28 and move the pin, not to hope the libc++ ABI lines up.
 
 Schemas: `luna_pinyin` (Simplified), `terra_pinyin` + `bopomofo` (Traditional). Per the
 answered question, Traditional gets **both** Zhuyin and Pinyin — Zhuyin needs its own
@@ -212,7 +218,9 @@ seeing `nihao` survive is a test case, not a hope.
 
 ## Risks
 
-1. **librime NDK build** — largest schedule risk. Mitigation: copy `fcitx5-android`'s build.
+1. **librime NDK build** — was the largest schedule risk; largely retired by consuming
+   `fcitx5-android/prebuilt` rather than building the dependency tree ourselves. What remains
+   is the NDK 27→28 move that those artifacts require.
 2. **FUTO decoder on iOS geometry** — may need coordinate normalization; vendored as source
    so we can fix it.
 3. **ASR accuracy bar** — may not be reachable at acceptable size. This is measured in
