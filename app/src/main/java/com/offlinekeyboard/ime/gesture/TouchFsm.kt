@@ -203,6 +203,36 @@ class TouchFsm(
     /** Deadline the host should schedule a [onLongPressTimeout] callback for, or null. */
     val longPressDeadline: Long? get() = down?.let { it.t + config.longPressMs }
 
+    /** The key the finger came down on, or null between gestures. */
+    val originKeyId: String? get() = origin?.key?.id
+
+    /**
+     * How far the origin key's glyphs should have slid toward their flicked positions, 0..1.
+     *
+     * The iPadOS animation follows the finger, so the view needs the progress of a flick that has
+     * not happened yet -- not just the verdict once it has. It is a property rather than a
+     * [GestureOutput] because it changes on every touch sample and means nothing to anyone but
+     * the renderer: emitting it would push a per-sample event through the service and into the
+     * gesture bank.
+     *
+     * The conditions are exactly [onMoveWhilePressed]'s, minus the distance that one is testing,
+     * so the glyphs move only while a flick is genuinely still possible. A sideways drag or a key
+     * with no secondary leaves them at rest, and a flick that grows into a glide drops back to 0
+     * and lets them fall home.
+     */
+    val flickProgress: Float
+        get() {
+            if (state == GestureState.FLICK) return 1f
+            if (state != GestureState.PRESSED) return 0f
+            val key = origin ?: return 0f
+            if (key.key.secondary == null || key.key.type == KeyType.BACKSPACE) return 0f
+            val start = down ?: return 0f
+            val now = path.lastOrNull() ?: return 0f
+            val dy = now.y - start.y
+            if (dy <= 0f || dy <= config.verticalDominance * abs(now.x - start.x)) return 0f
+            return (dy / flickDistance).coerceIn(0f, 1f)
+        }
+
     fun onDown(x: Float, y: Float, t: Long): List<GestureOutput> {
         reset()
         val key = geometry.keyAt(x, y) ?: return emptyList()

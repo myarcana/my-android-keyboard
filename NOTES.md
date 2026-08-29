@@ -188,6 +188,10 @@ compromise. Word deletion stops at a line break rather than running past it.
   A cursor should look like a cursor.
 - **Vector glyphs, never colour emoji.** The globe and microphone were emoji at first and were
   the single ugliest detail against Gboard's flat monochrome icons.
+- **The flick shows itself before it commits.** Swiping down on a key slides its symbol out of
+  the small grey slot and into the letter's own place — position, size and colour — while the
+  letter drops out of the bottom of the key. Nothing about the gesture is hidden until release:
+  the key is visibly *becoming* the symbol, and pulling back up puts it away again.
 
 ---
 
@@ -294,6 +298,35 @@ a gesture and never bend it, but a keyboard-sized trackpad has far less vertical
 horizontal and vertical has to cover a whole document. At 0.6 px/ms vertical is already at 2.5×
 while horizontal is at 1.14×. The accepted cost is that a fast diagonal drag is steeper than the
 finger's own path.
+
+### Flick animation — `view/KeyboardView`
+
+| parameter | value |
+|---|---|
+| glyph time constant | 40 ms |
+| symbol size / travel | 0.30 → 0.62 key units, up to the primary's baseline |
+| letter size / travel | ×0.74, 0.46 key heights down, clipped at the key edge |
+| letter fully faded at | 0.75 of the flick |
+
+**The glyphs chase the finger, they are not pinned to it.** A flick commits after 0.20 of a key
+height — 24px on the target phone, and that number is Android's touch slop rather than a choice
+(see the gesture thresholds above). A fast finger crosses 24px in three or four move events, so
+glyphs drawn straight at the finger's offset would jump between two or three positions and then
+stop. Aiming them at that offset and letting them approach it exponentially gives both readings
+honestly: a slow deliberate drag tracks the thumb, and a flick fast enough to be four samples
+long still gets ~120ms of visible movement.
+
+Exponential rather than a fixed-duration tween because the target keeps moving — the finger can
+reverse, stall part way down, or lift at any moment, and a tween would have to be restarted and
+re-aimed on every touch sample. Chasing a target has no cases in it, and never overshoots; an
+iPadOS key slides, it does not bounce.
+
+The progress comes from `TouchFsm.flickProgress`, not from the view's own arithmetic on the
+coordinates. What counts as a flick still in progress — downward, vertically dominant, on a key
+with a secondary, not yet promoted to a glide — is exactly the state machine's business, and a
+second copy of those rules in the renderer would be a second thing to keep in step. It falls to
+zero the moment the flick becomes a glide, which is what sends the glyphs home with no separate
+handling for release, cancellation or escape.
 
 ### Cursor and selection
 

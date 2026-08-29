@@ -25,6 +25,8 @@ import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import kotlin.math.abs
+import kotlin.math.exp
 
 /**
  * Palette sampled pixel-by-pixel from Gboard on the target device, so the keyboard sits in the
@@ -83,6 +85,24 @@ private val ICON_KEYS = setOf(
     KeyType.RETURN,
 )
 
+/**
+ * Time constant of the exponential the flick glyphs chase the finger with, in milliseconds.
+ *
+ * The animation cannot simply be drawn at the finger's position. A flick commits after 0.20 of a
+ * key height -- 24px on the target phone, chosen because it is Android's own touch slop and the
+ * gesture bank showed nothing between a tap and a flick to separate them any better. A fast
+ * finger crosses that in three or four move events, so glyphs pinned straight to it would jump
+ * rather than move. Chasing the finger instead gives both readings honestly: a deliberate drag
+ * tracks the thumb, and a quick flick still gets a full ~120ms of movement to be seen.
+ */
+private const val FLICK_TIME_CONSTANT_MS = 40f
+
+/**
+ * Progress at which the departing letter has faded out completely -- before the symbol lands, so
+ * the two are never stacked on top of each other in the middle of the key.
+ */
+private const val PRIMARY_FADE_AT = 0.75f
+
 class KeyboardView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -138,6 +158,13 @@ class KeyboardView @JvmOverloads constructor(
     private val consumedPointers = mutableSetOf<Int>()
 
     private var highlightedKeyId: String? = null
+
+    /**
+     * In-flight flick animations, by key id -- rather than by pointer, so a key still springing
+     * back after the finger has lifted goes on animating with no pointer to drive it.
+     */
+    private val flicks = mutableMapOf<String, Flick>()
+    private var lastFrameNanos = 0L
     private var accentPopup: Triple<KeyRect, List<String>, Int>? = null
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
@@ -208,6 +235,7 @@ class KeyboardView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val g = geometry()
         val t = theme
+        advanceFlicks()
         canvas.drawColor(t.background)
 
         if (trackpadActive) {
@@ -294,13 +322,6 @@ class KeyboardView @JvmOverloads constructor(
             fill,
         )
 
-        // iPadOS flick secondary, small and tucked above the primary glyph
-        rect.key.secondary?.let { secondary ->
-            label.color = t.secondaryText
-            label.textSize = g.keyUnit * 0.30f
-            canvas.drawText(secondary, rect.centerX, rect.top + g.keyHeight * 0.28f, label)
-        }
-
         if (rect.key.type in ICON_KEYS) {
             icon.color = t.text
             icon.strokeWidth = g.keyUnit * 0.055f
@@ -309,19 +330,63 @@ class KeyboardView @JvmOverloads constructor(
         }
 
         val text = rect.key.primary
-        if (text.isBlank()) return
-        label.color = t.text
-        label.textSize = if (rect.key.type == KeyType.CHARACTER) {
+        val secondary = rect.key.secondary
+        if (text.isBlank() && secondary == null) return
+
+        // How far this key is through the flick, 0 at rest. Everything below reduces to the
+        // resting layout at 0, so a key nobody is touching is drawn exactly as it always was.
+        val flick = flicks[rect.key.id]?.progress ?: 0f
+        // The departing letter leaves through the bottom of the key; without this it would be
+        // drawn over the key below.
+        if (flick > 0f) {
+            canvas.save()
+            canvas.clipRect(rect.left, rect.top, rect.right, rect.bottom)
+        }
+
+        val primarySize = if (rect.key.type == KeyType.CHARACTER) {
             g.keyUnit * 0.62f
         } else {
             g.keyUnit * 0.42f
         }
-        val baseline = if (rect.key.secondary != null) {
+        label.textSize = primarySize
+        // A key with a flick secondary above it carries its primary low; a key without one
+        // centres it.
+        val primaryBaseline = if (secondary != null) {
             rect.centerY + g.keyHeight * 0.24f
         } else {
             rect.centerY - (label.descent() + label.ascent()) / 2f
         }
-        canvas.drawText(text, rect.centerX, baseline, label)
+
+        if (text.isNotBlank()) {
+            label.color = t.text
+            label.textSize = primarySize * (1f - 0.26f * flick)
+            label.alpha = (255f * (1f - flick / PRIMARY_FADE_AT).coerceIn(0f, 1f)).toInt()
+            canvas.drawText(
+                text,
+                rect.centerX,
+                primaryBaseline + g.keyHeight * 0.46f * flick,
+                label,
+            )
+            label.alpha = 255
+        }
+
+        // The iPadOS flick secondary: small, grey and tucked above the primary at rest, and it
+        // slides down into the primary's own place -- position, size and colour -- as the finger
+        // pulls it there. The letter is on its way out underneath it, which is what makes the
+        // gesture legible before it commits: the key is visibly becoming the symbol.
+        secondary?.let {
+            label.color = blend(t.secondaryText, t.text, flick)
+            label.textSize = g.keyUnit * (0.30f + 0.32f * flick)
+            val restBaseline = rect.top + g.keyHeight * 0.28f
+            canvas.drawText(
+                it,
+                rect.centerX,
+                restBaseline + (primaryBaseline - restBaseline) * flick,
+                label,
+            )
+        }
+
+        if (flick > 0f) canvas.restore()
     }
 
     private fun drawGlideTrail(canvas: Canvas, g: LayoutGeometry, t: Theme) {
@@ -384,10 +449,106 @@ class KeyboardView @JvmOverloads constructor(
         )
     }
 
+    // --- the iPadOS flick animation -------------------------------------------------------
+
+    /**
+     * One key's animation: [target] is where the finger says the glyphs belong, [progress] is
+     * where they have actually got to.
+     */
+    private class Flick {
+        var progress = 0f
+        var target = 0f
+    }
+
+    /**
+     * Points every key's glyphs at wherever the fingers currently have them.
+     *
+     * The targets come from the state machines rather than from the raw coordinates, because the
+     * rules for what counts as a flick in progress -- downward, vertically dominant, on a key that
+     * has a secondary, not yet promoted to a glide -- already live there and must not be guessed
+     * at a second time here. Every key not under a flicking finger is aimed back at rest, which is
+     * what makes the glyphs fall home on release, on a cancel, and when a flick turns into a
+     * glide, without any of those needing to be handled separately.
+     */
+    private fun syncFlickTargets() {
+        var changed = false
+        flicks.values.forEach {
+            if (it.target != 0f) {
+                it.target = 0f
+                changed = true
+            }
+        }
+        pointers.values.forEach { fsm ->
+            val keyId = fsm.originKeyId ?: return@forEach
+            val progress = fsm.flickProgress
+            if (progress <= 0f) return@forEach
+            val flick = flicks.getOrPut(keyId) { Flick() }
+            if (flick.target != progress) {
+                flick.target = progress
+                changed = true
+            }
+        }
+        if (changed) invalidate()
+    }
+
+    /**
+     * Advances every animation one frame, and asks for another while any is still moving.
+     *
+     * Exponential rather than a fixed-duration tween because the target keeps moving: the finger
+     * can reverse, stall part way down, or lift at any moment, and a tween would have to be
+     * restarted and re-aimed on every touch sample. Chasing a target handles all of that with no
+     * cases in it, and never overshoots -- an iPadOS key slides, it does not bounce.
+     */
+    private fun advanceFlicks() {
+        if (flicks.isEmpty()) return
+        val now = System.nanoTime()
+        // A dropped frame must not teleport the glyphs, and the first frame of an animation has
+        // no previous one to measure from.
+        val dtMs =
+            if (lastFrameNanos == 0L) 0f
+            else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
+        lastFrameNanos = now
+        val step = 1f - exp(-dtMs / FLICK_TIME_CONSTANT_MS)
+
+        var animating = false
+        val entries = flicks.entries.iterator()
+        while (entries.hasNext()) {
+            val flick = entries.next().value
+            flick.progress += (flick.target - flick.progress) * step
+            // An exponential only ever approaches its target, so it is landed by hand -- otherwise
+            // a key at rest would keep asking for frames forever.
+            if (abs(flick.target - flick.progress) < 0.004f) flick.progress = flick.target
+            if (flick.target == 0f && flick.progress == 0f) entries.remove() else animating = true
+        }
+
+        if (animating) postInvalidateOnAnimation() else lastFrameNanos = 0L
+    }
+
+    /** Straight per-channel interpolation, for the secondary taking on the primary's colour. */
+    private fun blend(from: Int, to: Int, f: Float): Int {
+        if (f <= 0f) return from
+        if (f >= 1f) return to
+        fun channel(a: Int, b: Int) = (a + (b - a) * f).toInt()
+        return Color.argb(
+            channel(Color.alpha(from), Color.alpha(to)),
+            channel(Color.red(from), Color.red(to)),
+            channel(Color.green(from), Color.green(to)),
+            channel(Color.blue(from), Color.blue(to)),
+        )
+    }
+
     // --- touch ----------------------------------------------------------------------------
 
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        handleTouch(event)
+        // Every event can start, move or end a flick, so the glyphs are re-aimed after all of
+        // them rather than at each of the several places a gesture can change course.
+        syncFlickTargets()
+        return true
+    }
+
+    private fun handleTouch(event: MotionEvent) {
         val g = geometry()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
@@ -450,9 +611,9 @@ class KeyboardView @JvmOverloads constructor(
                     pressedCandidate = -1
                     invalidate()
                     if (committed) onCandidate(pressed)
-                    return true
+                    return
                 }
-                if (consumedPointers.remove(id)) return true
+                if (consumedPointers.remove(id)) return
                 pointers.remove(id)?.let { fsm ->
                     emit(fsm.onUp(event.getX(i), event.getY(i), event.eventTime))
                 }
@@ -467,11 +628,15 @@ class KeyboardView @JvmOverloads constructor(
                 pressedCandidate = -1
             }
         }
-        return true
     }
 
     private fun scheduleLongPress(id: Int, fsm: TouchFsm) {
-        val runnable = Runnable { emit(fsm.onLongPressTimeout(System.currentTimeMillis())) }
+        val runnable = Runnable {
+            emit(fsm.onLongPressTimeout(System.currentTimeMillis()))
+            // A press that becomes an accent popup or a trackpad is no longer a possible flick,
+            // and no touch event is coming to notice that.
+            syncFlickTargets()
+        }
         longPressRunnables[id] = runnable
         uiHandler.postDelayed(runnable, config.longPressMs)
     }

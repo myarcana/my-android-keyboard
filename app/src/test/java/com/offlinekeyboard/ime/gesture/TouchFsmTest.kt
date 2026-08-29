@@ -72,6 +72,66 @@ class TouchFsmTest {
         assertTrue("nothing may be committed before release", !moved.has<GestureOutput.CommitSecondary>())
     }
 
+    // --- flick animation ------------------------------------------------------------------
+
+    @Test
+    fun `flick progress tracks the finger down the key and stops at one`() {
+        val q = key("q")
+        val f = fsm()
+        val flickDistance = GestureConfig().flickDistanceRatio * geometry.keyHeight
+        f.onDown(q.centerX, q.centerY, 0)
+        assertEquals(0f, f.flickProgress, 0.001f)
+
+        f.onMove(q.centerX, q.centerY + flickDistance / 2f, 20)
+        assertEquals(0.5f, f.flickProgress, 0.01f)
+
+        // Committed to a flick, and staying down does not push it past the end.
+        f.onMove(q.centerX, q.centerY + flickDistance * 3f, 40)
+        assertEquals(GestureState.FLICK, f.state)
+        assertEquals(1f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `flick progress reports the key the glyphs belong to`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        assertEquals("q", f.originKeyId)
+        f.onUp(q.centerX, q.centerY, 80)
+        assertNull(f.originKeyId)
+    }
+
+    @Test
+    fun `a flick that becomes a glide sends the glyphs home`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX, q.centerY + 25f, 40)
+        assertEquals(1f, f.flickProgress, 0.001f)
+
+        f.onMove(q.centerX, q.centerY + 200f, 80)
+        assertEquals(GestureState.GLIDE, f.state)
+        assertEquals(0f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `a sideways drag never moves the glyphs`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        f.onMove(q.centerX + 24f, q.centerY + 6f, 40)
+        assertEquals(0f, f.flickProgress, 0.001f)
+    }
+
+    @Test
+    fun `a key with no secondary never moves its glyphs`() {
+        val space = key("space")
+        val f = fsm()
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onMove(space.centerX, space.centerY + 6f, 40)
+        assertEquals(0f, f.flickProgress, 0.001f)
+    }
+
     @Test
     fun `a key with no secondary does not flick`() {
         val space = key("space")
