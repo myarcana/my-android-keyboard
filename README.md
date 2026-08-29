@@ -4,6 +4,8 @@ An Android IME that behaves like the iOS keyboard, supports English + Chinese
 (Traditional/Taiwan and Simplified/mainland), and never touches the network.
 
 Full design and phase plan: `docs/PLAN.md`.
+How the granular cursor and selection work: `docs/CURSOR_AND_SELECTION.md`.
+Environment gotchas: `NOTES.md`.
 
 ## Offline guarantee
 
