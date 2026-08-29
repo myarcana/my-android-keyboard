@@ -48,9 +48,19 @@ that is how this keyboard will insert it.
 tools/asr_bench/record.sh
 ```
 
+Press **q** to stop each take — ffmpeg keeps recording until you do, and takes are capped at 60
+seconds so a forgotten `q` cannot run away.
+
 Read at your normal messaging pace, in the accent you actually use. A model that wins on careful
-diction and loses on the way you really talk is the wrong model. Recordings land in
-`asr-bench/recordings/`, which is git-ignored — it is your voice.
+diction and loses on the way you really talk is the wrong model. Read each line **once**: a
+sentence read twice transcribes as a sentence written twice and ruins that prompt's score.
+
+Each take reports its length and peak level, and offers a re-record if it looks like silence
+(wrong input device, muted microphone) or runs long enough to suggest a double read. Recordings
+land in `asr-bench/recordings/`, which is git-ignored — it is your voice.
+
+ffmpeg prints an Objective-C warning about Continuity Camera on every AVFoundation call. It has
+nothing to do with audio capture and no flag silences it, so the script filters it out.
 
 **2. Get Apple's answer**, so the bar is in the same table. Dictate the same 24 prompts into any
 Mac text field with Apple dictation, and save what it heard as a TSV of `id<tab>text`:
