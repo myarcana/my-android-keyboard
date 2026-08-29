@@ -9,6 +9,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class TouchFsmTest {
 
@@ -324,6 +325,54 @@ class TouchFsmTest {
         val out = f.onMove(space.centerX + stepX * 1.2f, space.centerY, 600)
         assertEquals(1, out.filterIsInstance<GestureOutput.CursorMove>().size)
         assertEquals(0.2f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
+    }
+
+    @Test
+    fun `caret snaps to the nearest boundary, not the one just passed`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+
+        // just over half a step: the nearest boundary is the next one, so the caret moves now
+        val out = f.onMove(space.centerX + stepX * 0.6f, space.centerY, 600)
+        assertEquals(1, out.filterIsInstance<GestureOutput.CursorMove>().size)
+        // and the granular position is now *behind* the caret, by the remaining 0.4
+        assertEquals(-0.4f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
+    }
+
+    @Test
+    fun `under half a step leaves the caret alone`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        val out = f.onMove(space.centerX + stepX * 0.4f, space.centerY, 600)
+        assertTrue(out.filterIsInstance<GestureOutput.CursorMove>().isEmpty())
+        assertEquals(0.4f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
+    }
+
+    @Test
+    fun `granular position never drifts more than half a step from the caret`() {
+        val (f, space) = trackpadFsm()
+        val stepX = config.trackpadStepXRatio * geometry.keyUnit
+        var x = space.centerX
+        // drag across several characters in uneven increments
+        for (i in 1..25) {
+            x += stepX * 0.37f
+            val out = f.onMove(x, space.centerY, 600L + i * 10)
+            out.filterIsInstance<GestureOutput.CursorProgress>().forEach {
+                assertTrue(
+                    "progress drifted to ${it.fractionX}",
+                    abs(it.fractionX) <= 0.5f + 0.001f,
+                )
+            }
+        }
+    }
+
+    @Test
+    fun `half-step travel terminates instead of oscillating`() {
+        val (f, space) = trackpadFsm()
+        val stepY = config.trackpadStepYRatio * geometry.keyHeight
+        // exactly half a step: a non-strict comparison would step back and forth forever
+        val out = f.onMove(space.centerX, space.centerY + stepY * 0.5f, 600)
+        assertTrue(out.filterIsInstance<GestureOutput.CursorMove>().size <= 1)
     }
 
     @Test

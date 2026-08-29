@@ -226,13 +226,20 @@ class TouchFsm(
         residualY += y - anchor.y
         trackpadAnchor = PathPoint(x, y, anchor.t)
 
+        // Round to the NEAREST boundary rather than truncating: step once the finger is more
+        // than half a step past, leaving the residual within +/-0.5. Truncating meant the caret
+        // only followed after a whole character of travel, so the granular position led the
+        // caret by up to a full character and the caret then landed on the far side of it.
+        //
+        // The comparison must be strict: at exactly half a step, >= would step one way, land on
+        // the opposite half boundary, and oscillate forever.
         val out = mutableListOf<GestureOutput>()
-        while (abs(residualX) >= trackpadStepX) {
+        while (abs(residualX) > trackpadStepX / 2f) {
             val step = if (residualX > 0) 1 else -1
             residualX -= step * trackpadStepX
             out += GestureOutput.CursorMove(step, 0, extending)
         }
-        while (abs(residualY) >= trackpadStepY) {
+        while (abs(residualY) > trackpadStepY / 2f) {
             val step = if (residualY > 0) 1 else -1
             residualY -= step * trackpadStepY
             out += GestureOutput.CursorMove(0, step, extending)

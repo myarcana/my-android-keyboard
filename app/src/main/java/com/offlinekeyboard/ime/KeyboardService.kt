@@ -45,13 +45,28 @@ class KeyboardService : InputMethodService() {
     // --- granular cursor indicator ---
     private var indicator: CursorIndicatorView? = null
     private var indicatorPopup: PopupWindow? = null
-    private var anchorInfo: CursorAnchorInfo? = null
+    private var trackpadActive = false
     private var progressX = 0f
     private var progressY = 0f
+
+    /** Caret position last reported by the app, in screen coordinates. */
+    private var caretX = Float.NaN
+    private var caretTop = 0f
+    private var caretBottom = 0f
+
+    /**
+     * Where we believe the caret is *now*.
+     *
+     * CursorAnchorInfo arrives a frame or so after the arrow key is sent. Without predicting the
+     * move, the marker briefly recomputes from the pre-move caret and visibly jumps backwards,
+     * then forwards again when the real position lands.
+     */
+    private var predictedX = Float.NaN
+    private var predictedTop = Float.NaN
+
     /** Learned from how far the caret actually jumps per step in the current field. */
-    private var charWidthEstimate = 0f
-    private var lastCaretX = Float.NaN
-    private var trackpadActive = false
+    private var charWidth = 0f
+    private var lineHeight = 0f
 
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
@@ -167,21 +182,29 @@ class KeyboardService : InputMethodService() {
      */
     private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
         val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
+        val step = if (dx > 0) 1 else -1
         repeat(abs(dx)) {
+            // A move refused at a line edge must not move the prediction either.
             if (!atLineEdge(forward = dx > 0)) {
                 sendArrow(
                     if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                     meta,
                 )
+                if (!predictedX.isNaN()) predictedX += step * effectiveCharWidth()
             }
         }
+        val vstep = if (dy > 0) 1 else -1
         repeat(abs(dy)) {
             sendArrow(
                 if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
                 meta,
             )
+            if (!predictedTop.isNaN()) predictedTop += vstep * lineHeight
         }
     }
+
+    private fun effectiveCharWidth(): Float =
+        charWidth.takeIf { it > 0f } ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.45f
 
     /**
      * Horizontal movement stops at the start and end of a line rather than wrapping onto the
@@ -242,28 +265,39 @@ class KeyboardService : InputMethodService() {
         currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
         progressX = 0f
         progressY = 0f
-        lastCaretX = Float.NaN
+        caretX = Float.NaN
+        predictedX = Float.NaN
+        predictedTop = Float.NaN
         updateIndicator()
     }
 
     private fun stopTrackpad() {
         trackpadActive = false
-        anchorInfo = null
+        predictedX = Float.NaN
+        predictedTop = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
         indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
     }
 
     override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
-        anchorInfo = info
-        caretPoint(info)?.let { p ->
-            // Learn the character width from how far the caret jumps per step, since
-            // getCharacterBounds is only populated for composing text.
-            if (!lastCaretX.isNaN()) {
-                val d = abs(p[0] - lastCaretX)
-                if (d > 1f && d < 200f) charWidthEstimate = d
-            }
-            lastCaretX = p[0]
+        val point = caretPoint(info) ?: return
+
+        // The distance the caret actually travelled is the width of the character just crossed,
+        // which is the best available estimate for the next one. getCharacterBounds would be
+        // exact but is only populated for composing text, which this is not.
+        if (!caretX.isNaN()) {
+            val advance = abs(point[0] - caretX)
+            if (advance > 1f && advance < 200f) charWidth = advance
         }
+
+        caretX = point[0]
+        caretTop = point[1]
+        caretBottom = point[3]
+        (caretBottom - caretTop).takeIf { it > 1f }?.let { lineHeight = it }
+
+        // Correct the prediction against the truth now that it has arrived.
+        predictedX = caretX
+        predictedTop = caretTop
         updateIndicator()
     }
 
@@ -279,27 +313,23 @@ class KeyboardService : InputMethodService() {
     }
 
     /**
-     * Shown lazily, once the app has told us where the caret is.
+     * Positions the marker at the interpolated caret position.
      *
-     * CursorAnchorInfo arrives asynchronously and is not available at the instant the trackpad
-     * starts, so this must wait rather than treat a missing caret as a reason to tear the
-     * indicator down -- doing that dismissed it permanently a few milliseconds before the
-     * position arrived.
+     * Shown lazily: CursorAnchorInfo arrives asynchronously and is not available at the instant
+     * the trackpad starts, so this waits for it rather than treating a missing caret as a reason
+     * to tear the popup down -- doing that dismissed it permanently a few milliseconds before
+     * the position arrived.
      */
     private fun updateIndicator() {
         if (!trackpadActive) return
         val kv = keyboardView ?: return
-        val point = anchorInfo?.let { caretPoint(it) } ?: return
+        if (predictedX.isNaN() || predictedTop.isNaN()) return
 
-        val caretX = point[0]
-        val top = point[1]
-        val bottom = point[3]
-        val density = resources.displayMetrics.density
-        val lineHeight = (bottom - top).takeIf { it > 1f } ?: (24f * density)
-        val charWidth = charWidthEstimate.takeIf { it > 0f } ?: (lineHeight * 0.45f)
+        val cw = effectiveCharWidth()
+        val lh = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
 
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
-        view.lineHeightPx = lineHeight.roundToInt()
+        view.lineHeightPx = lh.roundToInt()
         view.measure(
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
             View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
@@ -315,21 +345,13 @@ class KeyboardService : InputMethodService() {
         val originX = onScreen[0] - inWindow[0]
         val originY = onScreen[1] - inWindow[1]
 
-        // The marker sits *at* the interpolated position: half its width left of it, and its
-        // top at the interpolated line offset, so the bar spans that line like a caret.
-        val screenX = caretX + progressX * charWidth - view.measuredWidth / 2f
-        val screenY = top + progressY * lineHeight
+        val screenWidth = resources.displayMetrics.widthPixels
+        val screenX = (predictedX + progressX * cw - view.measuredWidth / 2f)
+            .coerceIn(0f, (screenWidth - view.measuredWidth).toFloat())
+        val screenY = predictedTop + progressY * lh
 
         val x = screenX.roundToInt() - originX
         val y = screenY.roundToInt() - originY
-
-        if (DEBUG_GESTURES) android.util.Log.d(
-            TAG,
-            "marker caret=(${caretX.roundToInt()},${top.roundToInt()}..${bottom.roundToInt()}) " +
-                "origin=($originX,$originY) size=${view.measuredWidth}x${view.measuredHeight} " +
-                "charW=${charWidth.roundToInt()} progress=($progressX,$progressY) " +
-                "screen=(${screenX.roundToInt()},${screenY.roundToInt()}) posted=($x,$y)",
-        )
 
         val popup = indicatorPopup ?: PopupWindow(view).apply {
             isTouchable = false
@@ -340,14 +362,6 @@ class KeyboardService : InputMethodService() {
             setBackgroundDrawable(null)
             indicatorPopup = this
         }
-        if (DEBUG_GESTURES) android.util.Log.d(
-            TAG,
-            "indicator caretScreen=(${caretX.roundToInt()},${top.roundToInt()}..${bottom.roundToInt()}) " +
-                "origin=($originX,$originY) pill=${view.measuredWidth}x${view.measuredHeight} " +
-                "charW=${charWidth.roundToInt()} progress=($progressX,$progressY) " +
-                "screen=(${screenX.roundToInt()},${screenY.roundToInt()}) posted=($x,$y) " +
-                "showing=${indicatorPopup?.isShowing}",
-        )
         runCatching {
             if (popup.isShowing) {
                 popup.update(x, y, -1, -1)
