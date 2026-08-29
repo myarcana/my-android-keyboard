@@ -216,8 +216,9 @@ Palette: `#ECEDFB` ground, white keys, `#E2DFFF` special keys, `#181B25` text.
 | `longPressMs` | 500 | matches the platform |
 | `flickDistanceRatio` | 0.20 × key height | Android's touch slop; below it the OS calls the finger still |
 | `verticalDominance` | 4.25 | what separates a flick from gliding "ok" |
-| `glideDistanceRatio` | 1.4 × key width | when a press becomes a glide |
-| `flickToGlideRatio` | 2.8 × key width | a longer path promotes a flick to a glide |
+| `longPressSlopRatio` | 0.20 × key height | past this the finger is not holding still |
+| `glideDistanceRatio` | 1.2 × key width | when a press becomes a glide |
+| `flickToGlideRatio` | 2.5 × key width | a longer path promotes a flick to a glide |
 
 The bottom four are the tuning surface for flick-versus-glide, and they are the four stored with
 every gesture recording so an old verdict stays interpretable. They are no longer by-feel: these
@@ -247,9 +248,31 @@ under-travelled flicks.
 **`glideDistanceRatio` 1.2 → 1.4.** Barely earns its change; it was flat across most of its range
 in every sweep so far.
 
-One gesture in the bank is still misread: an "ok" that left at a ratio of 4.3, right against the
+**A held-out session settled it.** The third session was the first recorded *under* these
+thresholds, so it never informed them, and the shipped build got 77 of 80 right live on the
+phone -- including `m` at 4/4, where six of the first eight had failed. Fitting and testing on
+the same data would have proved nothing; this is the number worth quoting.
+
+The three it missed were each a different near-miss, and only one was a threshold:
+
+- an "ok" glide 122px long against the 129px that `glideDistanceRatio` 1.4 demanded, read as a
+  plain tap. Short words that stop one row down have very little path to offer, so that value
+  went back to 1.2 -- it had been 1.2 originally, and 1.4 was fitted to a smaller bank.
+- an "ex" glide that had already been read as a flick and needed 246px to escape it, against the
+  258px `flickToGlideRatio` 2.8 asked for. Now 2.5, the midpoint of the winning range.
+- an "on" glide that **opened the accent popup**. Not a threshold at all: the finger dawdled for
+  447ms before picking up speed, and the long-press fired at 500ms. A long press should mean held
+  *still*, which is what it means everywhere else on the platform, so it now cancels once the
+  finger has drifted past touch slop. The space bar is exempt -- holding space and starting to
+  move before the timeout is the normal way into the trackpad, and no glide competes for it.
+
+One gesture in 208 is still misread: an "ok" that left at a ratio of 4.3, right against the 4.25
 threshold. That is the honest state of it -- see docs/GESTURE_BANK.md on why "ok" probably wants
 the lexicon at decode time rather than another number.
+
+Note that the harness check cannot tell an intentional change from drift. The long-press fix made
+one recorded ACCENT replay as GLIDE, which is the fix working; a threshold moving under your feet
+would look identical in that report. Read the disagreements, do not just count them.
 
 ### Trackpad gain and acceleration
 

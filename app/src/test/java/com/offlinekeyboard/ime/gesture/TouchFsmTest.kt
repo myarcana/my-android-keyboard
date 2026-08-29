@@ -168,6 +168,46 @@ class TouchFsmTest {
         assertTrue(out.has<GestureOutput.HideAccents>())
     }
 
+    /**
+     * A long press means held *still*. Starting a glide slowly must not open the accent popup:
+     * a recorded "on" glide dawdled 447ms before picking up speed and lost the whole gesture to
+     * the popup firing at 500ms.
+     */
+    @Test
+    fun `a finger that has drifted does not open the accent popup`() {
+        val e = key("e")
+        val f = fsm()
+        f.onDown(e.centerX, e.centerY, 0)
+        f.onMove(e.centerX - 4f, e.centerY + config.longPressSlopRatio * geometry.keyHeight + 2f, 450)
+        assertEquals(GestureState.PRESSED, f.state)
+        assertTrue(f.onLongPressTimeout(500).isEmpty())
+        assertEquals(GestureState.PRESSED, f.state)
+    }
+
+    /** Holding still, with only digitiser noise, must still open it. */
+    @Test
+    fun `a hand-steady press still opens the accent popup`() {
+        val e = key("e")
+        val f = fsm()
+        f.onDown(e.centerX, e.centerY, 0)
+        f.onMove(e.centerX + 1f, e.centerY + 1f, 450)
+        assertTrue(f.onLongPressTimeout(500).has<GestureOutput.ShowAccents>())
+        assertEquals(GestureState.ACCENTS, f.state)
+    }
+
+    /**
+     * The space bar is exempt: holding space and starting to move before the timeout is the
+     * normal way into the trackpad, and no glide competes for that gesture.
+     */
+    @Test
+    fun `drifting on space still enters the trackpad`() {
+        val space = key("space")
+        val f = fsm()
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onMove(space.centerX + geometry.keyHeight, space.centerY, 450)
+        assertTrue(f.onLongPressTimeout(500).has<GestureOutput.TrackpadStarted>())
+    }
+
     @Test
     fun `long press does nothing on a key with no accents`() {
         val f = fsm()

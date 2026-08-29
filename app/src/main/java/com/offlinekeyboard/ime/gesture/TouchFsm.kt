@@ -37,10 +37,33 @@ data class GestureConfig(
      * than the average flick, several of which hook through 80 degrees at the lift.
      */
     val verticalDominance: Float = 4.25f,
-    /** Path length that turns a press into a glide, as a fraction of key width. */
-    val glideDistanceRatio: Float = 1.4f,
-    /** Longer path length that promotes an in-progress flick into a glide. */
-    val flickToGlideRatio: Float = 2.8f,
+    /**
+     * How far the finger may drift and still count as holding still, as a fraction of key
+     * height. Beyond this the accent popup will not open, however long the press lasts.
+     *
+     * A long press means held *still*, which is what it means everywhere else on the platform.
+     * Without this, starting a glide slowly opens the accent popup instead: a recorded glide of
+     * "on" dawdled for 447ms before picking up speed, and the popup fired at 500ms while the
+     * finger was already 24px down the key. Same value as [flickDistanceRatio], and for the same
+     * reason -- it is Android's touch slop, the distance below which the platform itself still
+     * calls the finger stationary.
+     */
+    val longPressSlopRatio: Float = 0.20f,
+    /**
+     * Path length that turns a press into a glide, as a fraction of key width.
+     *
+     * Briefly 1.4 on a 128-gesture bank, then back to 1.2 when 80 more arrived: a recorded "ok"
+     * travelled 122px against the 129px that 1.4 demanded and was read as a plain tap. Short
+     * words that stop one row down have very little path to offer.
+     */
+    val glideDistanceRatio: Float = 1.2f,
+    /**
+     * Longer path length that promotes an in-progress flick into a glide.
+     *
+     * The midpoint of the winning range rather than either end of it: an "ex" glide that had
+     * already been read as a flick needed 246px to escape, and 2.8 asked for 258px.
+     */
+    val flickToGlideRatio: Float = 2.5f,
     /**
      * Upward travel on backspace that clears the line, as a fraction of key height. Larger than
      * [flickDistanceRatio] because this gesture destroys text: a thumb drifting off the key
@@ -205,7 +228,11 @@ class TouchFsm(
                 state = GestureState.BACKSPACE
                 listOf(GestureOutput.BackspaceRepeatStarted)
             }
-            key.key.accents.isNotEmpty() -> {
+            // Deliberately not applied to the space bar above: holding space and starting to
+            // move before the timeout is the normal way into the trackpad, and there is no
+            // glide competing for that gesture. The conflict is only ever accents versus a
+            // slow-starting glide.
+            key.key.accents.isNotEmpty() && !hasDrifted() -> {
                 state = GestureState.ACCENTS
                 accentIndex = 0
                 listOf(
@@ -215,6 +242,14 @@ class TouchFsm(
             }
             else -> emptyList()
         }
+    }
+
+    /** True once the finger has travelled far enough that it is no longer holding still. */
+    private fun hasDrifted(): Boolean {
+        val start = down ?: return false
+        val now = path.lastOrNull() ?: return false
+        val limit = config.longPressSlopRatio * geometry.keyHeight
+        return hypot(now.x - start.x, now.y - start.y) > limit
     }
 
     fun onMove(x: Float, y: Float, t: Long): List<GestureOutput> {

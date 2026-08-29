@@ -236,24 +236,36 @@ class GestureBankReplayTest {
      * twice that way: once on the flick distance, once on the vertical dominance, where the true
      * separating value sat at about 5 and the grid stopped at 3.
      */
+    private val JUSTIFIED_FLOOR = "Android touch slop; deliberate"
+
     private fun reportPlateau(tied: List<GestureConfig>) {
         if (tied.size <= 1) return
         println("  ${tied.size} threshold sets score identically. Room on each axis:")
         val warnings = mutableListOf<String>()
-        fun span(name: String, grid: List<Float>, get: (GestureConfig) -> Float) {
+        fun span(
+            name: String,
+            grid: List<Float>,
+            justified: String? = null,
+            get: (GestureConfig) -> Float,
+        ) {
             val values = tied.map(get)
             val lo = values.min()
             val hi = values.max()
+            val atBottom = lo <= grid.first()
+            val atTop = hi >= grid.last()
             val edge = when {
-                lo <= grid.first() && hi >= grid.last() -> " <- spans the whole grid: no signal"
-                lo <= grid.first() -> " <- AT THE BOTTOM OF THE GRID"
-                hi >= grid.last() -> " <- AT THE TOP OF THE GRID"
+                atBottom && atTop -> " <- spans the whole grid: no signal"
+                atBottom && justified != null -> " <- at the floor ($justified)"
+                atBottom -> " <- AT THE BOTTOM OF THE GRID"
+                atTop -> " <- AT THE TOP OF THE GRID"
                 else -> ""
             }
-            if (edge.isNotEmpty()) warnings += name
+            // A bound with a reason behind it is a decision, not an unfinished search, so it is
+            // reported without being nagged about.
+            if (edge.isNotEmpty() && !(atBottom && !atTop && justified != null)) warnings += name
             println("    %-20s %.2f .. %.2f%s".format(name, lo, hi, edge))
         }
-        span("flickDistanceRatio", flickGrid) { it.flickDistanceRatio }
+        span("flickDistanceRatio", flickGrid, JUSTIFIED_FLOOR) { it.flickDistanceRatio }
         span("verticalDominance", dominanceGrid) { it.verticalDominance }
         span("glideDistanceRatio", glideGrid) { it.glideDistanceRatio }
         span("flickToGlideRatio", promoteGrid) { it.flickToGlideRatio }
