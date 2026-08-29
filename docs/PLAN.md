@@ -2,7 +2,7 @@
 
 ## Context
 
-`/Users/me/Projects/android-keyboard` is empty and the machine has no Android toolchain
+`/Users/me/Projects/my-android-improvements/my-android-keyboard` is empty and the machine has no Android toolchain
 (no JDK, no SDK/NDK, no Gradle; the `adb` shell alias points at a path that doesn't exist).
 This is a from-scratch build.
 
