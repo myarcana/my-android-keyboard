@@ -1,8 +1,9 @@
 # Implementation notes
 
 Why this keyboard works the way it does, and what every tuned number is. Deeper mechanics for
-the cursor system are in `docs/CURSOR_AND_SELECTION.md`; this is the shorter account of the
-ideas that made it good, and the parameters worth defending.
+the cursor system are in `docs/CURSOR_AND_SELECTION.md`, and the flick-versus-glide data
+collection in `docs/GESTURE_BANK.md`; this is the shorter account of the ideas that made it
+good, and the parameters worth defending.
 
 Working-environment traps (adb quirks, device confirmation screens, coordinates) deliberately
 do **not** live here.
@@ -38,6 +39,38 @@ jitter cleared one, a vertical step cleared another, and both produced rapid fli
 Clamping instead — refusing to go past a line's bounds, refusing to let the marker travel where
 the caret cannot follow, refusing a step that would leave the visual row — has nothing to get
 stuck or released at the wrong moment.
+
+### A threshold nobody can derive has to be measured
+
+Flick-down-for-the-symbol and the first stroke of a glided word are the *same gesture* for the
+first two key heights. `i` sits at 7.5 key widths across; `k` and `m` both sit at 8.0. So gliding
+"I'm" leaves the i key going down and very slightly right -- which is exactly what flicking i for
+its `8` looks like. The vertical-dominance rule separates them not at all: both are
+overwhelmingly vertical.
+
+Only a narrow class of words does this, and picking that class out took two attempts. A word has
+to be **two keys long with the second below the first**: two keys so the glide is a single stroke
+with no corner to give it away, below so the stroke points where a flick points. "was" satisfies
+every looser version of that rule -- it starts downward, and it even ends below where it started
+-- and it is still perfectly safe, because the path turns at a and comes back. The whole list is
+I'm, in, ok, on, um, ex.
+
+Which one it is depends on what the person meant, and that is not in the touch data. No amount of
+thinking about the paths produces the threshold, because the information needed to pick it is not
+in the paths -- it is in the head of whoever made them.
+
+So it is asked for instead. The Gesture Lab names one gesture, watches it happen, and files the
+raw path under what it asked for; `tools/gestures.sh analyse` then replays every sample through
+the real state machine and sweeps the four thresholds against them. Raw paths, not extracted
+features: a feature is a guess about what matters, and the whole premise is that nobody knows yet.
+The bank is the durable part -- thresholds will be replaced, and the recordings will still score
+whatever replaces them.
+
+Two details that keep it honest. Drills alternate symbol and word within a key, because eight
+flicks in a row are one sample of a rhythm rather than eight samples of a flick. And the sweep
+reports the *middle* of the tying region rather than the first point in it -- hundreds of
+threshold sets score identically on any real bank, and one on the edge of that region is a single
+unusual swipe from being wrong.
 
 ### Where a row ends can only be learned by watching it wrap
 
@@ -181,6 +214,11 @@ Palette: `#ECEDFB` ground, white keys, `#E2DFFF` special keys, `#181B25` text.
 | `verticalDominance` | 1.5 | a flick must be clearly vertical, or it is a glide |
 | `glideDistanceRatio` | 1.2 × key width | when a press becomes a glide |
 | `flickToGlideRatio` | 2.0 × key width | a longer path promotes a flick to a glide |
+
+The bottom four are the tuning surface for flick-versus-glide, and they are the four stored with
+every gesture recording so an old verdict stays interpretable. They are still at their original
+by-feel values: replace them with what `tools/gestures.sh analyse` reports once the bank has
+enough samples to be worth trusting, and record here what the bank said, not just the number.
 
 ### Trackpad gain and acceleration
 

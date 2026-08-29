@@ -99,6 +99,16 @@ sealed interface GestureOutput {
     data object TrackpadEnded : GestureOutput
 
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
+
+    /**
+     * Every completed gesture, whatever it turned into, with the raw path attached.
+     *
+     * Emitted unconditionally rather than only while collecting: the state machine is the only
+     * place that sees a whole gesture and the verdict it reached in the same breath, and it must
+     * not have a second, differently-behaving code path that only runs during data collection.
+     * Deciding whether a gesture is worth keeping belongs to whoever is listening.
+     */
+    data class GestureCaptured(val trace: GestureTrace) : GestureOutput
 }
 
 enum class GestureState {
@@ -372,8 +382,44 @@ class TouchFsm(
             GestureState.BACKSPACE -> listOf(GestureOutput.BackspaceRepeatEnded)
             GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
+        val captured = capture(PathPoint(x, y, t))
         reset()
-        return result + GestureOutput.KeyHighlighted(null)
+        return result + listOfNotNull(captured) + GestureOutput.KeyHighlighted(null)
+    }
+
+    /**
+     * Snapshots the gesture that just ended, for [GestureOutput.GestureCaptured].
+     *
+     * The up point is appended unless the device already sent that exact sample. Android usually
+     * sends a move at the lift position first, but not always, and the last few pixels before
+     * the lift are exactly the part of a downward swipe that decides what it was. The timestamp
+     * counts as part of "exact": a tap that never moved still has to record when it ended, or a
+     * replay of it has no duration and cannot tell a tap from a long press.
+     */
+    private fun capture(up: PathPoint): GestureOutput.GestureCaptured? {
+        val key = origin ?: return null
+        val last = path.lastOrNull() ?: return null
+        val full = if (last == up) path.toList() else path + up
+        return GestureOutput.GestureCaptured(
+            GestureTrace(
+                startKeyId = key.key.id,
+                verdict = when (state) {
+                    GestureState.PRESSED -> GestureVerdict.TAP
+                    GestureState.FLICK -> GestureVerdict.FLICK
+                    GestureState.GLIDE -> GestureVerdict.GLIDE
+                    GestureState.ACCENTS -> GestureVerdict.ACCENT
+                    GestureState.TRACKPAD, GestureState.SELECTING -> GestureVerdict.TRACKPAD
+                    GestureState.BACKSPACE, GestureState.SPENT, GestureState.IDLE ->
+                        GestureVerdict.NONE
+                },
+                layoutId = geometry.layout.id,
+                widthPx = geometry.widthPx,
+                keyUnitPx = geometry.keyUnit,
+                keyHeightPx = geometry.keyHeight,
+                thresholds = GestureThresholds.of(config),
+                path = full,
+            ),
+        )
     }
 
     fun onCancel(): List<GestureOutput> {

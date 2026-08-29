@@ -27,6 +27,22 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Requirement 3/4 tuning rig: labelled gesture collection. See docs/GESTURE_BANK.md.
+          Its own launcher entry rather than a corner of the test pad, because a data-collection
+          session is a thing you sit down to do.
+        -->
+        <activity
+            android:name=".GestureLabActivity"
+            android:exported="true"
+            android:label="@string/gesture_lab_name"
+            android:windowSoftInputMode="stateVisible|adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
         <service
             android:name=".KeyboardService"
             android:exported="true"

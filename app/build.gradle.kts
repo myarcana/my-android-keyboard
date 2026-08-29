@@ -32,6 +32,20 @@ android {
     }
 }
 
+/**
+ * Unit tests here are as much a reporting tool as a gate: GestureBankReplayTest prints a scored
+ * sweep of the gesture thresholds against the collected bank, and a report nobody can see is not
+ * a report. There are few enough tests that the noise costs nothing.
+ */
+tasks.withType<Test>().configureEach {
+    // -Dgesture.bank=/path/to/other.jsonl scores a bank that is not the one in data/.
+    providers.systemProperty("gesture.bank").orNull?.let { systemProperty("gesture.bank", it) }
+    testLogging {
+        showStandardStreams = true
+        events("passed", "failed", "skipped")
+    }
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     testImplementation(libs.junit)

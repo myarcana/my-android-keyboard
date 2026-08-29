@@ -22,6 +22,7 @@ import kotlin.math.abs
 import kotlin.math.roundToInt
 import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
+import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
@@ -316,6 +317,8 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BulkDelete -> bulkDelete()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
                 is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
+                // Kept only while the gesture lab has a drill armed; a no-op otherwise.
+                is GestureOutput.GestureCaptured -> GestureCapture.onGesture(this, out.trace)
                 else -> Unit
             }
         }
