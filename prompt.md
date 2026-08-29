@@ -5,6 +5,7 @@ we want to make a custom keyboard for my android phone that has all of these fea
 - iPadOS-style swipe down on a button to type the number or symbol behind the button
 - but swiping for more than that will enable swipe-typing/glide-typing for whole words
 - pressing and holding on the space bar enables cursor movement, and it can go up and down lines, not only horizontally in one line
+- while in cursor-moving mode, tapping again starts selection, placing the first selection handle where the cursor is. Continuing to move the cursor by moving the finger around on the "trackpad" that the keyboard becomes in cursor moving mode, moves the second selection handle
 - has English
 - has Chinese traditional (Taiwanese dictionaries) and simplified (mainland china dictionaries) support
 - has 100% offline dictation for Taiwanese Chinese, mainland Chinese, and English

@@ -13,6 +13,8 @@ import android.os.Looper
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
+import android.view.WindowInsets
+import androidx.core.view.WindowInsetsCompat
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.gesture.PathPoint
@@ -95,6 +97,12 @@ class KeyboardView @JvmOverloads constructor(
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
 
+    /**
+     * Height of the system navigation bar. From targetSdk 35 the IME window is laid out
+     * edge-to-edge, so without this the bottom row sits underneath the nav buttons.
+     */
+    private var navBarInset = 0
+
     private val theme: Theme
         get() = if (
             resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
@@ -112,11 +120,27 @@ class KeyboardView @JvmOverloads constructor(
     private fun geometry(): LayoutGeometry =
         geometry ?: LayoutGeometry(layout, width.toFloat()).also { geometry = it }
 
+    /** Bottom of the key area, above the reserved navigation-bar space. */
+    private val keyAreaBottom: Float get() = (height - navBarInset).toFloat()
+
+    override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
+        val bottom = WindowInsetsCompat.toWindowInsetsCompat(insets)
+            .getInsets(WindowInsetsCompat.Type.navigationBars())
+            .bottom
+        if (bottom != navBarInset) {
+            navBarInset = bottom
+            requestLayout()
+        }
+        return super.onApplyWindowInsets(insets)
+    }
+
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         val w = MeasureSpec.getSize(widthSpec)
         val h = IosMetrics.HEIGHT_IN_KEY_WIDTHS *
             (w / IosMetrics.REFERENCE_WIDTH * IosMetrics.KEY_WIDTH)
-        setMeasuredDimension(w, h.toInt())
+        // Keys occupy the top; the inset is empty space reserved below them, which keeps
+        // drawing and touch coordinates identical (both measured from the top).
+        setMeasuredDimension(w, h.toInt() + navBarInset)
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -243,7 +267,7 @@ class KeyboardView @JvmOverloads constructor(
     private fun drawTrackpadHint(canvas: Canvas, g: LayoutGeometry, t: Theme) {
         label.color = t.secondaryText
         label.textSize = g.keyUnit * 0.5f
-        canvas.drawText("←   ↑   ↓   →", width / 2f, height / 2f, label)
+        canvas.drawText("←   ↑   ↓   →", width / 2f, keyAreaBottom / 2f, label)
     }
 
     // --- touch ----------------------------------------------------------------------------

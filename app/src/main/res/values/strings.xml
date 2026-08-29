@@ -6,4 +6,5 @@
     <string name="subtype_zh_tw_zhuyin">繁體注音</string>
     <string name="subtype_zh_tw_pinyin">繁體拼音</string>
     <string name="subtype_zh_cn">简体拼音</string>
+    <string name="testpad_name">Keyboard Test Pad</string>
 </resources>
