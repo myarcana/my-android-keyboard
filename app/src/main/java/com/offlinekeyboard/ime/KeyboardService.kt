@@ -42,38 +42,30 @@ class KeyboardService : InputMethodService() {
     /** True while a physical shift key is being held down to drag a selection. */
     private var extendingSelection = false
 
-    // --- granular cursor indicator ---
+    // --- granular cursor ---
     private var indicator: CursorIndicatorView? = null
     private var indicatorPopup: PopupWindow? = null
     private var trackpadActive = false
 
-    /** Total unclamped finger travel for this drag, in step units. */
-    private var offsetX = 0f
-    private var offsetY = 0f
-
     /**
-     * Steps the caret actually took. The difference from the finger's travel is the overshoot:
-     * zero-ish while the caret keeps up, growing without limit once it is stuck at a line end.
+     * The granular cursor, in screen coordinates. This is what the finger drives directly, and
+     * it is never derived from the caret -- which is why it moves smoothly.
      */
-    private var appliedX = 0
-    private var appliedY = 0
-
-    /** Steps sent but not yet confirmed by a CursorAnchorInfo update. */
-    private var pendingX = 0
-    private var pendingY = 0
+    private var markerX = Float.NaN
+    private var markerCenterY = Float.NaN
 
     /** Caret position last reported by the app, in screen coordinates. */
     private var caretX = Float.NaN
     private var caretTop = Float.NaN
     private var caretBottom = 0f
-
-    /** Caret position including steps sent but not yet reported, so the marker never lags. */
-    private var predictedX = Float.NaN
-    private var predictedTop = Float.NaN
-
-    /** Measured from how far the caret actually moves per step in this field. */
-    private var charWidth = 0f
     private var lineHeight = 0f
+    private var charWidth = 0f
+
+    /** Arrow keys sent but not yet reflected in a CursorAnchorInfo update. */
+    private var pendingHorizontal = 0
+    private var pendingVertical = 0
+    /** The caret cannot go further vertically -- the end of the text -- so stop trying. */
+    private var verticalStuck = false
 
     override fun onCreateInputView(): View =
         KeyboardView(this).also { view ->
@@ -112,14 +104,9 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitPrimary -> commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
                 is GestureOutput.CommitAccent -> commit(out.text)
-                is GestureOutput.CursorMove -> moveCursor(out.dx, out.dy, out.extend)
                 GestureOutput.SelectionStarted -> beginSelection()
                 GestureOutput.TrackpadStarted -> startTrackpad()
-                is GestureOutput.CursorProgress -> {
-                    offsetX = out.offsetX
-                    offsetY = out.offsetY
-                    updateIndicator()
-                }
+                is GestureOutput.TrackpadPan -> panMarker(out.dx, out.dy)
                 GestureOutput.TrackpadEnded -> {
                     endSelection()
                     stopTrackpad()
@@ -187,33 +174,121 @@ class KeyboardService : InputMethodService() {
      * as "drag the free end of the selection" -- so selection follows lines exactly the way
      * caret movement does, with no separate code path.
      */
-    private fun moveCursor(dx: Int, dy: Int, extend: Boolean) {
-        val meta = if (extend) KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON else 0
+    // --- the granular cursor leads; the caret follows -------------------------------------
 
-        val hStep = if (dx > 0) 1 else -1
-        repeat(abs(dx)) {
-            // A step refused at a line edge is not "applied", so it becomes overshoot and the
-            // granular cursor keeps travelling while the caret stays put.
-            if (!atLineEdge(forward = dx > 0)) {
-                sendArrow(
-                    if (dx > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
-                    meta,
-                )
-                appliedX += hStep
-                pendingX += hStep
-                if (!predictedX.isNaN()) predictedX += hStep * effectiveCharWidth()
+    private fun startTrackpad() {
+        trackpadActive = true
+        currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
+        markerX = Float.NaN
+        markerCenterY = Float.NaN
+        caretX = Float.NaN
+        caretTop = Float.NaN
+        pendingHorizontal = 0
+        pendingVertical = 0
+        verticalStuck = false
+        updateIndicator()
+    }
+
+    private fun stopTrackpad() {
+        trackpadActive = false
+        markerX = Float.NaN
+        markerCenterY = Float.NaN
+        currentInputConnection?.requestCursorUpdates(0)
+        indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
+    }
+
+    /** The finger moves the marker, freely, in screen space. Nothing constrains it to the text. */
+    private fun panMarker(dx: Float, dy: Float) {
+        if (!trackpadActive || markerX.isNaN()) return
+        val metrics = resources.displayMetrics
+        markerX = (markerX + dx).coerceIn(0f, metrics.widthPixels.toFloat())
+        markerCenterY = (markerCenterY + dy).coerceIn(0f, metrics.heightPixels.toFloat())
+        verticalStuck = false
+        updateIndicator()
+        chaseCaret()
+    }
+
+    override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
+        val point = caretPoint(info) ?: return
+        val previousX = caretX
+        val previousTop = caretTop
+
+        (point[3] - point[1]).takeIf { it > 1f }?.let { lineHeight = it }
+
+        if (!previousX.isNaN()) {
+            // Measure the caret's real advance per step, from purely horizontal moves only: a
+            // change of line moves x arbitrarily and would poison the estimate.
+            if (pendingHorizontal != 0 && pendingVertical == 0) {
+                val advance = abs(point[0] - previousX) / abs(pendingHorizontal)
+                if (advance > 1f && advance < 200f) charWidth = advance
             }
+            // If a vertical push produced no movement we are at the end of the text. Stop
+            // pushing, so the horizontal chase can still run while the marker sits beyond it.
+            if (pendingVertical != 0 && abs(point[1] - previousTop) < 1f) verticalStuck = true
+        }
+        pendingHorizontal = 0
+        pendingVertical = 0
+
+        caretX = point[0]
+        caretTop = point[1]
+        caretBottom = point[3]
+
+        // Seed the marker on the caret at the start of the drag; free thereafter.
+        if (trackpadActive && markerX.isNaN()) {
+            markerX = caretX
+            markerCenterY = caretTop + lineHeight / 2f
         }
 
-        val vStep = if (dy > 0) 1 else -1
-        repeat(abs(dy)) {
+        updateIndicator()
+        chaseCaret()
+    }
+
+    /**
+     * Moves the caret toward wherever the marker is now.
+     *
+     * This is a feedback loop, not dead reckoning: every round re-derives the error from the
+     * position the *app* reports for its own caret, so a wrong character-width estimate costs
+     * an extra round rather than accumulating. That is what stops the two drifting apart.
+     *
+     * Vertical is resolved first and then the round ends, because changing line moves the caret
+     * horizontally too; the next update handles the new horizontal error.
+     */
+    private fun chaseCaret() {
+        if (!trackpadActive || caretX.isNaN() || markerX.isNaN()) return
+        if (pendingHorizontal != 0 || pendingVertical != 0) return // await the last round's result
+        val meta = if (extendingSelection) {
+            KeyEvent.META_SHIFT_ON or KeyEvent.META_SHIFT_LEFT_ON
+        } else {
+            0
+        }
+
+        val lh = lineHeight.takeIf { it > 1f } ?: return
+        val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
+        if (lines != 0 && !verticalStuck) {
+            val step = if (lines > 0) 1 else -1
+            repeat(abs(lines)) {
+                sendArrow(
+                    if (step > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
+                    meta,
+                )
+                pendingVertical += step
+            }
+            return
+        }
+
+        // Deadband of half a character stops the caret dithering around the marker.
+        val advance = effectiveCharWidth()
+        val chars = ((markerX - caretX) / advance).roundToInt().coerceIn(-24, 24)
+        if (chars == 0) return
+        val step = if (chars > 0) 1 else -1
+        repeat(abs(chars)) {
+            // Never cross a line break sideways: up and down is what changes line.
+            if (atLineEdge(forward = step > 0)) return
             sendArrow(
-                if (dy > 0) KeyEvent.KEYCODE_DPAD_DOWN else KeyEvent.KEYCODE_DPAD_UP,
+                if (step > 0) KeyEvent.KEYCODE_DPAD_RIGHT else KeyEvent.KEYCODE_DPAD_LEFT,
                 meta,
             )
-            appliedY += vStep
-            pendingY += vStep
-            if (!predictedTop.isNaN() && lineHeight > 1f) predictedTop += vStep * lineHeight
+            pendingHorizontal += step
         }
     }
 
@@ -235,7 +310,6 @@ class KeyboardService : InputMethodService() {
         } else {
             ic.getTextBeforeCursor(1, 0)
         }
-        // Empty means the very start or end of the field: nothing to move onto either.
         return neighbour.isNullOrEmpty() || neighbour.toString() == "\n"
     }
 
@@ -245,88 +319,6 @@ class KeyboardService : InputMethodService() {
         val now = SystemClock.uptimeMillis()
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, meta))
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, meta))
-    }
-
-    /**
-     * Press and hold a real shift key for as long as the selection gesture lasts.
-     *
-     * Setting META_SHIFT_ON on the arrow events is not enough on its own. TextView decides
-     * whether an arrow extends a selection in ArrowKeyMovementMethod.isSelecting(), which reads
-     * the *text buffer's* meta state via MetaKeyKeyListener -- and that is only ever set by
-     * genuine KEYCODE_SHIFT_LEFT key events passing through. A synthesised metaState on the
-     * arrow itself is ignored, so the caret just moved and nothing was ever selected.
-     */
-    private fun beginSelection() {
-        if (extendingSelection) return
-        extendingSelection = true
-        val ic = currentInputConnection ?: return
-        val now = SystemClock.uptimeMillis()
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0))
-    }
-
-    // --- granular cursor indicator -------------------------------------------------------
-
-    /**
-     * Requirement: show where the *granular* cursor is while the trackpad is in use.
-     *
-     * The caret can only sit between characters, but the finger is somewhere continuous in
-     * between. An IME cannot draw inside the target app's text field, so the indicator lives in
-     * a PopupWindow, positioned in screen coordinates from the caret location the app reports
-     * through CursorAnchorInfo.
-     */
-    private fun startTrackpad() {
-        trackpadActive = true
-        currentInputConnection?.requestCursorUpdates(InputConnection.CURSOR_UPDATE_MONITOR)
-        offsetX = 0f
-        offsetY = 0f
-        appliedX = 0
-        appliedY = 0
-        pendingX = 0
-        pendingY = 0
-        caretX = Float.NaN
-        caretTop = Float.NaN
-        predictedX = Float.NaN
-        predictedTop = Float.NaN
-        updateIndicator()
-    }
-
-    private fun stopTrackpad() {
-        trackpadActive = false
-        predictedX = Float.NaN
-        predictedTop = Float.NaN
-        currentInputConnection?.requestCursorUpdates(0)
-        indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
-    }
-
-    override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
-        val point = caretPoint(info) ?: return
-        val hadCaret = !caretX.isNaN()
-
-        (point[3] - point[1]).takeIf { it > 1f }?.let { lineHeight = it }
-
-        if (hadCaret) {
-            // Measure the real advance per step. Only trust a purely horizontal move: a change
-            // of line moves x arbitrarily, which would poison the estimate.
-            if (pendingX != 0 && pendingY == 0) {
-                val advance = abs(point[0] - caretX) / abs(pendingX)
-                if (advance > 1f && advance < 200f) charWidth = advance
-            }
-            // A vertical step the caret could not take -- the ends of the text -- is not
-            // applied, so it becomes overshoot and the granular cursor carries on.
-            if (pendingY != 0 && lineHeight > 1f) {
-                val moved = ((point[1] - caretTop) / lineHeight).roundToInt()
-                appliedY -= (pendingY - moved)
-            }
-        }
-        pendingX = 0
-        pendingY = 0
-
-        caretX = point[0]
-        caretTop = point[1]
-        caretBottom = point[3]
-        predictedX = caretX
-        predictedTop = caretTop
-        updateIndicator()
     }
 
     /** Caret as [x, top, x, bottom] in screen coordinates, or null if the app reports none. */
@@ -340,30 +332,13 @@ class KeyboardService : InputMethodService() {
         return pts
     }
 
-    /**
-     * Places the granular cursor at the caret plus however far the finger has travelled beyond
-     * what the caret could absorb.
-     *
-     * Anchoring to the caret rather than to a fixed origin is what keeps the two in step: the
-     * marker advances by the caret's *measured* advance, so the error cannot accumulate over a
-     * long drag. The overshoot term is what still lets it roam -- once the caret is stuck at
-     * the end of a short line, or at the ends of the text, nothing is applied and the marker
-     * carries on freely in both axes.
-     *
-     * Shown lazily, because CursorAnchorInfo arrives asynchronously and is not available at the
-     * instant the trackpad starts.
-     */
+    /** Draws the marker wherever the finger has put it. */
     private fun updateIndicator() {
         if (!trackpadActive) return
         val kv = keyboardView ?: return
-        if (predictedX.isNaN() || predictedTop.isNaN()) return
+        if (markerX.isNaN() || markerCenterY.isNaN()) return
 
         val lh = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
-        val cw = effectiveCharWidth()
-
-        val overshootX = offsetX - appliedX
-        val overshootY = offsetY - appliedY
-
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
         view.lineHeightPx = lh.roundToInt()
         view.measure(
@@ -378,18 +353,9 @@ class KeyboardService : InputMethodService() {
         val inWindow = IntArray(2)
         kv.getLocationOnScreen(onScreen)
         kv.getLocationInWindow(inWindow)
-        val originX = onScreen[0] - inWindow[0]
-        val originY = onScreen[1] - inWindow[1]
 
-        // Clamped only to the display, so it stays visible -- not to the text or the line.
-        val metrics = resources.displayMetrics
-        val screenX = (predictedX + overshootX * cw - view.measuredWidth / 2f)
-            .coerceIn(0f, (metrics.widthPixels - view.measuredWidth).toFloat())
-        val screenY = (predictedTop + overshootY * lh)
-            .coerceIn(0f, (metrics.heightPixels - view.measuredHeight).toFloat())
-
-        val x = screenX.roundToInt() - originX
-        val y = screenY.roundToInt() - originY
+        val x = (markerX - view.measuredWidth / 2f).roundToInt() - (onScreen[0] - inWindow[0])
+        val y = (markerCenterY - view.measuredHeight / 2f).roundToInt() - (onScreen[1] - inWindow[1])
 
         val popup = indicatorPopup ?: PopupWindow(view).apply {
             isTouchable = false
@@ -409,6 +375,23 @@ class KeyboardService : InputMethodService() {
         }.onFailure {
             if (DEBUG_GESTURES) android.util.Log.d(TAG, "indicator failed: $it")
         }
+    }
+
+    /**
+     * Press and hold a real shift key for as long as the selection gesture lasts.
+     *
+     * Setting META_SHIFT_ON on the arrow events is not enough on its own. TextView decides
+     * whether an arrow extends a selection in ArrowKeyMovementMethod.isSelecting(), which reads
+     * the *text buffer's* meta state via MetaKeyKeyListener -- and that is only ever set by
+     * genuine KEYCODE_SHIFT_LEFT key events passing through. A synthesised metaState on the
+     * arrow itself is ignored, so the caret just moved and nothing was ever selected.
+     */
+    private fun beginSelection() {
+        if (extendingSelection) return
+        extendingSelection = true
+        val ic = currentInputConnection ?: return
+        val now = SystemClock.uptimeMillis()
+        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_SHIFT_LEFT, 0, 0))
     }
 
     /** Always paired with [beginSelection], including when the gesture is cancelled. */

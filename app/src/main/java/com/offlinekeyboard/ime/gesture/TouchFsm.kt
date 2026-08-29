@@ -23,11 +23,13 @@ data class GestureConfig(
     val glideDistanceRatio: Float = 1.2f,
     /** Longer path length that promotes an in-progress flick into a glide. */
     val flickToGlideRatio: Float = 2.0f,
-    /** Travel per cursor step in trackpad mode. Vertical is deliberately the more sensitive
-     *  of the two: a line is a much longer journey than a character, so the same finger travel
-     *  should cover more of it. */
-    val trackpadStepXRatio: Float = 0.5f,
-    val trackpadStepYRatio: Float = 0.45f,
+    /**
+     * Trackpad gain: pixels the granular cursor travels per pixel of finger movement.
+     * Vertical is deliberately higher -- a line is a much longer journey than a character, and
+     * there is less room to move vertically on a keyboard than horizontally.
+     */
+    val trackpadGainX: Float = 0.55f,
+    val trackpadGainY: Float = 1.2f,
 )
 
 sealed interface GestureOutput {
@@ -49,29 +51,18 @@ sealed interface GestureOutput {
     data class GlideCompleted(val path: List<PathPoint>) : GestureOutput
 
     data object TrackpadStarted : GestureOutput
-    /**
-     * Cursor steps; +x is right, +y is down. Emitted one step at a time.
-     * When [extend] is set the step drags the free end of a selection instead of moving the
-     * caret, which the service sends as a shifted arrow key.
-     */
-    data class CursorMove(val dx: Int, val dy: Int, val extend: Boolean = false) : GestureOutput
-    /** Selection began: the anchor is dropped wherever the caret currently sits. */
-    data object SelectionStarted : GestureOutput
 
     /**
-     * Where the finger is, for the granular cursor.
+     * Move the granular cursor by this many pixels. The gain is already applied.
      *
-     * [fractionX]/[fractionY] are the sub-step residual, within +/-0.5 of the nearest caret
-     * position. [offsetX]/[offsetY] are the *total unclamped* displacement since the trackpad
-     * started, in step units, and are free to grow without limit -- the caret stops at the end
-     * of a line, but the granular cursor carries on.
+     * The trackpad drives the *marker*, not the caret: the marker is the thing the finger is
+     * directly controlling, so it moves smoothly and continuously in screen space. The caret
+     * follows it afterwards, as closely as the text allows.
      */
-    data class CursorProgress(
-        val fractionX: Float,
-        val fractionY: Float,
-        val offsetX: Float,
-        val offsetY: Float,
-    ) : GestureOutput
+    data class TrackpadPan(val dx: Float, val dy: Float) : GestureOutput
+
+    /** Selection began: the anchor is dropped wherever the caret currently sits. */
+    data object SelectionStarted : GestureOutput
     data object TrackpadEnded : GestureOutput
 
     data class SpecialKey(val type: KeyType, val keyId: String) : GestureOutput
@@ -100,17 +91,10 @@ class TouchFsm(
     private var pathLength = 0f
     private var accentIndex = 0
     private var trackpadAnchor: PathPoint? = null
-    private var residualX = 0f
-    private var residualY = 0f
-    /** Total unclamped finger travel since the trackpad started, in step units. */
-    private var offsetX = 0f
-    private var offsetY = 0f
 
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
-    private val trackpadStepX get() = config.trackpadStepXRatio * geometry.keyUnit
-    private val trackpadStepY get() = config.trackpadStepYRatio * geometry.keyHeight
 
     /** Deadline the host should schedule a [onLongPressTimeout] callback for, or null. */
     val longPressDeadline: Long? get() = down?.let { it.t + config.longPressMs }
@@ -133,10 +117,6 @@ class TouchFsm(
             key.key.type == KeyType.SPACE -> {
                 state = GestureState.TRACKPAD
                 trackpadAnchor = path.last()
-                residualX = 0f
-                residualY = 0f
-                offsetX = 0f
-                offsetY = 0f
                 listOf(GestureOutput.TrackpadStarted)
             }
             key.key.accents.isNotEmpty() -> {
@@ -220,8 +200,6 @@ class TouchFsm(
      * Requirement 5: two-dimensional cursor movement. Vertical steps are emitted as their own
      * events so the host can send DPAD_UP/DOWN -- only the text view knows where lines wrap.
      */
-    private val extending get() = state == GestureState.SELECTING
-
     /**
      * A second finger tapped while the trackpad is active. The caret stops being a caret and
      * becomes one end of a selection: the anchor stays where it is and subsequent movement
@@ -233,41 +211,20 @@ class TouchFsm(
         return listOf(GestureOutput.SelectionStarted)
     }
 
+    /**
+     * Requirement 5. Pans the granular cursor by the finger's movement, scaled by the gain.
+     *
+     * Nothing here knows about characters or lines: this is pure screen-space motion, which is
+     * what keeps the marker smooth. Turning that position into a caret position is the
+     * service's job, and it does it by watching where the app reports the caret to be.
+     */
     private fun onMoveWhileTrackpad(x: Float, y: Float): List<GestureOutput> {
         val anchor = trackpadAnchor ?: return emptyList()
-        val dx = x - anchor.x
-        val dy = y - anchor.y
-        residualX += dx
-        residualY += dy
-        offsetX += dx / trackpadStepX
-        offsetY += dy / trackpadStepY
+        val dx = (x - anchor.x) * config.trackpadGainX
+        val dy = (y - anchor.y) * config.trackpadGainY
         trackpadAnchor = PathPoint(x, y, anchor.t)
-
-        // Round to the NEAREST boundary rather than truncating: step once the finger is more
-        // than half a step past, leaving the residual within +/-0.5. Truncating meant the caret
-        // only followed after a whole character of travel, so the granular position led the
-        // caret by up to a full character and the caret then landed on the far side of it.
-        //
-        // The comparison must be strict: at exactly half a step, >= would step one way, land on
-        // the opposite half boundary, and oscillate forever.
-        val out = mutableListOf<GestureOutput>()
-        while (abs(residualX) > trackpadStepX / 2f) {
-            val step = if (residualX > 0) 1 else -1
-            residualX -= step * trackpadStepX
-            out += GestureOutput.CursorMove(step, 0, extending)
-        }
-        while (abs(residualY) > trackpadStepY / 2f) {
-            val step = if (residualY > 0) 1 else -1
-            residualY -= step * trackpadStepY
-            out += GestureOutput.CursorMove(0, step, extending)
-        }
-        out += GestureOutput.CursorProgress(
-            residualX / trackpadStepX,
-            residualY / trackpadStepY,
-            offsetX,
-            offsetY,
-        )
-        return out
+        if (dx == 0f && dy == 0f) return emptyList()
+        return listOf(GestureOutput.TrackpadPan(dx, dy))
     }
 
     fun onUp(x: Float, y: Float, t: Long): List<GestureOutput> {
@@ -325,10 +282,6 @@ class TouchFsm(
         pathLength = 0f
         accentIndex = 0
         trackpadAnchor = null
-        residualX = 0f
-        residualY = 0f
-        offsetX = 0f
-        offsetY = 0f
     }
 
     /** Keys the glide path passed through, nearest-centre per sample, de-duplicated. */

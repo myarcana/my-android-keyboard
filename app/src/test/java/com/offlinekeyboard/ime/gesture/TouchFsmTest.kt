@@ -185,59 +185,72 @@ class TouchFsmTest {
         assertEquals(GestureState.GLIDE, f.state)
     }
 
-    // --- requirement 5: spacebar trackpad -------------------------------------------------
+    // --- requirement 5: spacebar trackpad -----------------------------------------------
+
+    private fun trackpadFsm(): Pair<TouchFsm, com.offlinekeyboard.ime.layout.KeyRect> {
+        val space = key("space")
+        val f = fsm()
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onLongPressTimeout(config.longPressMs)
+        return f to space
+    }
 
     @Test
     fun `long press on space enters trackpad mode`() {
-        val space = key("space")
-        val f = fsm()
-        f.onDown(space.centerX, space.centerY, 0)
-        val out = f.onLongPressTimeout(config.longPressMs)
+        val (f, _) = trackpadFsm()
         assertEquals(GestureState.TRACKPAD, f.state)
-        assertTrue(out.has<GestureOutput.TrackpadStarted>())
     }
 
     @Test
-    fun `trackpad moves the cursor horizontally`() {
-        val space = key("space")
-        val f = fsm()
-        f.onDown(space.centerX, space.centerY, 0)
-        f.onLongPressTimeout(config.longPressMs)
-
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        val out = f.onMove(space.centerX + stepX * 2.2f, space.centerY, 600)
-        val moves = out.filterIsInstance<GestureOutput.CursorMove>()
-        assertEquals(2, moves.size)
-        assertTrue(moves.all { it.dx == 1 && it.dy == 0 })
+    fun `trackpad pans the marker by the finger movement, scaled by the gain`() {
+        val (f, space) = trackpadFsm()
+        val pan = f.onMove(space.centerX + 100f, space.centerY, 600)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(100f * config.trackpadGainX, pan.dx, 0.01f)
+        assertEquals(0f, pan.dy, 0.01f)
     }
 
     @Test
-    fun `trackpad moves the cursor vertically across lines`() {
-        val space = key("space")
-        val f = fsm()
-        f.onDown(space.centerX, space.centerY, 0)
-        f.onLongPressTimeout(config.longPressMs)
-
-        val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX, space.centerY - stepY * 1.5f, 600)
-        val moves = out.filterIsInstance<GestureOutput.CursorMove>()
-        assertEquals(1, moves.size)
-        assertEquals(-1, moves.single().dy)
+    fun `trackpad pans in both axes at once`() {
+        val (f, space) = trackpadFsm()
+        val pan = f.onMove(space.centerX + 40f, space.centerY - 30f, 600)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(40f * config.trackpadGainX, pan.dx, 0.01f)
+        assertEquals(-30f * config.trackpadGainY, pan.dy, 0.01f)
     }
 
     @Test
-    fun `trackpad reports both axes, not just horizontal`() {
-        val space = key("space")
-        val f = fsm()
-        f.onDown(space.centerX, space.centerY, 0)
-        f.onLongPressTimeout(config.longPressMs)
+    fun `each pan reports only the movement since the last one`() {
+        val (f, space) = trackpadFsm()
+        f.onMove(space.centerX + 50f, space.centerY, 600)
+        val second = f.onMove(space.centerX + 80f, space.centerY, 620)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(30f * config.trackpadGainX, second.dx, 0.01f)
+    }
 
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX + stepX * 1.2f, space.centerY + stepY * 1.2f, 600)
-        val moves = out.filterIsInstance<GestureOutput.CursorMove>()
-        assertTrue("expected a horizontal step", moves.any { it.dx == 1 })
-        assertTrue("expected a vertical step", moves.any { it.dy == 1 })
+    @Test
+    fun `vertical travel is more sensitive than horizontal`() {
+        // A line is a longer journey than a character, and there is less room to move
+        // vertically on a keyboard than horizontally.
+        assertTrue(config.trackpadGainY > config.trackpadGainX)
+    }
+
+    @Test
+    fun `a stationary finger produces no pan`() {
+        val (f, space) = trackpadFsm()
+        assertTrue(f.onMove(space.centerX, space.centerY, 600).isEmpty())
+    }
+
+    @Test
+    fun `panning is unbounded -- nothing clamps it to a line`() {
+        val (f, space) = trackpadFsm()
+        var total = 0f
+        var x = space.centerX
+        repeat(20) {
+            x += 60f
+            total += f.onMove(x, space.centerY, 600).only<GestureOutput.TrackpadPan>().dx
+        }
+        assertEquals(20 * 60f * config.trackpadGainX, total, 0.5f)
     }
 
     @Test
@@ -247,6 +260,61 @@ class TouchFsmTest {
         f.onDown(space.centerX, space.centerY, 0)
         val out = f.onUp(space.centerX, space.centerY, 60)
         assertEquals(" ", out.only<GestureOutput.CommitPrimary>().text)
+    }
+
+    // --- selection from trackpad mode ----------------------------------------------------
+
+    @Test
+    fun `tapping again during trackpad mode starts a selection`() {
+        val (f, _) = trackpadFsm()
+        val out = f.onSecondaryTap()
+        assertEquals(GestureState.SELECTING, f.state)
+        assertTrue(out.has<GestureOutput.SelectionStarted>())
+    }
+
+    @Test
+    fun `panning continues while selecting`() {
+        val (f, space) = trackpadFsm()
+        f.onSecondaryTap()
+        val pan = f.onMove(space.centerX + 40f, space.centerY, 700)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(40f * config.trackpadGainX, pan.dx, 0.01f)
+    }
+
+    @Test
+    fun `a second tap does nothing unless the trackpad is active`() {
+        val q = key("q")
+        val f = fsm()
+        f.onDown(q.centerX, q.centerY, 0)
+        assertTrue(f.onSecondaryTap().isEmpty())
+        assertEquals(GestureState.PRESSED, f.state)
+    }
+
+    @Test
+    fun `lifting off ends selection mode`() {
+        val (f, space) = trackpadFsm()
+        f.onSecondaryTap()
+        val out = f.onUp(space.centerX, space.centerY, 900)
+        assertTrue(out.has<GestureOutput.TrackpadEnded>())
+        assertEquals(GestureState.IDLE, f.state)
+    }
+
+    @Test
+    fun `cancelling during selection still ends the trackpad`() {
+        val (f, _) = trackpadFsm()
+        f.onSecondaryTap()
+        val out = f.onCancel()
+        assertTrue(
+            "a held shift key would otherwise never be released",
+            out.has<GestureOutput.TrackpadEnded>(),
+        )
+        assertEquals(GestureState.IDLE, f.state)
+    }
+
+    @Test
+    fun `cancelling during plain trackpad also ends it`() {
+        val (f, _) = trackpadFsm()
+        assertTrue(f.onCancel().has<GestureOutput.TrackpadEnded>())
     }
 
     // --- misc -----------------------------------------------------------------------------
@@ -285,204 +353,5 @@ class TouchFsmTest {
         f.onDown(q.centerX, q.centerY, 200)
         val out = f.onUp(q.centerX, q.centerY, 260)
         assertEquals("q", out.only<GestureOutput.CommitPrimary>().text)
-    }
-
-    // --- selection from trackpad mode ---------------------------------------------------
-
-    private fun trackpadFsm(): Pair<TouchFsm, com.offlinekeyboard.ime.layout.KeyRect> {
-        val space = key("space")
-        val f = fsm()
-        f.onDown(space.centerX, space.centerY, 0)
-        f.onLongPressTimeout(config.longPressMs)
-        return f to space
-    }
-
-    @Test
-    fun `vertical travel is twice as sensitive as horizontal per key dimension`() {
-        // A line is a longer journey than a character, so the same finger movement covers more.
-        assertTrue(
-            "vertical step must be the smaller fraction",
-            config.trackpadStepYRatio < config.trackpadStepXRatio,
-        )
-    }
-
-    @Test
-    fun `trackpad reports sub-step progress between caret positions`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        // move a third of a step: too little to move the caret, but the finger has travelled
-        val out = f.onMove(space.centerX + stepX / 3f, space.centerY, 600)
-        assertTrue("caret must not move yet", out.filterIsInstance<GestureOutput.CursorMove>().isEmpty())
-        val progress = out.only<GestureOutput.CursorProgress>()
-        assertEquals(0.333f, progress.fractionX, 0.02f)
-        assertEquals(0f, progress.fractionY, 0.02f)
-    }
-
-    @Test
-    fun `progress resets toward zero after a step is emitted`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        val out = f.onMove(space.centerX + stepX * 1.2f, space.centerY, 600)
-        assertEquals(1, out.filterIsInstance<GestureOutput.CursorMove>().size)
-        assertEquals(0.2f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
-    }
-
-    @Test
-    fun `caret snaps to the nearest boundary, not the one just passed`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-
-        // just over half a step: the nearest boundary is the next one, so the caret moves now
-        val out = f.onMove(space.centerX + stepX * 0.6f, space.centerY, 600)
-        assertEquals(1, out.filterIsInstance<GestureOutput.CursorMove>().size)
-        // and the granular position is now *behind* the caret, by the remaining 0.4
-        assertEquals(-0.4f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
-    }
-
-    @Test
-    fun `under half a step leaves the caret alone`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        val out = f.onMove(space.centerX + stepX * 0.4f, space.centerY, 600)
-        assertTrue(out.filterIsInstance<GestureOutput.CursorMove>().isEmpty())
-        assertEquals(0.4f, out.only<GestureOutput.CursorProgress>().fractionX, 0.02f)
-    }
-
-    @Test
-    fun `granular position never drifts more than half a step from the caret`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        var x = space.centerX
-        // drag across several characters in uneven increments
-        for (i in 1..25) {
-            x += stepX * 0.37f
-            val out = f.onMove(x, space.centerY, 600L + i * 10)
-            out.filterIsInstance<GestureOutput.CursorProgress>().forEach {
-                assertTrue(
-                    "progress drifted to ${it.fractionX}",
-                    abs(it.fractionX) <= 0.5f + 0.001f,
-                )
-            }
-        }
-    }
-
-    @Test
-    fun `half-step travel terminates instead of oscillating`() {
-        val (f, space) = trackpadFsm()
-        val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        // exactly half a step: a non-strict comparison would step back and forth forever
-        val out = f.onMove(space.centerX, space.centerY + stepY * 0.5f, 600)
-        assertTrue(out.filterIsInstance<GestureOutput.CursorMove>().size <= 1)
-    }
-
-    @Test
-    fun `granular offset is unclamped and grows well past a single step`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        var last = 0f
-        var x = space.centerX
-        for (i in 1..12) {
-            x += stepX
-            last = f.onMove(x, space.centerY, 600L + i * 10).only<GestureOutput.CursorProgress>().offsetX
-        }
-        // twelve steps of travel: the caret may have stopped at a line end, this must not
-        assertEquals(12f, last, 0.1f)
-    }
-
-    @Test
-    fun `granular offset moves freely in both axes at once`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX + stepX * 4f, space.centerY - stepY * 3f, 700)
-        val p = out.only<GestureOutput.CursorProgress>()
-        assertEquals(4f, p.offsetX, 0.05f)
-        assertEquals(-3f, p.offsetY, 0.05f)
-    }
-
-    @Test
-    fun `granular offset resets for each new drag`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-        f.onMove(space.centerX + stepX * 5f, space.centerY, 700)
-        f.onUp(space.centerX + stepX * 5f, space.centerY, 800)
-
-        f.onDown(space.centerX, space.centerY, 1000)
-        f.onLongPressTimeout(1000 + config.longPressMs)
-        val out = f.onMove(space.centerX + stepX, space.centerY, 1600)
-        assertEquals(1f, out.only<GestureOutput.CursorProgress>().offsetX, 0.05f)
-    }
-
-    @Test
-    fun `tapping again during trackpad mode starts a selection`() {
-        val (f, _) = trackpadFsm()
-        val out = f.onSecondaryTap()
-        assertEquals(GestureState.SELECTING, f.state)
-        assertTrue(out.has<GestureOutput.SelectionStarted>())
-    }
-
-    @Test
-    fun `movement after starting a selection extends it instead of moving the caret`() {
-        val (f, space) = trackpadFsm()
-        val stepX = config.trackpadStepXRatio * geometry.keyUnit
-
-        val beforeSelect = f.onMove(space.centerX + stepX, space.centerY, 600)
-            .filterIsInstance<GestureOutput.CursorMove>()
-        assertTrue("caret moves plainly first", beforeSelect.all { !it.extend })
-
-        f.onSecondaryTap()
-
-        val afterSelect = f.onMove(space.centerX + stepX * 2.4f, space.centerY, 700)
-            .filterIsInstance<GestureOutput.CursorMove>()
-        assertTrue("expected steps after selecting", afterSelect.isNotEmpty())
-        assertTrue("steps must extend the selection", afterSelect.all { it.extend })
-    }
-
-    @Test
-    fun `selection extends vertically across lines too`() {
-        val (f, space) = trackpadFsm()
-        f.onSecondaryTap()
-        val stepY = config.trackpadStepYRatio * geometry.keyHeight
-        val out = f.onMove(space.centerX, space.centerY + stepY * 1.2f, 700)
-            .filterIsInstance<GestureOutput.CursorMove>()
-        assertEquals(1, out.size)
-        assertEquals(1, out.single().dy)
-        assertTrue(out.single().extend)
-    }
-
-    @Test
-    fun `a second tap does nothing unless the trackpad is active`() {
-        val q = key("q")
-        val f = fsm()
-        f.onDown(q.centerX, q.centerY, 0)
-        assertTrue(f.onSecondaryTap().isEmpty())
-        assertEquals(GestureState.PRESSED, f.state)
-    }
-
-    @Test
-    fun `cancelling during selection still ends the trackpad`() {
-        val (f, _) = trackpadFsm()
-        f.onSecondaryTap()
-        val out = f.onCancel()
-        assertTrue(
-            "a held shift key would otherwise never be released",
-            out.has<GestureOutput.TrackpadEnded>(),
-        )
-        assertEquals(GestureState.IDLE, f.state)
-    }
-
-    @Test
-    fun `cancelling during plain trackpad also ends it`() {
-        val (f, _) = trackpadFsm()
-        assertTrue(f.onCancel().has<GestureOutput.TrackpadEnded>())
-    }
-
-    @Test
-    fun `lifting off ends selection mode`() {
-        val (f, space) = trackpadFsm()
-        f.onSecondaryTap()
-        val out = f.onUp(space.centerX, space.centerY, 900)
-        assertTrue(out.has<GestureOutput.TrackpadEnded>())
-        assertEquals(GestureState.IDLE, f.state)
     }
 }
