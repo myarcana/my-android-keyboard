@@ -509,6 +509,17 @@ time `Metrics` is recalibrated, and nothing would fail loudly.
   it with the glyph at nearly twice its size, and it is raised at the keystroke rather than at the
   touch -- so it says what *was* typed rather than what a finger happens to be resting on. It is
   paired with a click: the eye and the hand are told the same thing at the same moment.
+- **A press in the gap between keys is still a press.** Keys are drawn with a 31px channel
+  between rows on this phone, against a 120px key, and `keyAt` answered "no key" for anything
+  landing in it -- the press was discarded silently. A recorded passage typed at speed showed 205
+  finger-downs reaching the view and 8 producing nothing at all, six of the eight in the channel
+  between the top row and the home row. That is what "the keyboard doesn't register my
+  keypresses" is. Presses now resolve through `keyForPress`, which falls back to the nearest key
+  by distance *to the rectangle* -- centre distance picks the horizontally closer key in the
+  wrong row, because the rows are inset differently. The snap stops at the top of the key area so
+  a tap on the suggestion strip stays a tap on the strip. `nearestKey` had already been written
+  for the glide decoder with a comment saying the gaps swallow samples; the lesson just had not
+  been carried across to taps.
 - **In the Gesture Lab, every line of chrome is a line of passage.** Reading ahead is the whole
   reason the lab produces natural gestures rather than aimed ones, and the screen it has to do it
   in is what the keyboard leaves over -- roughly a third of the display. So the header, the

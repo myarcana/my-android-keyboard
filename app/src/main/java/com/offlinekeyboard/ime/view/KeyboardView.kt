@@ -18,6 +18,7 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
+import com.offlinekeyboard.ime.capture.TouchTrace
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.gesture.GestureState
@@ -746,6 +747,20 @@ class KeyboardView @JvmOverloads constructor(
 
     // --- touch ----------------------------------------------------------------------------
 
+    private fun trace(message: String) {
+        if (TouchTrace.enabled) TouchTrace.log(context, message)
+    }
+
+    private fun actionName(action: Int) = when (action) {
+        MotionEvent.ACTION_DOWN -> "DOWN"
+        MotionEvent.ACTION_POINTER_DOWN -> "POINTER_DOWN"
+        MotionEvent.ACTION_MOVE -> "MOVE"
+        MotionEvent.ACTION_UP -> "UP"
+        MotionEvent.ACTION_POINTER_UP -> "POINTER_UP"
+        MotionEvent.ACTION_CANCEL -> "CANCEL"
+        else -> "action$action"
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     override fun onTouchEvent(event: MotionEvent): Boolean {
         handleTouch(event)
@@ -757,6 +772,15 @@ class KeyboardView @JvmOverloads constructor(
 
     private fun handleTouch(event: MotionEvent) {
         val g = geometry()
+        // Moves are left out: they are nine tenths of the events and none of the questions this
+        // trace answers, and building a line for each of them on the UI thread would slow down
+        // the very typing it is here to measure.
+        if (event.actionMasked != MotionEvent.ACTION_MOVE) {
+            trace(
+                "event ${actionName(event.actionMasked)} pointers=${event.pointerCount} " +
+                    "id=${event.getPointerId(event.actionIndex)} t=${event.eventTime}",
+            )
+        }
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN -> {
                 val i = event.actionIndex
@@ -769,15 +793,22 @@ class KeyboardView @JvmOverloads constructor(
                 val candidate =
                     if (trackpad == null) candidateAt(event.getX(i), event.getY(i), g) else -1
                 if (trackpad != null) {
+                    trace("  down id=$id -> eaten by trackpad secondary tap")
                     consumedPointers += id
                     emit(trackpad.onSecondaryTap())
                 } else if (candidate >= 0) {
+                    trace("  down id=$id -> suggestion strip, candidate=$candidate")
                     candidatePointers[id] = candidate
                     pressedCandidate = candidate
                     invalidate()
                 } else if (resumeGlide(id, event.getX(i), event.getY(i), event.eventTime)) {
                     // The finger came back: it is still the same word.
+                    trace("  down id=$id -> resumed the suspended glide")
                 } else {
+                    trace(
+                        "  down id=$id -> new press on " +
+                            "${g.keyForPress(event.getX(i), event.getY(i))?.key?.id}",
+                    )
                     val fsm = TouchFsm(g, config)
                     pointers[id] = fsm
                     emit(fsm.onDown(event.getX(i), event.getY(i), event.eventTime))
@@ -815,6 +846,7 @@ class KeyboardView @JvmOverloads constructor(
                 val i = event.actionIndex
                 val id = event.getPointerId(i)
                 cancelLongPress(id)
+                trace("  up id=$id state=${pointers[id]?.state}")
                 candidatePointers.remove(id)?.let { pressed ->
                     val committed = pressedCandidate == pressed
                     pressedCandidate = -1
@@ -822,7 +854,11 @@ class KeyboardView @JvmOverloads constructor(
                     if (committed) onCandidate(pressed)
                     return
                 }
-                if (consumedPointers.remove(id)) return
+                if (consumedPointers.remove(id)) {
+                    trace("  up id=$id -> was consumed, nothing emitted")
+                    return
+                }
+                if (!pointers.containsKey(id)) trace("  up id=$id -> NO FSM, press was lost")
                 pointers.remove(id)?.let { fsm ->
                     emit(fsm.onUp(event.getX(i), event.getY(i), event.eventTime))
                     if (fsm.isSuspended) suspendGlide(fsm)
@@ -914,6 +950,7 @@ class KeyboardView @JvmOverloads constructor(
 
     /** Applies the visual half of each output, then forwards everything to the service. */
     private fun emit(outputs: List<GestureOutput>) {
+        outputs.forEach { trace("    out $it") }
         if (outputs.isEmpty()) return
         var repaint = false
         outputs.forEach { out ->

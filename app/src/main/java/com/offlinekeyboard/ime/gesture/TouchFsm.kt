@@ -357,7 +357,9 @@ class TouchFsm(
 
     fun onDown(x: Float, y: Float, t: Long): List<GestureOutput> {
         reset()
-        val key = geometry.keyAt(x, y) ?: return emptyList()
+        // Nearest rather than exact: a press that lands in the gap between two keys is a press
+        // the person meant, not one to throw away. See LayoutGeometry.keyForPress.
+        val key = geometry.keyForPress(x, y) ?: return emptyList()
         origin = key
         val p = PathPoint(x, y, t)
         down = p

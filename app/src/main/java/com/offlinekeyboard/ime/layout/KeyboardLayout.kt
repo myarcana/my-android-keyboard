@@ -168,4 +168,41 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
         val dy = y - r.centerY
         dx * dx + dy * dy
     }
+
+    /**
+     * The key a press belongs to: the one under the finger, or the nearest one when the finger
+     * lands in a gap.
+     *
+     * The gaps are not decoration. The row gap is a quarter of a key tall -- 31px against a
+     * 120px key on this phone -- and a thumb moving at typing speed lands in it constantly,
+     * most often between the top row and the home row. An exact hit test answers "no key" there
+     * and the press is discarded without a sound, which is indistinguishable, to the person
+     * typing, from the keyboard ignoring them. It is the same fact [nearestKey] was written for
+     * on the glide side; presses need it just as much.
+     *
+     * Distance is measured to the rectangle, not to its centre. In a row gap every candidate is
+     * equidistant-ish from the finger by centre distance and the rows are inset differently, so
+     * centre distance picks the horizontally closer key in the wrong row. Distance to the edge
+     * picks the row you were reaching for and then the column you were over.
+     *
+     * The snap is confined to the key area: above the top row is the suggestion strip, and a tap
+     * there must stay a tap on the strip rather than silently becoming a letter.
+     */
+    fun keyForPress(x: Float, y: Float): KeyRect? {
+        keyAt(x, y)?.let { return it }
+        if (y < stripHeight || y > keyAreaBottom + Metrics.BOTTOM_PADDING * scale) return null
+        return keyRects.minByOrNull { r ->
+            val dx = when {
+                x < r.left -> r.left - x
+                x > r.right -> x - r.right
+                else -> 0f
+            }
+            val dy = when {
+                y < r.top -> r.top - y
+                y > r.bottom -> y - r.bottom
+                else -> 0f
+            }
+            dx * dx + dy * dy
+        }
+    }
 }
