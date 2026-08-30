@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
+import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
@@ -19,6 +20,7 @@ import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
+import com.offlinekeyboard.ime.gesture.GestureState
 import com.offlinekeyboard.ime.gesture.PathPoint
 import com.offlinekeyboard.ime.gesture.TouchFsm
 import com.offlinekeyboard.ime.layout.IosLayouts
@@ -99,6 +101,26 @@ private val ICON_KEYS = setOf(
  */
 private const val FLICK_SETTLE_MS = 40f
 
+/**
+ * How quickly a tapped key shrinks back out of its flash, as an exponential time constant in
+ * milliseconds.
+ *
+ * The growth itself has no clock: the key is at full size on the frame the finger lands, because
+ * a quick tap can be over in forty milliseconds and anything that ramps up would still be on its
+ * way in when the finger has already gone. Only the shrink is timed, and it starts from wherever
+ * the key was, so a key tapped twice in quick succession jumps back up rather than continuing
+ * whatever it was doing.
+ */
+private const val POP_SETTLE_MS = 90f
+
+/**
+ * How much bigger a key gets at the peak of its flash, in key widths.
+ *
+ * Spent as *pixels* rather than as a scale factor -- see [KeyboardView.drawPoppedKey] -- so
+ * every key swells by the same visible amount whatever its size.
+ */
+private const val POP_GROWTH = 0.30f
+
 class KeyboardView @JvmOverloads constructor(
     context: Context,
     attrs: AttributeSet? = null,
@@ -171,6 +193,12 @@ class KeyboardView @JvmOverloads constructor(
      * finger has lifted keeps its place with no pointer left to hold it.
      */
     private val flicks = mutableMapOf<String, Flick>()
+
+    /**
+     * Keys mid-flash, by key id -- for the same reason as [flicks]: a key shrinking back after
+     * the finger has lifted has no pointer left to hold its place.
+     */
+    private val pops = mutableMapOf<String, Pop>()
     private var lastFrameNanos = 0L
     private var accentPopup: Triple<KeyRect, List<String>, Int>? = null
     private var glidePath: List<PathPoint> = emptyList()
@@ -292,7 +320,7 @@ class KeyboardView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val g = geometry()
         val t = theme
-        advanceFlicks()
+        advanceAnimations()
         canvas.drawColor(t.background)
 
         if (trackpadActive) {
@@ -302,7 +330,13 @@ class KeyboardView @JvmOverloads constructor(
 
         val radius = g.cornerRadius
         drawCandidates(canvas, g, t, radius)
-        g.keyRects.forEach { rect -> drawKey(canvas, rect, radius, t, g) }
+        // Flashing keys are drawn after the rest, so a key grown past its neighbours is not
+        // painted over by the ones that come later in the row.
+        g.keyRects.forEach { rect -> if (popOf(rect) == 0f) drawKey(canvas, rect, radius, t, g) }
+        g.keyRects.forEach { rect ->
+            val pop = popOf(rect)
+            if (pop > 0f) drawPoppedKey(canvas, rect, radius, t, g, pop)
+        }
 
         if (glidePath.size > 1) drawGlideTrail(canvas, g, t)
         accentPopup?.let { (anchor, accents, selected) ->
@@ -383,10 +417,12 @@ class KeyboardView @JvmOverloads constructor(
 
     private fun drawKey(canvas: Canvas, rect: KeyRect, radius: Float, t: Theme, g: LayoutGeometry) {
         val isSpecial = rect.key.type != KeyType.CHARACTER && rect.key.type != KeyType.SPACE
+        val base = if (isSpecial) t.specialKey else t.key
+        // The pressed tint fades out along with the flash rather than being dropped the instant
+        // the finger leaves, so the key does one thing on release instead of two.
         fill.color = when {
             rect.key.id == highlightedKeyId -> t.keyPressed
-            isSpecial -> t.specialKey
-            else -> t.key
+            else -> blend(base, t.keyPressed, popOf(rect))
         }
         canvas.drawRoundRect(
             RectF(rect.left, rect.top, rect.right, rect.bottom),
@@ -549,6 +585,12 @@ class KeyboardView @JvmOverloads constructor(
      * key with no finger on it is released to settle home, which covers the lift, a cancel, and a
      * flick escaping into a glide without any of the three being handled separately.
      */
+    /** Re-aims everything a finger holds in place: the flick glyphs and the tap flash. */
+    private fun syncPressAnimations() {
+        syncFlickTargets()
+        syncPops()
+    }
+
     private fun syncFlickTargets() {
         var changed = false
         flicks.values.forEach {
@@ -579,15 +621,7 @@ class KeyboardView @JvmOverloads constructor(
      * return should take its length from how far there is to go. It also cannot overshoot: an
      * iPadOS key slides back, it does not bounce.
      */
-    private fun advanceFlicks() {
-        if (flicks.isEmpty()) return
-        val now = System.nanoTime()
-        // A dropped frame must not teleport the glyphs, and the first frame after a lift has no
-        // previous one to measure from.
-        val dtMs =
-            if (lastFrameNanos == 0L) 0f
-            else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
-        lastFrameNanos = now
+    private fun advanceFlicks(dtMs: Float): Boolean {
         val step = 1f - exp(-dtMs / FLICK_SETTLE_MS)
 
         var settling = false
@@ -602,7 +636,111 @@ class KeyboardView @JvmOverloads constructor(
             if (flick.progress == 0f) entries.remove() else settling = true
         }
 
+        return settling
+    }
+
+    /**
+     * Steps every clocked animation one frame and asks for another while any of them is moving.
+     *
+     * They share a single clock because they share a frame: reading the time twice would hand
+     * the second one a zero-length interval and leave it frozen for as long as the first was
+     * running.
+     */
+    private fun advanceAnimations() {
+        if (flicks.isEmpty() && pops.isEmpty()) return
+        val now = System.nanoTime()
+        // A dropped frame must not teleport the glyphs, and the first frame after a lift has no
+        // previous one to measure from.
+        val dtMs =
+            if (lastFrameNanos == 0L) 0f
+            else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
+        lastFrameNanos = now
+        // `or`, not `||`: both have to be stepped, whatever the first one answers.
+        val settling = advanceFlicks(dtMs) or advancePops(dtMs)
         if (settling) postInvalidateOnAnimation() else lastFrameNanos = 0L
+    }
+
+    // --- the tap flash ---------------------------------------------------------------------
+
+    /** One key's flash: how far it is grown, and whether a finger is still holding it there. */
+    private class Pop {
+        var progress = 0f
+        var held = false
+    }
+
+    private fun popOf(rect: KeyRect): Float = pops[rect.key.id]?.progress ?: 0f
+
+    /**
+     * Grows the key each finger is pressing, and lets go of every key no finger is.
+     *
+     * Read from the state machines for the same reason the flick is: they already know what a
+     * finger is doing, and only two of the things it can be doing are still a keypress. A press
+     * that has become a glide, the trackpad, an accent popup or a backspace repeat has taken the
+     * finger somewhere else entirely, and the key it started on settles back while the gesture it
+     * turned into carries on -- which also means no key can be left standing up with nothing
+     * holding it, however the gesture ends.
+     */
+    private fun syncPops() {
+        var changed = false
+        pops.values.forEach {
+            if (it.held) {
+                it.held = false
+                changed = true
+            }
+        }
+        pointers.values.forEach { fsm ->
+            if (fsm.state != GestureState.PRESSED && fsm.state != GestureState.FLICK) {
+                return@forEach
+            }
+            val keyId = fsm.originKeyId ?: return@forEach
+            val pop = pops.getOrPut(keyId) { Pop() }
+            if (pop.progress != 1f || !pop.held) changed = true
+            pop.progress = 1f
+            pop.held = true
+        }
+        if (changed) invalidate()
+    }
+
+    /** Shrinks every released key one frame, exactly as [advanceFlicks] settles the glyphs. */
+    private fun advancePops(dtMs: Float): Boolean {
+        var settling = false
+        val step = 1f - exp(-dtMs / POP_SETTLE_MS)
+        val entries = pops.entries.iterator()
+        while (entries.hasNext()) {
+            val pop = entries.next().value
+            if (pop.held) continue
+            pop.progress -= pop.progress * step
+            // An exponential only approaches zero; the last sliver is not worth a frame.
+            if (pop.progress < 0.01f) pop.progress = 0f
+            if (pop.progress == 0f) entries.remove() else settling = true
+        }
+        return settling
+    }
+
+    /**
+     * Draws a key grown out of the keyboard under the finger that is on it.
+     *
+     * The size is chosen in pixels and only then turned back into a scale factor. A flat scale
+     * would be wrong on the wide keys: the same 25% that reads as a flash on a letter throws the
+     * space bar a third of a row sideways. Growing every key by the same number of pixels along
+     * its longest side makes the gesture feel identical wherever it lands.
+     *
+     * The pivot sits below the key's centre so most of the growth goes upward, away from the
+     * thumb that is covering the key and toward the part of it the user can actually see.
+     */
+    private fun drawPoppedKey(
+        canvas: Canvas,
+        rect: KeyRect,
+        radius: Float,
+        t: Theme,
+        g: LayoutGeometry,
+        pop: Float,
+    ) {
+        val scale = 1f + POP_GROWTH * g.keyUnit * pop / maxOf(rect.width, rect.height)
+        canvas.save()
+        canvas.scale(scale, scale, rect.centerX, rect.centerY + rect.height * 0.3f)
+        drawKey(canvas, rect, radius, t, g)
+        canvas.restore()
     }
 
     /** Straight per-channel interpolation, for the secondary taking on the primary's colour. */
@@ -625,7 +763,7 @@ class KeyboardView @JvmOverloads constructor(
         handleTouch(event)
         // Every event can start, move or end a flick, so the glyphs are re-aimed after all of
         // them rather than at each of the several places a gesture can change course.
-        syncFlickTargets()
+        syncPressAnimations()
         return true
     }
 
@@ -638,7 +776,7 @@ class KeyboardView @JvmOverloads constructor(
                 // A second finger while the spacebar trackpad is live starts a selection
                 // rather than pressing a key.
                 val trackpad = pointers.values.firstOrNull {
-                    it.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD
+                    it.state == GestureState.TRACKPAD
                 }
                 val candidate =
                     if (trackpad == null) candidateAt(event.getX(i), event.getY(i), g) else -1
@@ -672,8 +810,8 @@ class KeyboardView @JvmOverloads constructor(
                         }
                     }
                     pointers[id]?.let { fsm ->
-                        if (fsm.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD ||
-                            fsm.state == com.offlinekeyboard.ime.gesture.GestureState.SELECTING
+                        if (fsm.state == GestureState.TRACKPAD ||
+                            fsm.state == GestureState.SELECTING
                         ) {
                             android.util.Log.d(
                                 "TP",
@@ -774,9 +912,9 @@ class KeyboardView @JvmOverloads constructor(
     private fun scheduleLongPress(id: Int, fsm: TouchFsm) {
         val runnable = Runnable {
             emit(fsm.onLongPressTimeout(System.currentTimeMillis()))
-            // A press that becomes an accent popup or a trackpad is no longer a possible flick,
-            // and no touch event is coming to notice that.
-            syncFlickTargets()
+            // A press that becomes an accent popup or a trackpad is no longer a possible flick
+            // and no longer a key standing up, and no touch event is coming to notice that.
+            syncPressAnimations()
         }
         longPressRunnables[id] = runnable
         uiHandler.postDelayed(runnable, config.longPressMs)
@@ -793,6 +931,10 @@ class KeyboardView @JvmOverloads constructor(
         outputs.forEach { out ->
             when (out) {
                 is GestureOutput.KeyHighlighted -> { highlightedKeyId = out.keyId; repaint = true }
+                is GestureOutput.CommitPrimary -> tick()
+                is GestureOutput.CommitSecondary -> tick()
+                is GestureOutput.CommitAccent -> tick()
+                is GestureOutput.SpecialKey -> tick()
                 GestureOutput.FlickPreviewCleared -> repaint = true
                 is GestureOutput.FlickPreview -> repaint = true
                 is GestureOutput.ShowAccents -> {
@@ -823,12 +965,24 @@ class KeyboardView @JvmOverloads constructor(
     }
 
     /**
+     * The click a key makes.
+     *
+     * Fired where the key is *entered* rather than where it is pressed, which is the only place
+     * a tap and a flick can share: a flick is not a flick until the finger lifts, so ticking on
+     * the way down would either buzz for gestures that went on to type nothing or tick twice for
+     * the ones that did. It follows the system's touch-feedback setting, as a keyboard should.
+     */
+    private fun tick() {
+        performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    /**
      * Debug only. adb can drive a single pointer, so the two-finger selection gesture cannot be
      * scripted; this lets a broadcast stand in for the second finger while testing.
      */
     fun debugStartSelection() {
         val trackpad = pointers.values.firstOrNull {
-            it.state == com.offlinekeyboard.ime.gesture.GestureState.TRACKPAD
+            it.state == GestureState.TRACKPAD
         } ?: return
         emit(trackpad.onSecondaryTap())
     }
