@@ -144,8 +144,7 @@ class GestureLabActivity : Activity() {
         title.text = passage.title
         note.text = passage.note
         feedback.setTextColor(muted)
-        feedback.text = "Type it straight through. Every gesture is filed under the token it " +
-            "was aimed at -- the ones read wrongly are the most useful of all."
+        feedback.text = "Type it straight through -- the ones read wrongly are the most useful."
         renderPassage()
         armCurrent()
     }
@@ -375,17 +374,21 @@ class GestureLabActivity : Activity() {
             setTextColor(muted)
         }
         passageView = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
             setTextColor(ahead)
-            setLineSpacing(dp(6).toFloat(), 1f)
+            setLineSpacing(dp(5).toFloat(), 1f)
         }
         progress = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(muted)
         }
+        // Capped, because it is the one line here whose length is not under this file's control:
+        // a long word plus a decoded word plus a lift report can run to three lines, and every
+        // one of them comes out of the passage's height, which is the thing being read.
         feedback = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
             setTextColor(muted)
+            maxLines = 2
         }
         bankLine = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -436,7 +439,7 @@ class GestureLabActivity : Activity() {
 
         val cardBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(14), dp(16), dp(14))
+            setPadding(dp(14), dp(12), dp(14), dp(12))
             background = GradientDrawable().apply {
                 setColor(card)
                 cornerRadius = dp(14).toFloat()
@@ -469,8 +472,8 @@ class GestureLabActivity : Activity() {
             addView(cardBox, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
             ).apply { topMargin = dp(8) })
-            addView(feedback, marginTop(dp(10)))
-            addView(bankLine, marginTop(dp(6)))
+            addView(feedback, marginTop(dp(8)))
+            addView(bankLine, marginTop(dp(4)))
             addView(buttons, marginTop(dp(6)))
             addView(field, marginTop(dp(6)))
         }
