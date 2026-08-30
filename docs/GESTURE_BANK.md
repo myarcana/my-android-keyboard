@@ -67,12 +67,14 @@ tokens on that same key, in the same minute of the same hand, and a test enforce
 
 ## Collecting
 
-The lab is an app on the phone with its own launcher icon, and it needs nothing else: no cable,
-no network, no computer. That is the whole design brief for everything in this section. A rig
-that has to be started from a terminal is a rig used in half-hour sittings a few times a month,
-and the bank it fills is a bank of a few hundred gestures made by a hand that knew it was being
-watched. The same rig carried around and opened in a queue collects several times as much, from
-a thumb that has stopped paying attention — which is the thumb the keyboard actually has to read.
+The lab is an app on the phone with its own launcher icon, and collecting with it needs nothing
+else: no cable, no network, no computer. That is the whole design brief for everything in this
+section. A rig that has to be started from a terminal is a rig used in half-hour sittings a few
+times a month, and the bank it fills is a bank of a few hundred gestures made by a hand that knew
+it was being watched. The same rig carried around and opened in a queue collects several times as
+much, from a thumb that has stopped paying attention — which is the thumb the keyboard actually
+has to read. Getting the data *off* is still a cable and `adb`, and that is fine: it happens
+between sessions rather than during them.
 
 ```
 tools/gestures.sh lab      # build, install, open the lab with our keyboard selected
@@ -213,45 +215,30 @@ The phone writes `files/gesture-bank.jsonl` in internal storage, fsynced per lin
 collection sessions end the way phone sessions end, and a page-cached line that never landed is a
 gesture that will not be performed again.
 
-That copy does not survive an uninstall, and this app deliberately has no cloud backup — which
-made a session durable only once a cable had been found, and the phone that collects is exactly
-the machine that cannot run the command that saves. So the lab also **mirrors** the bank into
-shared storage, at
+It stays there. Not for want of somewhere more durable: shared storage would survive an
+uninstall, and it is also readable by every app on the phone with storage access, which is a
+strange place for a keyboard built to be structurally incapable of sending what it sees anywhere.
+The file is inside the sandbox, and it comes out over adb.
 
-```
-/sdcard/Download/OfflineKeyboard/gesture-bank.jsonl.txt
-```
-
-after every completed passage and on leaving the lab. That folder is outside the app sandbox: it
-survives uninstall, the phone's own file browser can see it, and it comes off over USB with no
-adb, no run-as and no debuggable build. It is rewritten whole from the internal copy rather than
-appended to, because a mirror that appended could not know how much of the file was already
-there — and the person who owns the phone is entitled to move or delete it.
-
-The `.txt` is not a typo. MediaStore reconciles a display name against its MIME type and has
-never heard of `.jsonl`, so the app asks for the name the platform was going to impose anyway,
-and the path here is the path on the phone.
-
-**More → Import a bank file** is the way back in. A reinstall empties internal storage while the
-Downloads copy sits there untouched, and without an import the only route home is a cable — the
-thing this is all supposed to work without. It merges by id through the system file picker, so
-it needs no permission and no network.
-
-Then, when there is a machine:
+That copy does not survive an uninstall, and this app deliberately has no cloud backup. So:
 
 ```
 tools/gestures.sh pull     # merge into data/gesture-bank.jsonl, and commit it
 ```
 
-which reads all three copies — internal, the Downloads mirror, and the `Android/data` export —
-because after a reinstall a session lives in one of them and not the others, and none of them is
-the master.
+which reads both copies on the phone — internal storage, and whatever the lab's **More → Export a
+copy for adb** last wrote under `Android/data`, for a release build or a ROM where `run-as` is
+blocked.
 
 The merge is keyed on each record's id, and the **archived copy wins**. A record never
 legitimately changes after it is written, with one exception: its label can be withdrawn later,
 here or in the lab. So the only thing an incoming copy is allowed to add to an existing id is a
 `void` the archive is missing. Letting incoming win outright — which it did, once — silently
 reverts every withdrawal the moment a phone that has never seen them is read again.
+
+**More → Import a bank file** is the way back after an uninstall: it merges a bank handed to it
+through the system file picker, so the archive can be put back on a phone without `run-as` or a
+shell.
 
 **The pull commits.** Not as a courtesy — a pull that is not committed has saved nothing, since
 an untracked file in the working tree is one `git clean` from gone, and this is data that cannot

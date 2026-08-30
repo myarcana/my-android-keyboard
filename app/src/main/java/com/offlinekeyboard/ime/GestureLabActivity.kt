@@ -63,11 +63,11 @@ import java.util.concurrent.Executors
  * real state machine and sweeps the thresholds against it.
  *
  * Everything about it that is not the passage exists so that it can be used away from the
- * machine that reads the bank. It remembers where it got to, so four minutes in a queue
- * continues the corpus instead of retyping the first passage of it; it deals its own passages
- * out of a shuffled deck that takes weeks to come round; it mirrors the bank into shared
- * storage, so a session is durable the moment it happens rather than the next time a cable is
- * found; and it can read a bank back in, so a reinstall is recoverable by the phone alone.
+ * machine that reads the bank: it remembers where it got to, so four minutes in a queue
+ * continues the corpus instead of retyping the first passage of it, and it deals its own
+ * passages out of a shuffled deck that takes weeks to come round. What it does not do is take
+ * the bank out of the sandbox -- the file is fsynced per line where it is written, and comes
+ * off over adb when there is a machine to pull it.
  */
 class GestureLabActivity : Activity() {
 
@@ -76,15 +76,6 @@ class GestureLabActivity : Activity() {
     /** Set when finishing a passage already moved the deck on, so Next does not skip one. */
     private var advanced = false
     private var targetIndex = 0
-
-    /**
-     * What the bank looked like when it was last mirrored, so an unchanged one is not rewritten.
-     *
-     * The count alone is not enough: a withdrawn sample followed by a new one leaves it exactly
-     * where it was, and a mirror skipped on that basis is a mirror that is quietly one gesture
-     * behind. The modification time settles it.
-     */
-    private var mirrored: Pair<Int, Long> = 0 to 0L
 
     private var sessionRecorded = 0
     private var sessionAgreed = 0
@@ -173,10 +164,6 @@ class GestureLabActivity : Activity() {
         // emitting gestures, and with no target armed they are dropped on the floor.
         GestureCapture.disarm()
         GestureCapture.onResult = null
-        // Leaving the lab is the moment a session is most likely to be its last for a while, so
-        // it is the moment the durable copy has to be up to date. Nothing here can wait for a
-        // cable to be found later.
-        mirrorBank(announce = false)
     }
 
     // --- the passage -------------------------------------------------------------------------
@@ -372,7 +359,6 @@ class GestureLabActivity : Activity() {
             deck.advance()
             advanced = true
         }
-        mirrorBank(announce = false)
         progress.text = "done   ·   $sessionRecorded gestures this session"
         feedback.setTextColor(goodHue)
         val snapshot = LabProgress.snapshot(LabDeck.prefs(this))
@@ -500,27 +486,16 @@ class GestureLabActivity : Activity() {
     }
 
     /**
-     * Rewrites the copy in shared storage, and says where it went when asked to.
-     *
-     * Called silently on every completed passage and on leaving the lab, and out loud from the
-     * menu. Silent is the important one: a durability guarantee that depends on remembering to
-     * press something is not one.
+     * Copies the bank to the app's external files directory, where `adb pull` reaches it without
+     * run-as. For a release build or a ROM where run-as is blocked; the internal file is the one
+     * that matters.
      */
-    private fun mirrorBank(announce: Boolean) {
+    private fun export() {
         val context = applicationContext
         io.execute {
-            val state = GestureBank.count(context) to GestureBank.file(context).lastModified()
-            if (!announce && state == mirrored) return@execute
-            val where = GestureBank.mirror(context)
-            // The adb-reachable copy goes out at the same time. It costs a file copy and it is
-            // the path that works when MediaStore does not.
-            GestureBank.export(context)
-            if (where != null) mirrored = state
-            val count = state.first
-            if (announce) {
-                runOnUiThread {
-                    toast(if (where == null) "Bank is empty" else "$count gestures saved to $where")
-                }
+            val file = GestureBank.export(context)
+            runOnUiThread {
+                toast(if (file == null) "Bank is empty" else "Exported to ${file.absolutePath}")
             }
         }
     }
@@ -528,10 +503,9 @@ class GestureLabActivity : Activity() {
     /**
      * Reads another bank file in and merges it, keyed on record id.
      *
-     * This is the other half of the mirror. Internal storage does not survive an uninstall and
-     * the copy in Downloads does, so after a reinstall the phone is sitting next to its own
-     * history with no way to pick it up -- unless it can be handed back through the picker,
-     * which needs no permission and no network and no cable.
+     * Internal storage does not survive an uninstall, so the archive that does is the one in
+     * the repository. This is how it gets home again without run-as or a shell: hand the file
+     * back through the system picker, which needs no permission and no network.
      */
     private fun importBank() {
         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
@@ -573,14 +547,14 @@ class GestureLabActivity : Activity() {
      */
     private fun showMenu() {
         val items = arrayOf(
-            "Save a copy to Downloads",
+            "Export a copy for adb",
             "Import a bank file",
             "Score the glide decoders",
         )
         android.app.AlertDialog.Builder(this)
             .setItems(items) { _, which ->
                 when (which) {
-                    0 -> mirrorBank(announce = true)
+                    0 -> export()
                     1 -> importBank()
                     else -> scoreEngines()
                 }

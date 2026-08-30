@@ -155,22 +155,26 @@ Four things were in the way, and none of them was the passage:
   only one that answers the question the bank exists for. Offered beside forty passages of
   ordinary English it stops being chosen, and the bank goes on growing while the flick-versus-
   glide boundary gains nothing. It is dealt in before every fifth passage instead.
-- **A session was durable only once a cable was found.** Internal storage does not survive an
-  uninstall, and `tools/gestures.sh pull` is a command the collecting machine cannot run. The
-  lab now mirrors the bank into shared Downloads as it goes -- outside the sandbox, visible to
-  the phone's own file browser, readable over USB with no adb -- and can import one back through
-  the file picker, which is what makes a reinstall recoverable by the phone alone.
+- **A fumbled label could only be withdrawn a week later, on a laptop.** A gesture the keyboard
+  reads wrongly is the most valuable line in the bank; a gesture whose *label* is untrue is worth
+  less than nothing, and the only person who can tell them apart is the one who just made it, for
+  about two seconds. Void does it on the spot and keeps the recording.
+
+The bank itself stays in internal storage, fsynced per line, and comes off over adb between
+sessions. Shared storage was tried and taken back out: it survives an uninstall and it is also
+readable by every app on the phone with storage access, which is not a trade a keyboard built to
+be incapable of sending what it sees anywhere gets to make casually.
 
 The general form: for anything that collects data from a person over months, the collection rate
 is a parameter of the design, and it is usually the one with the most leverage. It is also the
 one that never appears in a test.
 
-### A file that is copied three ways needs a rule about which copy wins
+### A file that is copied more than one way needs a rule about which copy wins
 
-The bank now exists in up to four places -- internal storage, a Downloads mirror, an
-`Android/data` export, and the repository -- and the merge rule that had been fine for one copy
-turned out to be actively destructive with three. It was *incoming wins*, which is the obvious
-rule and the wrong one, because it assumes the copy being read is the newer one.
+The bank exists in up to three places -- internal storage, the `Android/data` export, and the
+repository -- and the merge rule that had been fine while only one was ever read turned out to be
+actively destructive as soon as two were. It was *incoming wins*, which is the obvious rule and
+the wrong one, because it assumes the copy being read is the newer one.
 
 A record is written once and never changes, with a single exception: its label can be *withdrawn*
 afterwards, by hand in the archive or from the lab's Void button. So the archive wins, and the

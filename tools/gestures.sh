@@ -52,9 +52,9 @@ lab)
     $ADB shell ime set "$IME" >/dev/null
     echo "Gesture Lab is open. Type the passage straight through; every gesture is filed"
     echo "under the token it was aimed at. It deals its own passages from assets/passages_en.txt"
-    echo "and remembers where it got to, so it collects just as well away from this machine --"
-    echo "and mirrors the bank to /sdcard/Download/OfflineKeyboard as it goes, which is the copy"
-    echo "that survives an uninstall."
+    echo "and remembers where it got to, so it collects just as well away from this machine."
+    echo "The bank stays in internal storage until it is pulled: run tools/gestures.sh pull"
+    echo "whenever the phone is next on the cable."
 
     # Says up front whether the last session ever reached the repository, because the way this
     # data gets lost is a session that was recorded, enjoyed, and never pulled.
@@ -73,16 +73,13 @@ pull)
     mkdir -p data
     tmp=$(mktemp)
     got=0
-    # Three copies, and none of them is authoritative. Internal storage is where the app appends
-    # and is the newest; the Downloads mirror is the only one that survives an uninstall; the
-    # copy under Android/data is the one that works when run-as is blocked. The .txt on the
-    # Downloads copy is not a typo: MediaStore appends it, so the app asks for it: see
-    # GestureBank.PUBLIC_NAME. A session collected
-    # after a reinstall lives in one of them and not the others, so all three are read and the
-    # merge below sorts it out by id.
+    # Internal storage is where the app appends and is always the newest. The copy under
+    # Android/data is whatever the lab's Export button last wrote, and exists for the case
+    # run-as cannot cover -- a release build, or a ROM that blocks it. Both are read and the
+    # merge below sorts it out by id, because on a phone where run-as is blocked the second is
+    # all there is.
     for source in \
         "run-as $PKG cat files/gesture-bank.jsonl" \
-        "cat /sdcard/Download/OfflineKeyboard/gesture-bank.jsonl.txt" \
         "cat /sdcard/Android/data/$PKG/files/gesture-bank.jsonl"
     do
         part=$(mktemp)
@@ -99,7 +96,7 @@ pull)
         rm -f "$part"
     done
     if [[ "$got" != "1" ]]; then
-        echo "nothing to pull -- no bank on the device, and nothing in Downloads either"
+        echo "nothing to pull -- no bank on the device, or run-as is blocked and nothing exported"
         rm -f "$tmp"
         exit 1
     fi
