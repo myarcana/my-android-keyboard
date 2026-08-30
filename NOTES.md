@@ -505,10 +505,11 @@ time `Metrics` is recalibrated, and nothing would fail loudly.
   A cursor should look like a cursor.
 - **Vector glyphs, never colour emoji.** The globe and microphone were emoji at first and were
   the single ugliest detail against Gboard's flat monochrome icons.
-- **A keystroke is confirmed where the finger has just left.** Entering a key raises a bubble over
-  it with the glyph at nearly twice its size, and it is raised at the keystroke rather than at the
-  touch -- so it says what *was* typed rather than what a finger happens to be resting on. It is
-  paired with a click: the eye and the hand are told the same thing at the same moment.
+- **A pressed key does not get a popup; it becomes one.** Pressing stretches the key itself up out
+  of the board, tints it, and carries its contents to the top of the taller shape -- so the glyph
+  is clear of the thumb while staying attached to the key it belongs to. The finger holds the
+  bottom of the same object it is reading the top of. The click that goes with it is at the
+  keystroke, not the touch.
 - **A press in the gap between keys is still a press.** Keys are drawn with a 31px channel
   between rows on this phone, against a 120px key, and `keyAt` answered "no key" for anything
   landing in it -- the press was discarded silently. A recorded passage typed at speed showed 205
@@ -746,52 +747,53 @@ and 0.5px at the 90th percentile, and the shortest recorded flick still ended 33
 the 24px asked for. Replaying the whole bank under the new rule reproduces every verdict the
 device reached, to the sample.
 
-### The key flash and its click — `view/KeyboardView`
+### The pressed key and its click — `view/KeyboardView`
 
 | parameter | value |
 |---|---|
-| raised at | the commit — a tap's, a flick's or an accent's; character keys only |
-| bubble | 1.32 key widths wide, 1.15 key heights tall, corner radius ×1.6 |
-| join | bottom edge sunk 0.10 key heights into the key |
-| glyph | 0.95 key units, against 0.62 for the key's own |
-| shadow | 0.10 key units blurred, 0.03 down, 20% black |
-| life | 150 ms, at full strength for every frame of it |
+| rise | 0.70 key heights, upward only, character keys only |
+| contents | carried up bodily; both glyphs, at their resting sizes |
+| colour | `keyPressed`, taken and given back with the rise |
+| going up | no ramp — full height on the frame the touch lands |
+| coming down | the flick's own 40 ms settle, body and glyphs on one clock |
+| haptic | `KEYBOARD_TAP`, at the commit, following the system touch-feedback setting |
 
-**It confirms a keystroke, so it happens at the keystroke.** This started on the finger-down and
-that was wrong, for a reason that took two tries to see: a touch is not yet a keypress. Raising
-the bubble there raises it for every touch that turns out to be something else -- the letter under
-the finger that is only beginning a glided word, or a key's letter a moment before the flick takes
-its symbol instead -- and it raises it under the thumb that is still sitting on the key. Moving it
-to the commit fixes all of that at once and needs no rules to do it. A glide commits no key, so it
-never raises one. A pull that has not armed has committed nothing, so there is nothing to show. A
-flick's commit is a commit like any other and raises the bubble reading the symbol that landed.
+**The key becomes the popup rather than getting one.** This is FUTO's answer and it is better than
+the three that were tried before it. Growing the key in place puts the confirmation under the
+thumb that is covering it. A separate bubble above the key clears the thumb but is a second object
+that has to be given rules about when to exist -- and each of those rules is a place to be wrong:
+on the finger-down it appears for touches that turn out to be glides, and at the commit it appears
+after the finger has gone and needs a clock to take it away again. Stretching the key upward has
+none of that. It is the same object, so there is nothing to place, nothing to clamp to the edge of
+the keyboard, and nothing to decide about: it is up exactly while a finger is on the key.
 
-**Above the key, because that is where the finger has just been.** Gboard, FUTO and iOS all put
-this over the key rather than on it, and that is the whole idea rather than a style they happen to
-share: the hand that made the keystroke is in front of the key that took it. The first version
-here grew the key in place, which confirms the keystroke in exactly the spot the user cannot see.
-Only character keys get one -- a bubble over shift or backspace would confirm something the editor
-is already showing.
+**One number does the whole thing.** The body is drawn from `top - lift`; the contents are drawn in
+the key's own coordinates and the canvas is translated up by the same `lift`. So the glyphs land at
+the top of the stretched shape by construction, both of them together, and the empty stem below is
+where the thumb is. At `lift = 0` every line of it reduces to the resting keyboard, which is why a
+key nobody is touching is drawn exactly as it always was.
 
-**The one thing here that needs a clock, and all the clock decides is when it goes.** Everything
-else on this keyboard is placed by a finger and removed when that finger leaves; the bubble arrives
-after the finger has gone, so something has to end it. That is a question of *when*, never of how
-solidly it is drawn: it is at full strength for every frame of its 150ms and then absent. There is
-no such thing as half typing a key, so there is nothing for a ramp at either end to be reporting --
-it would only be the renderer talking about itself. Its age is read from the clock rather than
-accumulated frame by frame, so a dropped frame takes time off the end instead of adding it.
+**The flick then plays out up there for nothing.** It moves the glyphs within the key's own
+coordinates, and the rise moves the key: neither knows about the other, and the flick clips to the
+key's outline rather than to the stretched body, so the letter still leaves through the bottom edge
+of the key's own shape and the stem stays clear. That the flick animation now happens in the raised
+part of a pressed key took no code at all -- it is what carrying the contents up already means.
 
-**The shadow is doing real work.** The bubble is the same white as the keys it stands over, so
-without elevation its edges disappear into them. `setShadowLayer` on a shape is documented as
-text-only under hardware acceleration; it does render here, and was checked on the device rather
-than assumed.
+**Up with no ramp, down on the flick's clock.** A tap can be over in forty milliseconds, so a key
+that grew over any duration at all would still be growing when the finger had gone: it is at full
+height on the frame the touch lands. The way back is the flick's own 40 ms settle, and the two run
+as one `KeyMotion` on one clock at one rate -- a finger lifted mid-flick leaves a key that is both
+standing up and part-way pulled, and settling them separately would bring the body home before its
+contents.
 
-**The click is at the commit too**, and for the same reason. It is also the only place a tap and a
-flick can share one rule: a flick is not a flick until the finger lifts, so ticking on the way down
-would buzz for presses that went on to type nothing and tick twice for the ones that did. Every
-entered key ticks -- letters, flicked symbols, accents and the special keys -- and gestures that
-type nothing stay silent. The special keys tick but raise no bubble: the tick says *something
-happened*, which is true of backspace, while the bubble says *this is what you typed*.
+**Character keys only.** The space bar has nothing to lift, and shift or backspace would be raising
+an icon over nothing. They tint, as they always did.
+
+**The click is at the commit**, not the touch. It is the only place a tap and a flick can share one
+rule: a flick is not a flick until the finger lifts, so ticking on the way down would buzz for
+presses that went on to type nothing and tick twice for the ones that did. Every entered key ticks
+-- letters, flicked symbols, accents and the special keys -- and gestures that type nothing stay
+silent.
 
 ### Cursor and selection
 
