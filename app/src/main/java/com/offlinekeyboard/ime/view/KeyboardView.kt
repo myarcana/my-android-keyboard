@@ -652,6 +652,16 @@ class KeyboardView @JvmOverloads constructor(
      * Only character keys get one, as on every keyboard that does this. A bubble exists to show
      * the glyph the thumb is covering, and shift, backspace, return and the space bar have no
      * glyph worth uncovering -- putting one over them would be decoration.
+     *
+     * A bubble belongs to a press that is *still a press*, which is one rule covering three
+     * cases. A finger that has started pulling downward is making a flick, and gets nothing back
+     * until the flick is confirmed -- then the bubble returns reading the symbol it will type. A
+     * finger that has left the spot it landed on is drawing a word, and gets nothing at all. What
+     * is left is a finger holding still on a key, which is a keypress and nothing else.
+     *
+     * The cuts can be this sharp because the panel reports a still finger as perfectly still: of
+     * 96 taps in the bank, 94 never move a single pixel, and no tap at all produces downward
+     * travel the flick would read. Nothing has to be eased away in case an ordinary tap trips it.
      */
     private fun syncPreviews() {
         val shown = pointers.values.mapNotNull { fsm ->
@@ -660,11 +670,16 @@ class KeyboardView @JvmOverloads constructor(
             }
             val rect = keyRectOf(fsm.originKeyId) ?: return@mapNotNull null
             if (rect.key.type != KeyType.CHARACTER) return@mapNotNull null
-            // What releasing right now would type. Pulled down far enough and the bubble reads
-            // the symbol, because a bubble showing a letter the key will not type is worse than
-            // no bubble at all.
-            val text = rect.key.secondary?.takeIf { fsm.flickArmed } ?: rect.key.primary
-            Preview(rect, text)
+            val secondary = rect.key.secondary
+            when {
+                // Confirmed: the bubble comes back, reading what releasing now would type. It
+                // is tested before the stillness below because a flick is a long way from still
+                // -- the recorded ones pull a median of 112px.
+                fsm.flickArmed && secondary != null -> Preview(rect, secondary)
+                // A pull under way but not yet confirmed, or a finger on its way somewhere.
+                fsm.flickProgress > 0f || !fsm.holdingStill -> null
+                else -> Preview(rect, rect.key.primary)
+            }
         }
         if (shown != previews) {
             previews = shown

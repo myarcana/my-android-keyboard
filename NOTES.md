@@ -729,6 +729,7 @@ device reached, to the sample.
 | glyph | 0.95 key units, against 0.62 for the key's own |
 | shadow | 0.10 key units blurred, 0.03 down, 20% black |
 | animation | none: up on the frame the touch lands, gone on the frame it lifts |
+| shown while | the finger is holding still (`longPressSlopRatio`), or the flick is confirmed |
 | haptic | `KEYBOARD_TAP`, at the commit, following the system touch-feedback setting |
 
 **Above the key, because that is the only place the finger is not.** Gboard, FUTO and iOS all put
@@ -744,9 +745,31 @@ would still be arriving when the finger had already gone, so the confirmation wo
 only on the slow presses that need it least, and one that faded out would trail a fast typist by a
 key or two. All three references show it and hide it outright, and so does this.
 
-**It says what the key will type, not what is written on it.** Pull a key past the flick's commit
-point and the bubble reads the symbol, from the same `flickArmed` the commit itself is read from.
-A bubble showing a letter the key is no longer going to type would be worse than no bubble.
+**A bubble belongs to a press that is still a press.** One rule, three cases. A finger that has
+started pulling downward is making a flick, and gets nothing until the flick is confirmed -- then
+the bubble comes back reading the symbol, from the same `flickArmed` the commit is read from. A
+finger that has left the spot it landed on is drawing a word, and gets nothing at all. What is
+left is a finger holding still on a key, which is a keypress and nothing else.
+
+The stillness test is `longPressSlopRatio`, already in the config for the long press, because it
+is the same question asked twice -- has this finger stayed where it landed. The bank says the
+threshold barely matters: sweeping it from 0.06 to 0.20 key heights changes nothing, because a
+finger that is going to move crosses 3px and 24px within six milliseconds of each other. Reusing
+the number that already exists beat inventing one that scores identically.
+
+**The cuts are hard because the digitiser is.** 94 of the 96 taps in the bank never move a single
+pixel, and no tap produces downward travel the flick would read at all. So there is nothing to
+ease or fade away in case an ordinary tap trips the rule: a bubble that vanished gradually would
+only be hedging against a jitter this panel does not report.
+
+**What cannot be fixed: the first moments of a glide.** A word that starts with the finger resting
+on its first key is, for that whole time, a keypress by every measurement available -- the bubble
+is up because nothing yet distinguishes it from a tap. In the bank that lasts a median of 84ms and
+as long as 425ms. Suppressing it would mean delaying every bubble past the longest such pause,
+which is four times the length of the median tap: the tap flash would be gone to save the glide
+one. The information needed to tell them apart is not in the path, it is in the head of whoever
+made it -- the same reason the flick-versus-glide threshold had to be measured rather than
+reasoned out.
 
 **Held by the state machines, like the flick.** A bubble stands while some pointer is PRESSED or
 FLICK on its key and at no other time, which is what puts it away the moment a press escapes into
