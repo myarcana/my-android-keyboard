@@ -134,6 +134,25 @@ a hand and a screen. So both are recorded with every gesture, along with the ind
 strokes join, and the whole bank can be rescored under any other pair. The defaults below are a
 starting point and are expected to move.
 
+### The keyboard is already on Android's grid
+
+Worth knowing before reaching for any of the below: the *arrangement* of this layout is iOS's,
+but the *proportions* were measured off Gboard on the device, and Gboard is AOSP's grid. Every
+letter lands within **0.054 of a key width** of where `rows_qwerty.xml` puts it -- five pixels on
+the phone, a twentieth of the key being talked about -- with the residual coming entirely from our
+visible gaps and side margin.
+
+Nobody aimed at that; it fell out of measuring rather than guessing. `AospGridTest` asserts it
+now, because it is the compatibility surface with every swipe decoder that exists, and it would
+otherwise be rediscovered by someone who had already assumed the opposite. `LayoutGeometry`
+exposes the same grid in the [0,1] key-area frame those decoders take their input in -- the key
+area, not the whole view, because our suggestion strip is not somewhere a glide can go and
+including it would push every key a fifth of the way down the square.
+
+`docs/PLAN.md` carried a risk saying our geometry was *not* Android's and that a decoder would
+need coordinate normalisation. It was wrong twice over -- see that file -- and believing it is
+why the decoder below was written by hand.
+
 ### Two channels, and the second one asks the question backwards on purpose
 
 Comparing a glide to a candidate word by resampling both to 32 points and measuring point against

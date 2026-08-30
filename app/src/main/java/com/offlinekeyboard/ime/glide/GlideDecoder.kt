@@ -2,7 +2,6 @@ package com.offlinekeyboard.ime.glide
 
 import com.offlinekeyboard.ime.gesture.PathPoint
 import com.offlinekeyboard.ime.layout.KeyRect
-import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 import kotlin.math.abs
 import kotlin.math.hypot
@@ -268,22 +267,11 @@ class GlideDecoder(
     // --- candidate geometry -------------------------------------------------------------------
 
     /**
-     * Centre of each letter key, indexed by letter. Null if the layout has no letters at all,
-     * which is what a numeric or symbol plane looks like -- and a glide on one of those decodes
-     * to nothing rather than to nonsense.
+     * The layout's letter keys, or null if it has none -- which is what a numeric or symbol
+     * plane looks like, and a glide on one of those decodes to nothing rather than to nonsense.
      */
-    private fun letterCentres(geometry: LayoutGeometry): Array<KeyRect?>? {
-        val centres = arrayOfNulls<KeyRect>(26)
-        var found = 0
-        geometry.keyRects.forEach { rect ->
-            val id = rect.key.id
-            if (rect.key.type == KeyType.CHARACTER && id.length == 1 && id[0] in 'a'..'z') {
-                centres[id[0] - 'a'] = rect
-                found++
-            }
-        }
-        return if (found == 0) null else centres
-    }
+    private fun letterCentres(geometry: LayoutGeometry): Array<KeyRect?>? =
+        geometry.letterKeys.takeIf { keys -> keys.any { it != null } }
 
     /**
      * The path a perfectly-executed glide of [word] would draw, resampled into [out].
@@ -343,15 +331,15 @@ class GlideDecoder(
         val near = ArrayList<Char>(4)
         var nearest: Char? = null
         var nearestDistance = Float.MAX_VALUE
-        geometry.keyRects.forEach { rect ->
-            val id = rect.key.id
-            if (rect.key.type != KeyType.CHARACTER || id.length != 1 || id[0] !in 'a'..'z') return@forEach
+        geometry.letterKeys.forEachIndexed { index, rect ->
+            if (rect == null) return@forEachIndexed
+            val letter = 'a' + index
             val d = hypot(p.x - rect.centerX, p.y - rect.centerY)
             if (d < nearestDistance) {
                 nearestDistance = d
-                nearest = id[0]
+                nearest = letter
             }
-            if (d <= radius) near += id[0]
+            if (d <= radius) near += letter
         }
         if (near.isEmpty()) nearest?.let { near += it }
         return near

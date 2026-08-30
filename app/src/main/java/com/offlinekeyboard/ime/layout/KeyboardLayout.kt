@@ -109,6 +109,42 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
         }
     }
 
+    /** The bottom of the last row: the key area is everything between this and [stripHeight]. */
+    val keyAreaBottom: Float = keyRects.maxOfOrNull { it.bottom } ?: stripHeight
+
+    /**
+     * This layout's single-letter keys, in a-z order. Absent letters are null.
+     *
+     * The letters are the only keys a word gesture can be about, and every consumer of them --
+     * the decoder, the normalised grid below, the tests that check that grid -- was otherwise
+     * about to scan [keyRects] for `id.length == 1` on its own.
+     */
+    val letterKeys: Array<KeyRect?> = arrayOfNulls<KeyRect>(26).also { out ->
+        keyRects.forEach { rect ->
+            val id = rect.key.id
+            if (rect.key.type == KeyType.CHARACTER && id.length == 1 && id[0] in 'a'..'z') {
+                out[id[0] - 'a'] = rect
+            }
+        }
+    }
+
+    /**
+     * A point in the [0,1] square a layout-agnostic swipe decoder expects: +X right, +Y down,
+     * with the *key area* as the unit square.
+     *
+     * The suggestion strip is deliberately outside it. A decoder is given the key coordinates and
+     * the finger's path in one frame, and the frame it means by "the keyboard" is the keys --
+     * LatinIME, whose geometry these models were trained against, keeps its suggestion strip in a
+     * separate view entirely. Including our strip would compress every key upward by a fifth of
+     * the height and misplace the whole grid.
+     *
+     * Values outside [0,1] are meaningful and are not clamped: a finger that strays above the top
+     * row or below the bottom one really did go there, and that is information.
+     */
+    fun normalisedX(x: Float): Float = x / widthPx
+
+    fun normalisedY(y: Float): Float = (y - stripHeight) / (keyAreaBottom - stripHeight)
+
     /** The key under a touch point, or null. */
     fun keyAt(x: Float, y: Float): KeyRect? = keyRects.firstOrNull { it.contains(x, y) }
 

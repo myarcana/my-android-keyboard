@@ -105,19 +105,31 @@ go in a debug overlay screen so they can be tuned by feel on the real device.
 
 ## Phase 2 — Glide typing
 
-**Done, and not the way this plan said.** The plan was to vendor `swipe-library` from
-`gitlab.futo.org/keyboard/swipe-library` as source plus its three FUTO Swipe models (a
-layout-agnostic encoder, a QWERTY decoder, a context LM) and bridge to them over JNI from the
-GLIDE state. The plan also flagged the risk that made that unattractive: the decoder is trained
-on Android key geometry and ours is not Android key geometry, so the first task would have been
-normalising our coordinates into a grid somebody else's model expects — which is a fix applied to
-the one layer this project exists to do differently.
+**Done, but with a hand-written decoder, and the reason given for that was wrong.**
+
+The plan was to vendor `swipe-library` from `gitlab.futo.org/keyboard/swipe-library` plus its
+three FUTO Swipe models and bridge to them over JNI from the GLIDE state. It was not, on the
+grounds of the risk noted below: that the decoder is trained on Android key geometry and ours is
+not. **Both halves of that are false**, and it is worth writing down which kind of false each is.
+
+*Our geometry already is Android's.* The layout's arrangement is iOS's, but its proportions were
+measured off Gboard on the device rather than taken from iOS, and Gboard is AOSP's grid. Every
+letter sits within **0.054 of a key width** — five pixels — of where `rows_qwerty.xml` puts it,
+the residual being our visible gaps and side margin. `AospGridTest` now asserts this rather than
+leaving it to be rediscovered.
+
+*And it would not have mattered if it were not.* The FUTO encoder is layout-agnostic in the
+strong sense: the key centres enter the forward pass as a runtime tensor, evaluated through a
+fixed DCT basis, so a layout it has never seen costs it nothing and needs no retraining. The
+paper measures a *novel* layout at 97.7% top-1. There was never a coordinate-normalisation task
+to avoid.
 
 What shipped instead is `glide/GlideDecoder.kt`: resample the gesture and each candidate word to
-the same points, score them on four channels, add a log frequency, take the best. It is 300 lines
-of Kotlin over a committed 40,000-word lexicon, it needs no NDK, no JNI and no model files, it
-runs in 0.23 ms, and every part of it is tunable against gestures recorded on *this* layout. See
-NOTES.md for the two channels and why the second one asks its question backwards.
+the same points, score them on four channels, add a log frequency, take the best. 300 lines of
+Kotlin over a committed 40,000-word lexicon, no NDK, no JNI, no model files, 0.23 ms a word, and
+tunable against gestures recorded on this layout. See NOTES.md for the two channels and why the
+second one asks its question backwards. It is a reasonable thing to have; it is not the best
+available thing, and the reason it was chosen over the best available thing does not hold up.
 
 The part that was not foreseen at all is the finger lift. A glide is one stroke in theory and
 often is not in practice, and ending the word at the first lift types something nobody asked for.
@@ -230,8 +242,12 @@ seeing `nihao` survive is a test case, not a hope.
 1. **librime NDK build** — was the largest schedule risk; largely retired by consuming
    `fcitx5-android/prebuilt` rather than building the dependency tree ourselves. What remains
    is the NDK 27→28 move that those artifacts require.
-2. **FUTO decoder on iOS geometry** — may need coordinate normalization; vendored as source
-   so we can fix it.
+2. ~~**FUTO decoder on iOS geometry** — may need coordinate normalization; vendored as source
+   so we can fix it.~~ **Retired, and it was never real.** Our letters are on AOSP's grid to
+   within 0.054 of a key width, and the model takes key centres as a runtime tensor in any case,
+   so a novel layout costs it nothing. Believing this risk is what produced a hand-written
+   decoder instead: the cost of a misjudged risk is not always a failure, sometimes it is a
+   worse thing built carefully.
 3. **ASR accuracy bar** — may not be reachable at acceptable size. This is measured in
    Phase 4 before investment, not assumed.
 4. **APK size** — models push well past 200MB. Fine for sideloading; models copy from assets
