@@ -102,16 +102,16 @@ private val ICON_KEYS = setOf(
 private const val FLICK_SETTLE_MS = 40f
 
 /**
- * How long the bubble stays at full strength after a key is entered, in milliseconds, and how
- * long it then takes to fade.
+ * How long the bubble stands after a key is entered, in milliseconds.
  *
- * It has to go on a clock, unlike everything else the keyboard animates: the bubble arrives at
- * the commit, and by then the finger that made it has already left, so there is nothing left to
- * take it away. Long enough to be read at speed, short enough that a fast typist is never looking
- * at the key before last.
+ * It needs a clock at all, unlike everything else the keyboard animates, because it arrives at
+ * the commit: the finger that made it has already left, so there is nothing to take it away.
+ * That clock decides only *when* it goes, never how solidly it is drawn. The bubble is at full
+ * strength for every frame of its life and then absent -- it is a statement that a key was
+ * typed, and there is no such thing as half typing one. Long enough to be read at speed, short
+ * enough that a fast typist is never looking at the key before last.
  */
-private const val FLASH_HOLD_MS = 70f
-private const val FLASH_FADE_MS = 100f
+private const val FLASH_MS = 150f
 
 /** How wide the bubble is, in widths of the key it stands over. */
 private const val PREVIEW_WIDTH = 1.32f
@@ -667,22 +667,19 @@ class KeyboardView @JvmOverloads constructor(
     }
 
     /**
-     * Draws the bubble and asks for the next frame while it is still visible.
+     * Draws the bubble and asks for the next frame while it is still standing.
      *
-     * Full strength for [FLASH_HOLD_MS] and then out over [FLASH_FADE_MS]. Its age is read from
-     * the clock rather than accumulated frame by frame, so a dropped frame shortens the fade
-     * instead of extending it: the bubble is a report of something that happened at a known
-     * moment, and it should be gone that long after it, however the frames fell.
+     * Its age is read from the clock rather than accumulated frame by frame, so a dropped frame
+     * takes time off the end instead of adding it: the bubble reports something that happened at
+     * a known moment, and it should be gone [FLASH_MS] after that moment however the frames fell.
      */
     private fun drawFlash(canvas: Canvas, g: LayoutGeometry, t: Theme) {
         val f = flash ?: return
-        val ageMs = (System.nanoTime() - f.bornNanos) / 1_000_000f
-        val alpha = 1f - ((ageMs - FLASH_HOLD_MS) / FLASH_FADE_MS).coerceIn(0f, 1f)
-        if (alpha <= 0f) {
+        if ((System.nanoTime() - f.bornNanos) / 1_000_000f >= FLASH_MS) {
             flash = null
             return
         }
-        drawKeyBubble(canvas, g, t, f, alpha)
+        drawKeyBubble(canvas, g, t, f)
         postInvalidateOnAnimation()
     }
 
@@ -695,13 +692,7 @@ class KeyboardView @JvmOverloads constructor(
      * the key in place -- which is where this started -- confirms the keystroke in exactly the
      * spot the user cannot see.
      */
-    private fun drawKeyBubble(
-        canvas: Canvas,
-        g: LayoutGeometry,
-        t: Theme,
-        flash: Flash,
-        alpha: Float,
-    ) {
+    private fun drawKeyBubble(canvas: Canvas, g: LayoutGeometry, t: Theme, flash: Flash) {
         val rect = flash.rect
         val w = rect.width * PREVIEW_WIDTH
         // Wider than the key, so the outer columns would otherwise hang over the edge of the
@@ -711,18 +702,11 @@ class KeyboardView @JvmOverloads constructor(
         // rather than as a card floating loose above it.
         val bottom = rect.top + g.keyHeight * PREVIEW_OVERLAP
         val top = bottom - g.keyHeight * PREVIEW_HEIGHT
-        val fade = (255 * alpha).toInt()
 
         fill.color = t.popup
-        fill.alpha = fade
         // The bubble is the same white as the keys it stands over, so without a shadow its edges
-        // disappear into them. It fades with the bubble, or a solid shadow would outlast it.
-        fill.setShadowLayer(
-            g.keyUnit * 0.10f,
-            0f,
-            g.keyUnit * 0.03f,
-            Color.argb((0x33 * alpha).toInt(), 0, 0, 0),
-        )
+        // disappear into them.
+        fill.setShadowLayer(g.keyUnit * 0.10f, 0f, g.keyUnit * 0.03f, 0x33000000)
         canvas.drawRoundRect(
             RectF(left, top, left + w, bottom),
             g.cornerRadius * 1.6f,
@@ -730,10 +714,8 @@ class KeyboardView @JvmOverloads constructor(
             fill,
         )
         fill.clearShadowLayer()
-        fill.alpha = 255
 
         label.color = t.text
-        label.alpha = fade
         label.textSize = g.keyUnit * PREVIEW_TEXT
         // Centred on the bubble above the part buried in the key, so the glyph sits in the
         // middle of what can actually be seen.
@@ -744,7 +726,6 @@ class KeyboardView @JvmOverloads constructor(
             (top + visibleBottom) / 2f - (label.descent() + label.ascent()) / 2f,
             label,
         )
-        label.alpha = 255
     }
 
     private fun keyRectOf(keyId: String?): KeyRect? =

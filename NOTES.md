@@ -728,8 +728,8 @@ device reached, to the sample.
 | bubble | 1.32 key widths wide, 1.15 key heights tall, corner radius ×1.6 |
 | join | bottom edge sunk 0.10 key heights into the key |
 | glyph | 0.95 key units, against 0.62 for the key's own |
-| shadow | 0.10 key units blurred, 0.03 down, 20% black, fading with the bubble |
-| life | 70 ms at full, then 100 ms fading out |
+| shadow | 0.10 key units blurred, 0.03 down, 20% black |
+| life | 150 ms, at full strength for every frame of it |
 
 **It confirms a keystroke, so it happens at the keystroke.** This started on the finger-down and
 that was wrong, for a reason that took two tries to see: a touch is not yet a keypress. Raising
@@ -747,17 +747,18 @@ here grew the key in place, which confirms the keystroke in exactly the spot the
 Only character keys get one -- a bubble over shift or backspace would confirm something the editor
 is already showing.
 
-**The one thing on the keyboard that has to be animated out.** Everything else here is placed by a
-finger and removed by that finger leaving. The bubble arrives when the finger has already gone, so
-nothing is left to take it away and it needs a clock: full strength for 70ms, then out over 100ms.
-Its age is read from the clock rather than accumulated frame by frame, so a dropped frame shortens
-the fade instead of stretching it -- it is a report of something that happened at a known moment,
-and should be gone that long after it however the frames fell.
+**The one thing here that needs a clock, and all the clock decides is when it goes.** Everything
+else on this keyboard is placed by a finger and removed when that finger leaves; the bubble arrives
+after the finger has gone, so something has to end it. That is a question of *when*, never of how
+solidly it is drawn: it is at full strength for every frame of its 150ms and then absent. There is
+no such thing as half typing a key, so there is nothing for a ramp at either end to be reporting --
+it would only be the renderer talking about itself. Its age is read from the clock rather than
+accumulated frame by frame, so a dropped frame takes time off the end instead of adding it.
 
 **The shadow is doing real work.** The bubble is the same white as the keys it stands over, so
 without elevation its edges disappear into them. `setShadowLayer` on a shape is documented as
 text-only under hardware acceleration; it does render here, and was checked on the device rather
-than assumed. Its alpha fades with the bubble's, or the shadow would outlast the thing casting it.
+than assumed.
 
 **The click is at the commit too**, and for the same reason. It is also the only place a tap and a
 flick can share one rule: a flick is not a flick until the finger lifts, so ticking on the way down
