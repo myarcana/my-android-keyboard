@@ -79,22 +79,47 @@ class AospGridTest {
     // --- the frame a layout-agnostic decoder is given -------------------------------------
 
     /**
-     * The normalised frame is the key area, not the whole view.
+     * The normalised frame is the three letter rows -- not the whole view, and not the whole key
+     * area either.
      *
-     * A decoder gets the key centres and the finger's path in one [0,1] square and has no other
-     * way to know where the keys are. Ours has a suggestion strip above the keys taking a fifth
-     * of the view; measuring from the top of *that* would push every key down the square by the
-     * same fifth, and the strip is not somewhere a glide can go.
+     * A decoder gets the key centres and the finger's path in one [0,1] square and has no way at
+     * all to detect a frame it did not expect: the failure mode is not an error, it is quietly
+     * worse words. Two things are tempting to include and both are wrong. Our suggestion strip
+     * takes a fifth of the view; the bottom row (space, globe, return) takes a quarter of the
+     * keys. Neither is somewhere a word gesture can go, and either one stretches the square so
+     * every key lands somewhere the decoder does not expect it.
      */
     @Test
-    fun `the normalised frame is the key area`() {
+    fun `the normalised frame is the letter rows`() {
         val q = geometry.letterKeys['q' - 'a']!!
         val z = geometry.letterKeys['z' - 'a']!!
         assertEquals("the top row's top is 0", 0f, geometry.normalisedY(q.top), 0.001f)
-        assertEquals("the bottom of the keys is 1", 1f, geometry.normalisedY(geometry.keyAreaBottom), 0.001f)
+        assertEquals("the bottom row of letters is 1", 1f, geometry.normalisedY(z.bottom), 0.001f)
         assertEquals("the left edge is 0", 0f, geometry.normalisedX(0f), 0.001f)
         assertEquals("the right edge is 1", 1f, geometry.normalisedX(Metrics.REFERENCE_WIDTH), 0.001f)
-        assertTrue("z sits below q", geometry.normalisedY(z.centerY) > geometry.normalisedY(q.centerY))
+        assertTrue(
+            "the space bar must be below the frame, not inside it",
+            geometry.normalisedY(geometry.keyAreaBottom) > 1f,
+        )
+    }
+
+    /**
+     * How far our rows sit from the layout FUTO's fixed English decoder was trained against.
+     *
+     * Theirs is three contiguous rows, so its centres are exactly 1/6, 1/2 and 5/6. We draw
+     * visible gaps between rows, so ours sit slightly further apart. Reported rather than
+     * asserted tight, because the right response to a difference here is to measure whether the
+     * decoder cares, not to fake the coordinates -- the encoder takes key centres as input
+     * precisely so that a layout can be itself.
+     */
+    @Test
+    fun `how far our rows are from the reference layout`() {
+        val reference = mapOf('q' to 1f / 6f, 'a' to 0.5f, 'z' to 5f / 6f)
+        reference.forEach { (letter, expected) ->
+            val ours = geometry.normalisedY(geometry.letterKeys[letter - 'a']!!.centerY)
+            println("row '%c': ours %.3f, FUTO's reference %.3f, %+.3f".format(letter, ours, expected, ours - expected))
+            assertEquals("row '$letter' is a long way from the reference", expected, ours, 0.05f)
+        }
     }
 
     /** Out of bounds is information, not an error: a finger really can leave the keys. */

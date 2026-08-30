@@ -109,7 +109,7 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
         }
     }
 
-    /** The bottom of the last row: the key area is everything between this and [stripHeight]. */
+    /** The bottom of the last row. */
     val keyAreaBottom: Float = keyRects.maxOfOrNull { it.bottom } ?: stripHeight
 
     /**
@@ -128,22 +128,33 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
         }
     }
 
+    /** The band the letters live in: the top of the first row to the bottom of the third. */
+    val letterAreaTop: Float = letterKeys.filterNotNull().minOfOrNull { it.top } ?: stripHeight
+    val letterAreaBottom: Float = letterKeys.filterNotNull().maxOfOrNull { it.bottom } ?: stripHeight
+
     /**
-     * A point in the [0,1] square a layout-agnostic swipe decoder expects: +X right, +Y down,
-     * with the *key area* as the unit square.
+     * A point in the [0,1] square a layout-agnostic swipe decoder expects: +X right, +Y down.
      *
-     * The suggestion strip is deliberately outside it. A decoder is given the key coordinates and
-     * the finger's path in one frame, and the frame it means by "the keyboard" is the keys --
-     * LatinIME, whose geometry these models were trained against, keeps its suggestion strip in a
-     * separate view entirely. Including our strip would compress every key upward by a fifth of
-     * the height and misplace the whole grid.
+     * The unit square is **the three letter rows**, and getting that wrong is the mistake those
+     * decoders' own documentation warns about hardest -- there is no way for them to detect it,
+     * and the result is not an error but quietly worse words. Two things are outside it and both
+     * were tempting to include. The suggestion strip, because it is part of our view; and the
+     * bottom row, because it is part of the keys. Neither is somewhere a word gesture can go, and
+     * either one stretches the square so that every key sits somewhere the decoder does not
+     * expect. The reference layout FUTO ships puts its rows at 1/6, 1/2 and 5/6, which is three
+     * rows filling the square exactly.
+     *
+     * Ours land at 0.142, 0.5 and 0.858, and the difference is real rather than an error: we draw
+     * visible gaps between rows and they do not, so our centres sit slightly further apart. The
+     * honest thing is to hand over where our keys actually are -- these models take the key
+     * centres as an input for exactly this reason -- rather than to claim a grid we do not have.
      *
      * Values outside [0,1] are meaningful and are not clamped: a finger that strays above the top
      * row or below the bottom one really did go there, and that is information.
      */
     fun normalisedX(x: Float): Float = x / widthPx
 
-    fun normalisedY(y: Float): Float = (y - stripHeight) / (keyAreaBottom - stripHeight)
+    fun normalisedY(y: Float): Float = (y - letterAreaTop) / (letterAreaBottom - letterAreaTop)
 
     /** The key under a touch point, or null. */
     fun keyAt(x: Float, y: Float): KeyRect? = keyRects.firstOrNull { it.contains(x, y) }

@@ -76,6 +76,34 @@ bank without them lets the sweep drive that threshold to zero unopposed. It did 
 recommending 12 pixels, under Android's own touch slop -- on 48 samples containing no ordinary
 keypress at all.
 
+### Borrowing a platform constant is not the same as having a reason
+
+The flick threshold was pinned at 0.20 of a key height for months because that is Android's touch
+slop, and the argument sounded airtight: a keyboard that decides you flicked while the platform
+still calls your finger stationary is broken rather than badly tuned.
+
+It was wrong twice over, and both errors are the kind that only a bank catches.
+
+Touch slop is not a filter on coordinates. It is how far a child view may move before a scrolling
+parent may steal the gesture -- a question about *arbitration between views*, which has nothing to
+say about whether a finger moved. Nothing was ever suppressing those events. Meanwhile the thing
+that genuinely does decide the finger is still is the digitiser, which reports a resting thumb at
+one unchanging coordinate: all 94 taps in the bank travel exactly zero pixels, across five to
+eleven move events each, to a tenth of a pixel. So the margin was already being taken once before
+this code saw an event, and taking 8dp again on top of it was paying twice.
+
+The cost was real and invisible until the passages got fast enough to produce it: flicks of 15.1px
+and 23.0px, both read as plain letters. The number is now 0.025 -- one dp, three pixels -- and the
+bank cannot argue with any value from 0.02 to 0.12, because the two classes have a gap between
+them with literally nothing in it.
+
+**What made three pixels safe is that distance stopped carrying the decision alone.** A flick has
+to be downward *and* four and a quarter times more vertical than horizontal; a resting thumb does
+not drift three pixels straight down. The lesson generalises past this number: a threshold that is
+one clause of three can be set where the evidence actually is, and it is the single-clause tests
+that have to be timid. Guarding the same gesture on an axis nobody disputes buys more than padding
+the one everybody does.
+
 ### A gesture made to order is not the gesture
 
 The Gesture Lab used to print an instruction -- *"Swipe down on O to type 9"* -- wait, record, and

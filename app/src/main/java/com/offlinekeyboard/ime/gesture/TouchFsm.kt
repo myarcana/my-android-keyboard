@@ -20,13 +20,32 @@ data class GestureConfig(
      *
      * Measured, not guessed: see docs/GESTURE_BANK.md. At the original 0.45 -- 54px on the
      * target phone -- ten of sixty-four recorded flicks never registered at all, six of them on
-     * m, where the bottom row leaves nowhere to swipe to. The recorded flicks reach down to
-     * 27.8px, and recorded taps travel *zero* pixels, with five to eleven move events all at the
-     * identical coordinate. The gap between the two classes is empty, so the number is set by
-     * the platform instead: 8dp of touch slop over a 40dp key is 0.20, and below that Android
-     * itself still calls the finger stationary.
+     * m, where the bottom row leaves nowhere to swipe to.
+     *
+     * It then sat at 0.20 for a while, on the grounds that 8dp of touch slop over a 40dp key is
+     * 0.20 and Android calls a finger stationary below that. Two things were wrong with it. The
+     * smaller: the bank has since collected flicks of 15.1px and 23.0px, both read as taps, so
+     * the claim the number rested on -- that nothing lives between the two classes -- is no
+     * longer true. The larger: touch slop is not a filter on coordinates. It is how far a child
+     * view may move before a scrolling parent is entitled to steal the gesture, and it says
+     * nothing at all about whether a finger moved.
+     *
+     * What does call the finger stationary is the digitiser, and it does so at zero: all 94 taps
+     * in the bank report the identical coordinate across five to eleven move events, to a tenth
+     * of a pixel. That filter runs before this code sees anything, so deducting another 8dp here
+     * was subtracting the same margin twice.
+     *
+     * Which leaves the bank with no lower bound to give -- every value from 0.02 to 0.12 scores
+     * identically on all 286 samples -- so the number comes from the mechanism instead. 0.025 is
+     * one dp of a forty-dp key: three pixels, the smallest travel that is unambiguously travel
+     * on a panel which reports a still finger as perfectly still.
+     *
+     * It can be this small because distance is not deciding alone. A flick also has to be
+     * downward, and [verticalDominance] times more vertical than horizontal. A resting thumb
+     * does not drift three pixels straight down. An isotropic threshold here would be reckless;
+     * this one is fenced on two other axes, and only the third had to be generous.
      */
-    val flickDistanceRatio: Float = 0.20f,
+    val flickDistanceRatio: Float = 0.025f,
     /**
      * How far the finger drags the key's symbol, as a fraction of key height.
      *
@@ -37,11 +56,12 @@ data class GestureConfig(
      * between an animation and a manoeuvre, and the number is therefore the view's glyph geometry
      * (0.74 - 0.28 of key height) rather than anything measured off a hand.
      *
-     * Deliberately not [flickDistanceRatio]. A flick commits after 0.20 because that is Android's
-     * touch slop and the bank showed nothing between a tap and a flick to separate them better,
-     * and the symbol is only 44% of the way home at that point. So the pull has a point of no
-     * return partway down it, like any detent: past 0.20 the letter has faded out and releasing
-     * gives the symbol, and coming back up above it puts the letter back and gives the letter.
+     * Deliberately not [flickDistanceRatio], and now a long way from it. A flick commits after
+     * three pixels, where the symbol is barely 5% of the way home, so the point of no return
+     * sits very near the top of a pull that runs on for another fifty. The letter therefore goes
+     * out almost as soon as the thumb does, and the symbol keeps sliding under it afterwards.
+     * That is honest rather than hasty -- the commit really did happen that early -- and coming
+     * back up above it still puts the letter back and gives the letter.
      */
     val flickTravelRatio: Float = 0.46f,
     /**
@@ -61,9 +81,14 @@ data class GestureConfig(
      * A long press means held *still*, which is what it means everywhere else on the platform.
      * Without this, starting a glide slowly opens the accent popup instead: a recorded glide of
      * "on" dawdled for 447ms before picking up speed, and the popup fired at 500ms while the
-     * finger was already 24px down the key. Same value as [flickDistanceRatio], and for the same
-     * reason -- it is Android's touch slop, the distance below which the platform itself still
-     * calls the finger stationary.
+     * finger was already 24px down the key.
+     *
+     * This one *is* Android's touch slop, 8dp over a 40dp key, and it shared the number with
+     * [flickDistanceRatio] until that one moved. They could part company because they ask
+     * different questions. Whether the finger has moved downward on purpose is answered by the
+     * panel and by the direction, and needs no margin of its own. Whether it has stayed put long
+     * enough to mean a hold is drift in any direction over time, which is exactly the question
+     * touch slop was written to answer, so here the platform's number is the right one.
      */
     val longPressSlopRatio: Float = 0.20f,
     /**

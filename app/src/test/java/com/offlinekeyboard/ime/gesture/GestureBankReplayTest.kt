@@ -215,19 +215,21 @@ class GestureBankReplayTest {
     /**
      * The flick threshold, as a fraction of key height.
      *
-     * The floor is not arbitrary and is not a grid artifact: Android's own touch slop is 8dp,
-     * and a key is 40dp tall, so 0.20 *is* touch slop. Below that the platform still considers
-     * the finger stationary, and a keyboard that has already decided you flicked while the OS
-     * says you have not yet moved is not tunable, it is broken.
+     * The floor was 0.20 for a long time, on the grounds that it is Android's touch slop and a
+     * keyboard deciding you flicked while the platform still calls the finger stationary is
+     * broken rather than badly tuned. It held up until the bank collected flicks of 15.1px and
+     * 23.0px, which fell underneath it and were read as taps, and until it became clear that
+     * slop is not a statement about whether the finger moved at all. See
+     * [GestureConfig.flickDistanceRatio], where the argument is set out properly.
      *
-     * The floor mattered more when the lab asked for one gesture at a time: a tap made while an
-     * instruction is watching is a careful tap, and the ones that will actually collide with this
-     * threshold are the sloppy ones in the middle of a sentence. Passages collect those now, so
-     * the evidence is better than it was -- but the bound is still the right one to keep, because
-     * a keyboard that has decided you flicked while the OS still calls the finger stationary is
-     * not badly tuned, it is broken.
+     * The grid now runs down to 0.02 so the data can pick the number rather than the bound. It
+     * declines to: every value from 0.02 to 0.12 scores identically, because all 94 taps in the
+     * bank travel exactly zero pixels and there is nothing down there for a threshold to be
+     * wrong about. That is a finding and not a search that stopped early, which is why the floor
+     * is still marked justified below -- but it does mean the shipped value has to be argued for
+     * in the config rather than read off this sweep's midpoint.
      */
-    private val flickGrid = steps(0.20f, 0.85f, 0.05f)
+    private val flickGrid = steps(0.02f, 0.85f, 0.01f)
     /**
      * How much more vertical than horizontal a flick has to be.
      *
@@ -314,7 +316,7 @@ class GestureBankReplayTest {
      * twice that way: once on the flick distance, once on the vertical dominance, where the true
      * separating value sat at about 5 and the grid stopped at 3.
      */
-    private val JUSTIFIED_FLOOR = "Android touch slop; deliberate"
+    private val JUSTIFIED_FLOOR = "no lower bound in the data; the value is argued, not swept"
 
     private fun reportPlateau(tied: List<GestureConfig>) {
         if (tied.size <= 1) return
@@ -424,7 +426,9 @@ class GestureBankReplayTest {
     // --- formatting -------------------------------------------------------------------------
 
     private fun describe(c: GestureConfig) =
-        "flickDistanceRatio=%.2f verticalDominance=%.2f glideDistanceRatio=%.2f flickToGlideRatio=%.2f"
+        // Three places on the flick distance, one more than the rest: it is the only one whose
+        // shipped value is finer than the grid, and %.2f rounded 0.025 to 0.03 in the report.
+        "flickDistanceRatio=%.3f verticalDominance=%.2f glideDistanceRatio=%.2f flickToGlideRatio=%.2f"
             .format(c.flickDistanceRatio, c.verticalDominance, c.glideDistanceRatio, c.flickToGlideRatio)
 
     private fun describe(s: GestureReplay.Score) =

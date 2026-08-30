@@ -1,0 +1,63 @@
+diff --git a/jni/swipe_jni.cpp b/jni/swipe_jni.cpp
+index f2c968d..f278f13 100644
+--- a/jni/swipe_jni.cpp
++++ b/jni/swipe_jni.cpp
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "swipe_decoder/engine.hpp"
++#include "swipe_decoder/trie.hpp"
+ #include "swipe_decoder/unicode_case.hpp"
+ 
+ #include <jni.h>
+@@ -399,6 +400,50 @@ Java_org_futo_ml_inference_SwipeDecoder_nativeDestroy(
+     delete to_engine(handle);
+ }
+ 
++// ---------------------------------------------------------------------------
++// Local addition: a dictionary the Kotlin side can own.
++//
++// SwipeEngine takes its dictionaries as ITrie pointers through setMode, and
++// SwipeDecoder.kt passes them as jlongs -- but nothing in the shipped bindings
++// can produce one, so the Kotlin API cannot load a dictionary at all. These
++// three wrap load_trie_simple so it can.
++//
++// Trie::itrie() re-points its userdata at the owning object every call, so
++// taking the pointer after the move below is safe; the Trie must outlive it,
++// which is what nativeFree is for.
++// ---------------------------------------------------------------------------
++
++JNIEXPORT jlong JNICALL
++Java_com_offlinekeyboard_ime_glide_SwipeTrie_nativeLoad(
++    JNIEnv* env, jclass /* clazz */, jstring pathStr
++) {
++    const std::string path = jstr_or_empty(env, pathStr);
++    auto loaded = load_trie_simple(path);
++    if (!loaded) {
++        LOGE("nativeLoad: could not read dictionary %s", path.c_str());
++        return 0;
++    }
++    auto* owned = new Trie(std::move(*loaded));
++    LOGI("nativeLoad: %s", path.c_str());
++    return static_cast<jlong>(reinterpret_cast<uintptr_t>(owned));
++}
++
++JNIEXPORT jlong JNICALL
++Java_com_offlinekeyboard_ime_glide_SwipeTrie_nativeItrie(
++    JNIEnv* /* env */, jclass /* clazz */, jlong handle
++) {
++    auto* trie = reinterpret_cast<Trie*>(static_cast<uintptr_t>(handle));
++    if (!trie) return 0;
++    return static_cast<jlong>(reinterpret_cast<uintptr_t>(trie->itrie()));
++}
++
++JNIEXPORT void JNICALL
++Java_com_offlinekeyboard_ime_glide_SwipeTrie_nativeFree(
++    JNIEnv* /* env */, jclass /* clazz */, jlong handle
++) {
++    delete reinterpret_cast<Trie*>(static_cast<uintptr_t>(handle));
++}
++
+ // Pin the calling thread to big or little cores.
+ // Returns the number of cores pinned, or 0 on failure.
+ static int pin_to_cores(const char* affinity) {

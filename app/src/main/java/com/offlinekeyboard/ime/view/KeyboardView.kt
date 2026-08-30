@@ -359,6 +359,12 @@ class KeyboardView @JvmOverloads constructor(
      * symbol if you let go, and one showing a letter again is one that will type the letter. The
      * commit point can then be felt without being explained, and the two cannot drift apart
      * because both come from the same pair of ratios.
+     *
+     * Since the flick threshold came down to three pixels this is very early -- around 5% of the
+     * pull -- so the letter goes almost the moment the thumb does. That is the intended reading
+     * rather than a regression: the commit point moved, and this fade is only ever a report of
+     * where it is. Decoupling them to keep a more leisurely fade would buy a prettier animation
+     * by lying about what releasing would type.
      */
     private val letterGoneAt: Float
         get() = config.flickDistanceRatio / config.flickTravelRatio
