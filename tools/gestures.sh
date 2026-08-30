@@ -51,9 +51,10 @@ lab)
     $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
     $ADB shell ime set "$IME" >/dev/null
     echo "Gesture Lab is open. Type the passage straight through; every gesture is filed"
-    echo "under the token it was aimed at. Passage cycles through the collision stream and"
-    echo "the prose ones -- prose is where glide typing and the finger-lift window get their"
-    echo "evidence."
+    echo "under the token it was aimed at. It deals its own passages from assets/passages_en.txt"
+    echo "and remembers where it got to, so it collects just as well away from this machine --"
+    echo "and mirrors the bank to /sdcard/Download/OfflineKeyboard as it goes, which is the copy"
+    echo "that survives an uninstall."
 
     # Says up front whether the last session ever reached the repository, because the way this
     # data gets lost is a session that was recorded, enjoyed, and never pulled.
@@ -71,14 +72,34 @@ lab)
 pull)
     mkdir -p data
     tmp=$(mktemp)
-    # run-as reaches internal storage on a debuggable build. If it is blocked (some vendor
-    # ROMs, or a release build) fall back to whatever the lab's Export button last wrote.
-    if $ADB exec-out run-as $PKG cat files/gesture-bank.jsonl > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-        echo "pulled via run-as"
-    elif $ADB exec-out cat "/sdcard/Android/data/$PKG/files/gesture-bank.jsonl" > "$tmp" 2>/dev/null && [[ -s "$tmp" ]]; then
-        echo "pulled the exported copy (tap Export in the lab to refresh it)"
-    else
-        echo "nothing to pull -- no bank on the device, or run-as is blocked and nothing exported"
+    got=0
+    # Three copies, and none of them is authoritative. Internal storage is where the app appends
+    # and is the newest; the Downloads mirror is the only one that survives an uninstall; the
+    # copy under Android/data is the one that works when run-as is blocked. The .txt on the
+    # Downloads copy is not a typo: MediaStore appends it, so the app asks for it: see
+    # GestureBank.PUBLIC_NAME. A session collected
+    # after a reinstall lives in one of them and not the others, so all three are read and the
+    # merge below sorts it out by id.
+    for source in \
+        "run-as $PKG cat files/gesture-bank.jsonl" \
+        "cat /sdcard/Download/OfflineKeyboard/gesture-bank.jsonl.txt" \
+        "cat /sdcard/Android/data/$PKG/files/gesture-bank.jsonl"
+    do
+        part=$(mktemp)
+        $ADB exec-out ${=source} > "$part" 2>/dev/null
+        # A missing file is not an error here -- most phones will have two of these three -- but
+        # it is also not empty: adb prints cat's complaint onto stdout, so "did anything come
+        # back" would count "No such file or directory" as a bank. The first character settles
+        # it, since every line of a real one starts a JSON object.
+        if [[ -s "$part" && "$(head -c 1 "$part")" == "{" ]]; then
+            echo "read $(grep -c . "$part") lines from: $source"
+            cat "$part" >> "$tmp"
+            got=1
+        fi
+        rm -f "$part"
+    done
+    if [[ "$got" != "1" ]]; then
+        echo "nothing to pull -- no bank on the device, and nothing in Downloads either"
         rm -f "$tmp"
         exit 1
     fi
@@ -104,10 +125,22 @@ def read(path):
 before = read(bank)
 merged = {r["id"]: r for r in before}
 added = 0
+kept = 0
 for r in read(incoming):
-    if r["id"] not in merged:
+    old = merged.get(r["id"])
+    if old is None:
+        merged[r["id"]] = r
         added += 1
-    merged[r["id"]] = r
+        continue
+    # A record never legitimately changes after it is written, with one exception: a label can
+    # be withdrawn afterwards, in the lab or by hand in this file. So the copy already here
+    # wins, and the only thing an incoming copy can add is a void the local one is missing.
+    # Letting incoming win outright silently reverted every withdrawal the moment the phone --
+    # which has never seen them -- was read again.
+    if old.get("void") is None and r.get("void") is not None:
+        merged[r["id"]] = r
+    elif old != r:
+        kept += 1
 
 rows = sorted(merged.values(), key=lambda r: r["at"])
 with open(bank, "w") as f:
@@ -115,6 +148,8 @@ with open(bank, "w") as f:
         f.write(json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n")
 
 print(f"{bank}: {len(rows)} samples (+{added} new)")
+if kept:
+    print(f"  {kept} incoming copies differed from the archived ones and were ignored")
 PY
     rm -f "$tmp"
 

@@ -127,6 +127,59 @@ Prose exists because glide decoding is only half geometry: the other half is whi
 and how often they are written, and a passage of random words would measure the shape matching
 alone -- and flatter it, because random words sit further apart than real ones do.
 
+### The rig that needs the cable gets used once a week
+
+Everything above about how a gesture is *asked for* was settled while the phone was plugged into
+the machine that reads the bank. That left a second question unasked for a long time, and it
+turns out to bound the data harder than any of the labelling decisions: **how often does anyone
+sit down and do this?**
+
+Started from a terminal, the answer is a few half-hour sittings a month, by a hand that knows it
+is being watched for the whole thirty minutes. Carried around as an app that opens on a home
+screen, it is several minutes a day, several days a week, by a thumb that has stopped paying
+attention -- which is the thumb the shipped keyboard actually has to read. The second bank is
+larger and it is also better, and neither of those came from a change to what the lab asks for.
+
+Four things were in the way, and none of them was the passage:
+
+- **It opened on passage zero every time.** Fine for a session that is a visit; for four minutes
+  in a queue it means collecting the first passage of a corpus, several hundred times. The
+  position now lives in `SharedPreferences` and the deck advances when a passage is *finished*,
+  not when Next is pressed, because being abandoned after the last word is the ordinary way a
+  session ends.
+- **There were five prose passages.** A thumb that types the same two hundred words every
+  evening gets better at those two hundred words, and every number on the screen improves while
+  the keyboard does not. A hundred and fifty ordinary sentences in an asset deal out about fifty
+  passages, which is weeks before a word comes round again.
+- **The drill was a choice.** The collision stream is the least pleasant passage to type and the
+  only one that answers the question the bank exists for. Offered beside forty passages of
+  ordinary English it stops being chosen, and the bank goes on growing while the flick-versus-
+  glide boundary gains nothing. It is dealt in before every fifth passage instead.
+- **A session was durable only once a cable was found.** Internal storage does not survive an
+  uninstall, and `tools/gestures.sh pull` is a command the collecting machine cannot run. The
+  lab now mirrors the bank into shared Downloads as it goes -- outside the sandbox, visible to
+  the phone's own file browser, readable over USB with no adb -- and can import one back through
+  the file picker, which is what makes a reinstall recoverable by the phone alone.
+
+The general form: for anything that collects data from a person over months, the collection rate
+is a parameter of the design, and it is usually the one with the most leverage. It is also the
+one that never appears in a test.
+
+### A file that is copied three ways needs a rule about which copy wins
+
+The bank now exists in up to four places -- internal storage, a Downloads mirror, an
+`Android/data` export, and the repository -- and the merge rule that had been fine for one copy
+turned out to be actively destructive with three. It was *incoming wins*, which is the obvious
+rule and the wrong one, because it assumes the copy being read is the newer one.
+
+A record is written once and never changes, with a single exception: its label can be *withdrawn*
+afterwards, by hand in the archive or from the lab's Void button. So the archive wins, and the
+only thing an incoming copy may add to an id that already exists is a `void` the archive lacks.
+The first pull under the new rule quietly reverted two withdrawals that had been made by hand a
+week earlier, and it reverted them by reading a phone that had simply never heard of them --
+which is what an *incoming wins* rule means in a system where every copy is behind in some
+different way.
+
 ### A lifted finger is not a finished word
 
 A glide is one continuous stroke in theory and often is not in practice. A thumb crossing the
@@ -541,6 +594,16 @@ the lexicon at decode time rather than another number.
 Note that the harness check cannot tell an intentional change from drift. The long-press fix made
 one recorded ACCENT replay as GLIDE, which is the fix working; a threshold moving under your feet
 would look identical in that report. Read the disagreements, do not just count them.
+
+### The Gesture Lab as a daily habit -- `capture/LabDeck`, `capture/LabProgress`
+
+| | value | why |
+|---|---|---|
+| corpus passage length | ~30 words | Long enough to stop performing (`PassagesTest` holds every passage to 25 tokens and 20 glides), short enough to finish standing up. |
+| corpus size | 155 sentences, ~50 passages | Weeks of daily collecting before a word comes round again. |
+| drill cadence | 1 in every 5 passages | The collision stream is ~40 tokens at `reps = 2`; more often and the lab is a drill with prose in it, less often and the boundary stops gaining evidence. |
+| drill reps | 2 | At 4 the drill is 120 tokens, which is a sitting rather than a break -- and a drill abandoned halfway collects only the keys shuffled to the front of it. |
+| daily goal | 120 gestures | A few minutes. A number to pass, not a quota: the streak counts days with any gesture in them, because a rule that demanded the goal would punish a short session more than no session. |
 
 ### Glide decoding -- `glide/FutoSwipe.kt`
 

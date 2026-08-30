@@ -1,0 +1,186 @@
+# The corpus the Gesture Lab reads its passages from.
+#
+# One sentence per line, lowercase, letters and spaces only. Blank lines and lines starting
+# with # are ignored, so this file can be grouped and annotated without the reader caring.
+#
+# Everyday message register on purpose: this keyboard is for short things said to people, and a
+# threshold fitted to literary English is fitted to sentences this thumb will never type. The
+# sentences are ordinary to the point of dullness, which is the property that matters -- a hand
+# that has to think about what it is reading stops typing and starts performing.
+#
+# Every word here has to be in assets/lexicon_en.tsv or its glide can never decode correctly,
+# and a bank full of unwinnable words reads as a broken decoder rather than a gap in the word
+# list. PassagesTest checks the whole file against the lexicon.
+
+# --- arranging to meet ---
+sorry i am running late the meeting went on longer than i thought
+can you send me the address before you leave the house
+let me know if that time still works for you tomorrow
+i will be there in about twenty minutes if the traffic is ok
+we are outside the station now waiting by the ticket machine
+shall we say seven at the usual place near the park
+i am on my way out of the door right now
+do you want me to pick you up on the way
+it is easier if we meet at the corner by the bank
+i have booked a table for four people at eight
+the restaurant is on the other side of the river
+we could walk if the weather stays like this
+i will text you when i am close to the building
+call me when you get in and i will come down
+the train leaves in ten minutes so i have to run
+i missed the bus and the next one is in half an hour
+there is a delay on the line so i might be late
+i am waiting outside but i still do not see you anywhere
+which entrance are you standing at the front or the back
+i will wait here until you arrive it is no trouble
+
+# --- work ---
+i have sent the report over please have a look when you can
+the meeting has been moved to thursday afternoon instead
+can we talk about this on the phone rather than by message
+i will finish the document tonight and send it first thing
+the client asked for a few changes to the presentation
+we need to book a room for the interview next week
+i am in the office until six if you want to drop by
+could you forward that email to the rest of the team
+the deadline is friday but i would rather be early
+i have been working on this all morning and it is nearly done
+let me know what you think of the second version
+the numbers in the table do not match the summary
+i will ask about it in the meeting tomorrow morning
+we should probably talk to the manager before we decide
+the equipment arrived this morning and everything works
+the new computer is much faster than the old one
+i have updated the schedule with the correct times
+please remember to bring your notes to the review
+the project is going well considering how it started
+we are waiting for the supplier to confirm the order
+
+# --- home and family ---
+the children are home from school and they are hungry
+i am cooking dinner now so it will be ready at seven
+can you get milk and bread on your way back
+the washing machine is making that noise again
+i have left your keys on the table by the door
+your mother called this afternoon and wants you to ring back
+we are going to my parents house on sunday for lunch
+the garden needs cutting before the weather turns
+i put the parcel in the cupboard under the stairs
+the heating is on but the house is still cold
+i will pick the kids up from football at five
+we should think about getting the car looked at
+the letter came this morning and it is good news
+i am taking the dog out before it gets dark
+your brother says he will come over at the weekend
+the kitchen light has gone again i will get a bulb
+i have made a list of everything we need
+can you put the bins out before you go to bed
+the neighbours are having work done on their roof
+we are running low on almost everything in the fridge
+
+# --- food and shopping ---
+what do you want for dinner tonight i can cook anything
+there is nothing in the fridge except cheese and eggs
+i am going to the market later if you need something
+they had no bread left so i got some rolls instead
+the coffee shop on the corner opens early on saturday
+i will order the usual for you if that is ok
+we could get something on the way home instead
+the restaurant was busy but the food was very good
+i have never eaten there but people say it is fine
+they do a proper breakfast until eleven every morning
+that shop is much cheaper than the one in town
+i forgot to buy the one thing i actually went for
+we have enough food in the house for a week
+the vegetables were fresh and the meat looked good
+i am trying to eat better and it is going ok
+
+# --- small talk ---
+how did it go this morning was it any better
+that sounds good to me let me know what you decide
+i am fine thanks just tired after a long week
+it has been raining here since about eleven this morning
+the weather is supposed to improve by the weekend
+i have not seen him since we were at school together
+we watched that programme you were talking about
+it was much better than i expected it to be
+i am reading a book about the sea and the people on it
+we had a quiet weekend and did almost nothing
+the party was lovely and everyone stayed until late
+i am looking forward to a proper break next month
+that is a long way to travel for one evening
+you would like it there it is quiet and near the water
+i took some photographs but they came out dark
+
+# --- asking and answering ---
+do you know what time the shop closes on sunday
+can you remember the name of that place we went to
+is it ok if i bring someone with me on friday
+would you mind having a look at this for me
+what do you think we should do about the car
+have you heard anything from them since last week
+are you free on wednesday or is that a bad day
+did you manage to get everything sorted this morning
+could you let me know either way by tomorrow night
+who else is coming and do they know where it is
+where did you put the paperwork from the other day
+why does it always happen on the worst possible day
+how long does it take to get there by train
+when are you back and shall we do something then
+which one do you think is the better option
+
+# --- apologising and confirming ---
+sorry i missed your call i was in a meeting
+i am really sorry about last night i completely forgot
+that is fine honestly it does not matter at all
+ok that works for me see you there at six
+yes i have got it thank you for sending it over
+no problem at all i will sort it out this afternoon
+i understand completely and we can do it another time
+thanks for everything today it was a big help
+that was good of you to pick that up for me
+that is very kind of you but you do not have to
+sorry for the late reply it has been a strange week
+i will make it up to you when things are quieter
+of course i remember you said so last month
+you are right and i should have checked first
+i have written it down this time so i will not forget
+
+# --- longer reaches ---
+the temperature in the apartment was uncomfortable throughout september
+everybody requires proper equipment before the expedition departs tomorrow
+our population expects government departments to prepare thorough reports
+typewriter keyboards were properly equipped for professional secretaries
+the photographer questioned whether the equipment would work underwater
+we appreciate everything the organisation prepared for our arrival
+the university published a report about the local water supply
+the passengers were extremely patient throughout the whole experience
+opportunity rarely presents itself quite so conveniently as that
+the temporary arrangement worked perfectly well for everybody involved
+professional qualifications were required for every position advertised
+the government representative explained the unexpected postponement
+her performance yesterday was extraordinary by any reasonable measure
+we were particularly impressed by the quality of the workmanship
+the expedition photographed everything they encountered in the valley
+newspapers reported the weather would improve towards the weekend
+the property was purchased by somebody from another part of the country
+approximately eighty people were waiting outside the theatre entrance
+the librarian recommended a completely different book about architecture
+unfortunately the appointment was postponed until the following thursday
+
+# --- two letter words in the wild ---
+i am on the train and it is very busy
+ok i will be in the office in an hour
+it is on the table in the other room
+in my experience it is ok to ask them first
+i am in town if you want to meet up
+the keys are in the drawer on the left
+we are on our way in about ten minutes
+that is ok i can do it in the morning
+i left it on the seat in the car
+on second thoughts i am in for saturday
+he is in the garden on the phone again
+there is a note on the door in the hall
+i put it on the shelf in the kitchen
+ok in that case i will see you on friday
+it depends on what time you are in

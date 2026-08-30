@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  A glide path across three keys, ending in the thumb.
+
+  The lab is a second launcher entry beside the test pad, and two entries wearing the stock
+  Android robot are two entries nobody can tell apart at a glance. For an app meant to be opened
+  in spare minutes, months from now, that is most of whether it gets opened at all.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:pathData="M28,72 C34,44 47,38 54,53 C61,68 72,63 78,41" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M78,34 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
+</vector>

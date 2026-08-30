@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A keyboard: three rows of keys and a space bar, drawn inside the 72dp safe zone. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M24,36 h60 a5,5 0 0 1 5,5 v26 a5,5 0 0 1 -5,5 h-60 a5,5 0 0 1 -5,-5 v-26 a5,5 0 0 1 5,-5 z" />
+    <path
+        android:fillColor="#12131A"
+        android:pathData="M25,42 h8 v6 h-8 z M37,42 h8 v6 h-8 z M49,42 h8 v6 h-8 z M61,42 h8 v6 h-8 z M73,42 h10 v6 h-10 z
+                          M25,52 h11 v6 h-11 z M40,52 h8 v6 h-8 z M52,52 h8 v6 h-8 z M64,52 h8 v6 h-8 z M76,52 h7 v6 h-7 z
+                          M25,62 h9 v6 h-9 z M38,62 h32 v6 h-32 z M74,62 h9 v6 h-9 z" />
+</vector>

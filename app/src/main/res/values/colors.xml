@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The keyboard's own icon: the ink of its dark theme. -->
+    <color name="ic_launcher_background">#2A2C38</color>
+    <!-- The lab's: the blue the passage uses to mark a symbol, so the two are told apart by hue. -->
+    <color name="ic_lab_background">#2F6FED</color>
+</resources>

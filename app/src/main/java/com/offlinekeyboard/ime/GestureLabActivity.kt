@@ -26,8 +26,12 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+import android.content.Intent
+import android.net.Uri
 import com.offlinekeyboard.ime.capture.GestureBank
 import com.offlinekeyboard.ime.capture.GestureCapture
+import com.offlinekeyboard.ime.capture.LabDeck
+import com.offlinekeyboard.ime.capture.LabProgress
 import com.offlinekeyboard.ime.capture.Passage
 import com.offlinekeyboard.ime.capture.Passages
 import com.offlinekeyboard.ime.capture.Target
@@ -57,12 +61,30 @@ import java.util.concurrent.Executors
  *
  * The bank it fills is read back by GestureBankReplayTest, which replays every sample through the
  * real state machine and sweeps the thresholds against it.
+ *
+ * Everything about it that is not the passage exists so that it can be used away from the
+ * machine that reads the bank. It remembers where it got to, so four minutes in a queue
+ * continues the corpus instead of retyping the first passage of it; it deals its own passages
+ * out of a shuffled deck that takes weeks to come round; it mirrors the bank into shared
+ * storage, so a session is durable the moment it happens rather than the next time a cable is
+ * found; and it can read a bank back in, so a reinstall is recoverable by the phone alone.
  */
 class GestureLabActivity : Activity() {
 
-    private var passages: List<Passage> = emptyList()
-    private var passageIndex = 0
+    private lateinit var deck: LabDeck
+    private lateinit var passage: Passage
+    /** Set when finishing a passage already moved the deck on, so Next does not skip one. */
+    private var advanced = false
     private var targetIndex = 0
+
+    /**
+     * What the bank looked like when it was last mirrored, so an unchanged one is not rewritten.
+     *
+     * The count alone is not enough: a withdrawn sample followed by a new one leaves it exactly
+     * where it was, and a mirror skipped on that basis is a mirror that is quietly one gesture
+     * behind. The modification time settles it.
+     */
+    private var mirrored: Pair<Int, Long> = 0 to 0L
 
     private var sessionRecorded = 0
     private var sessionAgreed = 0
@@ -116,8 +138,23 @@ class GestureLabActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(buildUi())
-        passages = Passages.all()
-        startPassage(0)
+        deck = LabDeck(LabDeck.prefs(this), library())
+        start(deck.current())
+    }
+
+    /**
+     * The passages the deck deals from: the corpus first, then the five hand-written ones.
+     *
+     * A corpus that fails to load leaves the curated passages, which is a worse lab but a
+     * working one -- and the alternative, a lab that will not open, loses a session over a
+     * missing asset.
+     */
+    private fun library(): List<Passage> {
+        val corpus = runCatching {
+            assets.open(Passages.CORPUS_ASSET).use { it.readBytes().decodeToString() }
+        }.getOrNull()
+        return (corpus?.let { Passages.corpus(Passages.corpusLines(it)) } ?: emptyList()) +
+            Passages.prose()
     }
 
     override fun onResume() {
@@ -136,16 +173,31 @@ class GestureLabActivity : Activity() {
         // emitting gestures, and with no target armed they are dropped on the floor.
         GestureCapture.disarm()
         GestureCapture.onResult = null
+        // Leaving the lab is the moment a session is most likely to be its last for a while, so
+        // it is the moment the durable copy has to be up to date. Nothing here can wait for a
+        // cable to be found later.
+        mirrorBank(announce = false)
     }
 
     // --- the passage -------------------------------------------------------------------------
 
-    private fun startPassage(index: Int) {
-        passageIndex = ((index % passages.size) + passages.size) % passages.size
+    private fun start(next: Passage) {
+        advanced = false
+        replay(next)
+    }
+
+    /**
+     * Puts a passage back to its beginning without touching the deck's position.
+     *
+     * The split matters for exactly one sequence and it is a common one: finish a passage, which
+     * moves the deck on, then press Again. Resetting the position there would leave the deck one
+     * short, and pressing Next afterwards would step over the passage that had been waiting.
+     */
+    private fun replay(next: Passage) {
+        passage = next
         targetIndex = 0
         outcomes.clear()
         field.setText("")
-        val passage = passages[passageIndex]
         title.text = passage.title
         note.text = passage.note
         feedback.setTextColor(muted)
@@ -154,8 +206,13 @@ class GestureLabActivity : Activity() {
         armCurrent()
     }
 
-    private val passage: Passage get() = passages[passageIndex]
     private val current: Target? get() = passage.targets.getOrNull(targetIndex)
+
+    /** The next passage in the deck, unless finishing this one already moved it on. */
+    private fun nextPassage() {
+        if (!advanced) deck.advance()
+        start(deck.current())
+    }
 
     /**
      * Draws the passage with the caret on the current token.
@@ -210,6 +267,7 @@ class GestureLabActivity : Activity() {
         val done = targetIndex.coerceAtMost(passage.targets.size)
         progress.text = buildString {
             append("$done of ${passage.targets.size}")
+            append("   ·   passage ${deck.position}/${deck.total}")
             current?.let { target ->
                 val why = Passages.why(target.startKeyId)
                 if (why.isNotEmpty()) append("   ·   $why")
@@ -253,6 +311,7 @@ class GestureLabActivity : Activity() {
             GestureCapture.Outcome.RECORDED -> {
                 val record = result.record ?: return
                 sessionRecorded++
+                LabProgress.record(LabDeck.prefs(this))
                 val read = record.verdictIntent
                 if (read != null) {
                     sessionDecided++
@@ -298,13 +357,30 @@ class GestureLabActivity : Activity() {
         }
     }
 
+    /**
+     * The deck moves on here rather than when Next is pressed.
+     *
+     * A passage typed to the end and then abandoned -- the bus arrives, the screen goes off --
+     * is the ordinary way a session ends, and if the position only advanced on a button press
+     * the next launch would open on the passage that was just finished. Doing it here means the
+     * only passage ever repeated is one that was genuinely left half typed.
+     */
     private fun finishPassage() {
         renderPassage()
         GestureCapture.disarm()
+        if (!advanced) {
+            deck.advance()
+            advanced = true
+        }
+        mirrorBank(announce = false)
         progress.text = "done   ·   $sessionRecorded gestures this session"
         feedback.setTextColor(goodHue)
-        feedback.text = "Passage complete. Take another, or pull the bank with " +
-            "tools/gestures.sh pull."
+        val snapshot = LabProgress.snapshot(LabDeck.prefs(this))
+        feedback.text = if (snapshot.today >= LabProgress.DAILY_GOAL) {
+            "Passage complete -- ${snapshot.today} today, past the goal. Next for another."
+        } else {
+            "Passage complete -- ${LabProgress.DAILY_GOAL - snapshot.today} more for today's goal."
+        }
     }
 
     // --- bank ------------------------------------------------------------------------------
@@ -314,8 +390,11 @@ class GestureLabActivity : Activity() {
         io.execute {
             val summary = GestureBank.summarise(GestureBank.readAll(context))
             runOnUiThread {
+                val day = LabProgress.snapshot(LabDeck.prefs(this@GestureLabActivity))
                 bankLine.text = buildString {
-                    append("bank ${summary.total}")
+                    append("today ${day.today}/${LabProgress.DAILY_GOAL}")
+                    if (day.streak > 0) append("   ·   ${day.streak} day streak")
+                    append("\nbank ${summary.total}")
                     append("  (${summary.breakdown})")
                     if (summary.decided > 0) {
                         append("   ·   current heuristic ")
@@ -420,12 +499,117 @@ class GestureLabActivity : Activity() {
         }
     }
 
-    private fun export() {
+    /**
+     * Rewrites the copy in shared storage, and says where it went when asked to.
+     *
+     * Called silently on every completed passage and on leaving the lab, and out loud from the
+     * menu. Silent is the important one: a durability guarantee that depends on remembering to
+     * press something is not one.
+     */
+    private fun mirrorBank(announce: Boolean) {
         val context = applicationContext
         io.execute {
-            val file = GestureBank.export(context)
+            val state = GestureBank.count(context) to GestureBank.file(context).lastModified()
+            if (!announce && state == mirrored) return@execute
+            val where = GestureBank.mirror(context)
+            // The adb-reachable copy goes out at the same time. It costs a file copy and it is
+            // the path that works when MediaStore does not.
+            GestureBank.export(context)
+            if (where != null) mirrored = state
+            val count = state.first
+            if (announce) {
+                runOnUiThread {
+                    toast(if (where == null) "Bank is empty" else "$count gestures saved to $where")
+                }
+            }
+        }
+    }
+
+    /**
+     * Reads another bank file in and merges it, keyed on record id.
+     *
+     * This is the other half of the mirror. Internal storage does not survive an uninstall and
+     * the copy in Downloads does, so after a reinstall the phone is sitting next to its own
+     * history with no way to pick it up -- unless it can be handed back through the picker,
+     * which needs no permission and no network and no cable.
+     */
+    private fun importBank() {
+        val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
+            addCategory(Intent.CATEGORY_OPENABLE)
+            type = "*/*"
+        }
+        runCatching { startActivityForResult(intent, REQUEST_IMPORT) }
+            .onFailure { toast("No file picker on this phone") }
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQUEST_IMPORT || resultCode != RESULT_OK) return
+        val uri: Uri = data?.data ?: return
+        val context = applicationContext
+        io.execute {
+            val added = runCatching {
+                context.contentResolver.openInputStream(uri)?.bufferedReader()?.use { reader ->
+                    GestureBank.merge(context, reader.lineSequence())
+                }
+            }.getOrNull()
             runOnUiThread {
-                toast(if (file == null) "Bank is empty" else "Exported to ${file.absolutePath}")
+                when (added) {
+                    null -> toast("Could not read that file")
+                    0 -> toast("Nothing new in it -- every record was already in the bank")
+                    else -> toast("Merged $added gestures")
+                }
+                refreshBankLine()
+            }
+        }
+    }
+
+    /**
+     * The things that are not typing, behind one button.
+     *
+     * Six buttons across a phone are already two too many, and each of these is used once a
+     * session at most -- while Next, Again, Skip, Undo and Void are used with a thumb that is in
+     * the middle of typing.
+     */
+    private fun showMenu() {
+        val items = arrayOf(
+            "Save a copy to Downloads",
+            "Import a bank file",
+            "Score the glide decoders",
+        )
+        android.app.AlertDialog.Builder(this)
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> mirrorBank(announce = true)
+                    1 -> importBank()
+                    else -> scoreEngines()
+                }
+            }
+            .show()
+    }
+
+    /**
+     * Withdraws the label on the gesture just recorded, keeping the recording.
+     *
+     * Undo deletes; this does not. The difference matters for the one case it exists for: a
+     * flick begun, abandoned and turned back from is the only evidence in the bank of what
+     * abandoning a flick looks like, and it is worthless under the label the passage gave it.
+     */
+    private fun voidLast() {
+        val context = applicationContext
+        io.execute {
+            val record = GestureBank.voidLast(context, "fumbled: the label is not what the hand did")
+            runOnUiThread {
+                if (record == null) {
+                    toast("Nothing to withdraw")
+                } else {
+                    // The recording stays and so does the passage's place: only the claim about
+                    // that one gesture is withdrawn.
+                    outcomes.remove(targetIndex - 1)
+                    toast("Label withdrawn -- the path is still in the bank")
+                    renderPassage()
+                    refreshBankLine()
+                }
             }
         }
     }
@@ -526,12 +710,12 @@ class GestureLabActivity : Activity() {
 
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(flatButton("Next") { startPassage(passageIndex + 1) })
-            addView(flatButton("Again") { startPassage(passageIndex) })
+            addView(flatButton("Next") { nextPassage() })
+            addView(flatButton("Again") { replay(passage) })
             addView(flatButton("Skip") { skip() })
             addView(flatButton("Undo") { undoLast() })
-            addView(flatButton("Score") { scoreEngines() })
-            addView(flatButton("Export") { export() })
+            addView(flatButton("Void") { voidLast() })
+            addView(flatButton("More") { showMenu() })
         }
 
         val root = LinearLayout(this).apply {
@@ -617,5 +801,9 @@ class GestureLabActivity : Activity() {
     override fun onDestroy() {
         super.onDestroy()
         io.shutdown()
+    }
+
+    private companion object {
+        const val REQUEST_IMPORT = 1
     }
 }

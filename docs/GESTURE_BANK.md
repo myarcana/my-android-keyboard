@@ -67,9 +67,18 @@ tokens on that same key, in the same minute of the same hand, and a test enforce
 
 ## Collecting
 
+The lab is an app on the phone with its own launcher icon, and it needs nothing else: no cable,
+no network, no computer. That is the whole design brief for everything in this section. A rig
+that has to be started from a terminal is a rig used in half-hour sittings a few times a month,
+and the bank it fills is a bank of a few hundred gestures made by a hand that knew it was being
+watched. The same rig carried around and opened in a queue collects several times as much, from
+a thumb that has stopped paying attention — which is the thumb the keyboard actually has to read.
+
 ```
 tools/gestures.sh lab      # build, install, open the lab with our keyboard selected
 ```
+
+is still how it gets onto the phone, and is not how it gets used afterwards.
 
 The lab shows a passage and you type it. Every gesture is filed under the token it was aimed at,
 so the label is still asked for before the gesture is made — which was always the point — but the
@@ -86,7 +95,7 @@ exercise, and the keyboard will never see one again.
 A passage restores the missing thing, which is flow. The eye reads ahead, the thumb moves without
 being told where, and the gestures arrive at typing speed with typing's sloppiness in them.
 
-Two kinds of passage, for two different questions:
+Three kinds of passage, for three different questions:
 
 - **Collisions** are token streams — `u u 7 um u 7 on 9 o` — because the flick-versus-glide
   boundary lives on a handful of keys and nowhere else. Prose would spend a hundred gestures to
@@ -97,6 +106,43 @@ Two kinds of passage, for two different questions:
   which words exist and how often they are written, and a decoder is only as good as the word
   distribution it is scored against. Random words would measure the shape matching alone — and
   would flatter it, because random words sit further apart than real ones do.
+- **The corpus** — `app/src/main/assets/passages_en.txt` — is the same argument applied to
+  quantity. Five hand-written prose passages are enough to prove the rig and not enough to live
+  with: a thumb that types the same two hundred words every evening gets better at those two
+  hundred words, and every number on the screen improves without the keyboard improving at all.
+  A hundred and fifty ordinary sentences deal out around fifty passages, which is a few weeks of
+  daily collecting before a word comes round again. `PassagesTest` checks every word in it
+  against the lexicon, because a word the decoder cannot know records a perfectly good glide
+  with a guaranteed-wrong decode beside it, and a run of those reads as a broken decoder rather
+  than as a typo in an asset.
+
+### The deck
+
+The passages are dealt, not chosen. One pass over the whole library in an order that changes
+every pass, with the collision drill dealt in before every fifth passage, and the position kept
+in `SharedPreferences` so closing the app continues the corpus instead of restarting it.
+
+Both halves of that are there for a reason that only shows up over weeks. Opening on passage
+zero every time meant collecting the first passage of a corpus several hundred times. And
+leaving the drill as something to be picked meant it stopped being picked: it is the least
+pleasant passage to type and the only one that answers the question the bank was built for, so
+beside forty passages of ordinary English it would quietly starve while the total at the bottom
+of the screen went up.
+
+The deck advances when a passage is **finished**, not when Next is pressed — a passage typed to
+the end and then abandoned, because the bus came, is the ordinary way a session ends. The only
+passage ever repeated is one that was genuinely left half typed.
+
+### The day
+
+`today 43/120 · 5 day streak`, under the passage. Not decoration: the bank's real risk is not
+that the data is bad but that it stops arriving, and collection is something a person does
+voluntarily, in gaps, with nobody watching. A count that only exists in a terminal on another
+machine is a count nobody sees.
+
+The streak counts days with **at least one gesture** in them, deliberately, rather than days that
+reached the goal. A rule that demanded the goal would punish a short session more than no
+session, and the bank would much rather have the short session.
 
 Every attempt is kept, including the ones the keyboard reads wrongly — those are the most useful
 samples in the file. The passage colours each token by what the keyboard made of it, and the line
@@ -124,6 +170,12 @@ nobody can audit afterwards.
 
 The lab's **Undo** button is the cheaper fix when the fumble is noticed as it happens: it drops
 the last sample and re-arms the same token, so the passage can simply be retyped.
+
+**Void** is the other one, and it is the one that gets used. It withdraws the label on the
+gesture just made and keeps the recording, which is the outcome the `void` field exists for.
+Before it existed, saying so meant remembering a particular fumble for a week and then finding
+its line in a JSONL file on a laptop — which meant it was never said, and the file quietly
+accumulated exactly the lines that do the most damage to a sweep.
 
 ## Glide typing, and the finger lift
 
@@ -161,14 +213,45 @@ The phone writes `files/gesture-bank.jsonl` in internal storage, fsynced per lin
 collection sessions end the way phone sessions end, and a page-cached line that never landed is a
 gesture that will not be performed again.
 
-That copy does not survive an uninstall, and this app deliberately has no cloud backup. So:
+That copy does not survive an uninstall, and this app deliberately has no cloud backup — which
+made a session durable only once a cable had been found, and the phone that collects is exactly
+the machine that cannot run the command that saves. So the lab also **mirrors** the bank into
+shared storage, at
+
+```
+/sdcard/Download/OfflineKeyboard/gesture-bank.jsonl.txt
+```
+
+after every completed passage and on leaving the lab. That folder is outside the app sandbox: it
+survives uninstall, the phone's own file browser can see it, and it comes off over USB with no
+adb, no run-as and no debuggable build. It is rewritten whole from the internal copy rather than
+appended to, because a mirror that appended could not know how much of the file was already
+there — and the person who owns the phone is entitled to move or delete it.
+
+The `.txt` is not a typo. MediaStore reconciles a display name against its MIME type and has
+never heard of `.jsonl`, so the app asks for the name the platform was going to impose anyway,
+and the path here is the path on the phone.
+
+**More → Import a bank file** is the way back in. A reinstall empties internal storage while the
+Downloads copy sits there untouched, and without an import the only route home is a cable — the
+thing this is all supposed to work without. It merges by id through the system file picker, so
+it needs no permission and no network.
+
+Then, when there is a machine:
 
 ```
 tools/gestures.sh pull     # merge into data/gesture-bank.jsonl, and commit it
 ```
 
-The merge is keyed on each record's id and keeps both sides, because neither copy is the master:
-the phone has the newest sessions, the repo has the ones that survive an uninstall.
+which reads all three copies — internal, the Downloads mirror, and the `Android/data` export —
+because after a reinstall a session lives in one of them and not the others, and none of them is
+the master.
+
+The merge is keyed on each record's id, and the **archived copy wins**. A record never
+legitimately changes after it is written, with one exception: its label can be withdrawn later,
+here or in the lab. So the only thing an incoming copy is allowed to add to an existing id is a
+`void` the archive is missing. Letting incoming win outright — which it did, once — silently
+reverts every withdrawal the moment a phone that has never seen them is read again.
 
 **The pull commits.** Not as a courtesy — a pull that is not committed has saved nothing, since
 an untracked file in the working tree is one `git clean` from gone, and this is data that cannot

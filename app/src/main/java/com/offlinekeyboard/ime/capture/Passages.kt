@@ -207,10 +207,63 @@ object Passages {
         )
     }
 
+    // --- the corpus ------------------------------------------------------------------------
+
+    /**
+     * The everyday-English corpus, one sentence per line. See the header of the file itself.
+     *
+     * Five hand-written passages were enough to prove the rig and are nowhere near enough to
+     * live with. A bank collected from them is a bank of the same two hundred words typed over
+     * and over: the thumb learns them, the gestures get tidier every session, and the numbers
+     * improve without the keyboard improving at all. Data collected daily has to keep putting
+     * words under the thumb that it has not just typed.
+     */
+    const val CORPUS_ASSET = "passages_en.txt"
+
+    /** Blank lines and `#` comments are structure for the reader, not content. */
+    fun corpusLines(text: String): List<String> =
+        text.lineSequence()
+            .map(String::trim)
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .toList()
+
+    /**
+     * Groups whole sentences into passages of roughly [words] words.
+     *
+     * Sentences are never split across a passage boundary, because half a sentence cannot be
+     * read ahead in -- and reading ahead is the entire mechanism by which a passage collects a
+     * typed gesture rather than a performed one.
+     */
+    fun corpus(lines: List<String>, words: Int = 30): List<Passage> {
+        val out = mutableListOf<Passage>()
+        var batch = mutableListOf<String>()
+        var count = 0
+        fun flush() {
+            if (batch.isEmpty()) return
+            out += passageOf("corpus:${out.size}", "Everyday ${out.size + 1}", batch.joinToString(" "))
+            batch = mutableListOf()
+            count = 0
+        }
+        lines.forEach { line ->
+            batch += line
+            count += line.split(" ").size
+            if (count >= words) flush()
+        }
+        // A tail shorter than a passage is dropped rather than shipped short: PassagesTest holds
+        // every passage to a length a hand can settle into, and a runt would fail it honestly.
+        if (count >= words / 2) flush()
+        return out
+    }
+
     fun prose(): List<Passage> = PROSE.map { (id, title, text) ->
+        passageOf("prose:$id", title, text)
+    }
+
+    /** One passage from a run of words, with each word labelled by what it can be typed as. */
+    private fun passageOf(id: String, title: String, text: String): Passage {
         val words = text.split(" ").filter { it.isNotBlank() }
-        Passage(
-            id = "prose:$id",
+        return Passage(
+            id = id,
             title = title,
             note = "${words.count { it.length > 1 }} glides, typed straight through",
             targets = words.mapIndexed { i, word -> targetFor(word, i) },

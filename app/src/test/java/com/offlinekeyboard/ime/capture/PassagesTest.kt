@@ -26,18 +26,35 @@ class PassagesTest {
     private val geometry = LayoutGeometry(IosLayouts.QWERTY_LOWER, Metrics.REFERENCE_WIDTH)
     private val keys = geometry.keyRects.associateBy { it.key.id }
 
-    private val lexicon: Lexicon? = run {
+    /** Unit tests run with the module directory as their cwd, or the repo root, or neither. */
+    private fun asset(name: String): File? {
         var dir: File? = File("").absoluteFile
         var found: File? = null
         repeat(5) {
-            val candidate = dir?.resolve("app/src/main/assets/$LEXICON_ASSET")
+            val candidate = dir?.resolve("app/src/main/assets/$name")
             if (found == null && candidate != null && candidate.isFile) found = candidate
             dir = dir?.parentFile
         }
-        found?.inputStream()?.use(Lexicon::load)
+        return found
     }
 
-    private fun everyTarget(): List<Target> = Passages.all(reps = 1).flatMap { it.targets }
+    private val lexicon: Lexicon? = asset(LEXICON_ASSET)?.inputStream()?.use(Lexicon::load)
+
+    /**
+     * The corpus is checked here rather than trusted at runtime.
+     *
+     * It is a plain text file that anyone can add a line to, which is the point of it, and the
+     * failure mode of a bad line is silent: a word the lexicon has never heard of records a
+     * perfectly good glide with a guaranteed-wrong decode beside it, and a run of those reads
+     * as a broken decoder rather than as a typo in an asset.
+     */
+    private val corpus: List<Passage> =
+        asset(Passages.CORPUS_ASSET)?.readText()
+            ?.let { Passages.corpus(Passages.corpusLines(it)) }
+            ?: emptyList()
+
+    private fun everyTarget(): List<Target> =
+        (Passages.all(reps = 1) + corpus).flatMap { it.targets }
 
     // --- every passage ------------------------------------------------------------------------
 
@@ -223,6 +240,32 @@ class PassagesTest {
             )
             assertTrue(
                 "${passage.id} has no glides in it",
+                passage.targets.count { it.intent == GestureIntent.WORD } >= 20,
+            )
+        }
+    }
+
+    // --- the corpus ------------------------------------------------------------------------
+
+    @Test
+    fun `the corpus loads and is long enough to be worth carrying around`() {
+        assertTrue("no corpus asset found", corpus.isNotEmpty())
+        // Forty passages is a few weeks of daily collecting before a word comes round again,
+        // which is the property the corpus exists for: a bank of the same two hundred words
+        // typed repeatedly measures how well this thumb has learnt them, not how well the
+        // keyboard reads it.
+        assertTrue("only ${corpus.size} corpus passages", corpus.size >= 40)
+    }
+
+    @Test
+    fun `every corpus passage is long enough to stop performing`() {
+        corpus.forEach { passage ->
+            assertTrue(
+                "${passage.id} is only ${passage.targets.size} tokens",
+                passage.targets.size >= 25,
+            )
+            assertTrue(
+                "${passage.id} has too few glides in it",
                 passage.targets.count { it.intent == GestureIntent.WORD } >= 20,
             )
         }
