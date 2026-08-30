@@ -162,6 +162,78 @@ a hand and a screen. So both are recorded with every gesture, along with the ind
 strokes join, and the whole bank can be rescored under any other pair. The defaults below are a
 starting point and are expected to move.
 
+### The frame is the three letter rows, and nothing checks it for you
+
+A layout-agnostic swipe decoder is handed the key centres and the finger's path in one [0,1]
+square and has no other way to know where anything is. Get that square wrong and there is no
+error -- only quietly worse words, which is the hardest kind of bug to notice in something whose
+whole job is guessing.
+
+Two things are tempting to include and both are wrong. Our suggestion strip, because it is part
+of the view; and the bottom row of space and return, because it is part of the keys. Neither is
+somewhere a word gesture can go, and either one stretches the square so every key lands somewhere
+the decoder does not expect. The frame is the top of the first letter row to the bottom of the
+third, and `LayoutGeometry` owns it so there is exactly one definition.
+
+FUTO's own reference layout puts its rows at 1/6, 1/2 and 5/6 -- three contiguous rows filling
+the square. Ours land at 0.142, 0.5 and 0.858, because we draw visible gaps between rows and they
+do not. That difference is real and is *not* corrected for: these models take the key centres as
+an input precisely so a layout can be itself, and faking a grid we do not have would misplace the
+path relative to the keys rather than fix anything.
+
+### Which decoder is better was measured, not argued
+
+Both engines, over the same 64 recorded glides, with the same geometry and the same vocabulary --
+the beam search's dictionary is generated from the same lexicon file, so what is left between
+them is decoding:
+
+| | first choice | offered |
+|---|---|---|
+| a hand-written Kotlin decoder | 79% | 100% |
+| FUTO Swipe -- encoder + decoder + context LM | **95%** | 100% |
+
+So the keyboard uses FUTO's models, and the hand-written decoder was deleted rather than kept as
+a fallback. Two things about that number are worth
+keeping in view. It is measured on the collision words -- `I'm`, `in`, `ok`, `on`, `um`, `ex` --
+which are the shortest and most ambiguous glides that exist, so both engines will do better on
+prose; and the misses are different in kind. Ours loses `I'm` to `in` and `um` to `un`, which is
+frequency beating a shape it cannot separate. FUTO loses `ex` to `ed`. Ours has no context at
+all; theirs has a 1.5M-parameter model of what word usually follows what.
+
+Keeping it as a fallback was the first instinct and it does not survive being asked what the
+fallback is *for*. The app does not compile without swipe-library's Kotlin binding anyway, so the
+path was unreachable except on an ABI whose native library had not been built -- and both are
+built now. What it would really have bought is the ability to silently decode worse without
+anyone being told. A keyboard that types nothing and logs why is the better of those two.
+
+What survives is the measurement and the shape that made it possible: `GlideEngine`, and the
+Gesture Lab's Score button, which still scores whatever engines it is handed against the whole
+recorded bank. With one engine it is not a comparison, and it is still worth having -- a decoder
+reading this thumb at 95% and one reading it at 40% look identical from the outside until
+something asks, and the likeliest cause of the second is not the model but the frame it was
+handed.
+
+### Three traps in the integration, all silent
+
+Worth writing down because each cost a build-install-test cycle and none of them announced itself.
+
+**The Kotlin binding cannot load a dictionary.** `SwipeEngine` takes its dictionaries as `ITrie`
+pointers and `SwipeDecoder.kt` passes them through as longs -- but nothing in the shipped
+bindings can *produce* one. `tools/patches/swipe-library-trie-jni.patch` adds three calls that
+wrap `load_trie_simple`. Kept as a patch rather than a fork so that moving the pin shows up as a
+conflict rather than as a silent revert.
+
+**`System.loadLibrary` lives in the wrong class.** It is in `SwipeDecoder`'s companion, and the
+dictionary is loaded before the engine that will use it -- so the first call into our own natives
+came before anything had touched that class. `SwipeTrie` loads the library itself now; depending
+on another class having been reached first is not a load order, it is a coincidence.
+
+**Hugging Face stores the weights in git-lfs.** A plain clone produces 132-byte pointer files
+that are perfectly well-formed, non-empty, and named exactly like models. The fetch script pulls
+each file over https instead. The staging code learned the same lesson from the other end: it
+compares a staged file against the asset's *size*, because "it exists and is not empty" cannot
+tell a pointer from a model, and could not tell an updated model from a stale copy either.
+
 ### The keyboard is already on Android's grid
 
 Worth knowing before reaching for any of the below: the *arrangement* of this layout is iOS's,
@@ -181,54 +253,17 @@ including it would push every key a fifth of the way down the square.
 need coordinate normalisation. It was wrong twice over -- see that file -- and believing it is
 why the decoder below was written by hand.
 
-### Two channels, and the second one asks the question backwards on purpose
-
-Comparing a glide to a candidate word by resampling both to 32 points and measuring point against
-point is the obvious method, and on its own it is remarkably weak. "how" and "house" leave the
-same key, sweep right and then far left, and cover nearly the same distance doing it; point for
-point they are equally good matches for each other's gesture, and "how" is the commoner word, so
-it wins. Measured over synthetic glides, that comparison alone got 61% of words right.
-
-The channel that fixes it asks about the word's keys rather than about the gesture's samples:
-*was the finger ever near `h`, and then near `o`, and then near `w`* -- a monotonic alignment,
-pinned at both ends. A glide of "house" has no answer to offer for `w`.
-
-Getting the direction wrong is subtle and costs everything. The first version asked whether the
-finger was always near *some* key of the candidate, which every word answers well, because a
-glide spends most of its time in the gaps between keys and there is always a key nearby. The
-correct word scored no better than a wrong one and frequently worse.
-
-The other thing that channel needs is a **finer grid than the comparison does**. At 32 samples a
-long word puts a quarter of a key width between neighbouring samples, so a finger that went
-straight over a key centre is still recorded as having missed it by that much -- uniformly, which
-made every long word look badly executed. Whole-path comparison is happy to be coarse because
-both sides are coarse in the same places; asking about one key is not.
-
-### Squaring is what lets a distance and a frequency be added
-
-The shortlist that feeds the second pass originally scored `-distance + frequency`, and duly
-filled its forty-eight places with the commonest words in English regardless of what had been
-drawn. A linear cost lets frequency buy an unbounded amount of sloppiness. Squared over a
-tolerance, a word three key widths off pays nine times what a word one key width off pays, which
-no realistic frequency can make up.
-
-The same form is used in both passes for a second reason: the cheap pass only has to keep the
-right word *somewhere* in its top few dozen, and a shortlist scored on different terms from the
-final ranking will discard words the final ranking would have liked.
-
 ### A short word hides inside a long gesture
 
-"jd" fits comfortably along the first third of a glide of "keyboard", and every distance measure
-that does not know the gesture kept going scores it on that third alone. The cheap fix is the
-ratio of travelled length to the length the word asks for, as a log so that half and double cost
-the same.
+Both the crawl and web2 are full of three-letter entries nobody writes -- "wud", "hie", "ait",
+"phe", "tk", "nr" -- and in a glide dictionary each one does not merely compete with the intended
+word, it *beats* it, because the gesture passes through everything it asks for and then keeps
+going. So a short word has to earn its place much harder than a long one: two letters must be in
+the crawl's first 2,500, three in the first 10,000.
 
-The expensive version of the same problem is in the lexicon rather than the decoder. Both the
-crawl and web2 are full of three-letter entries nobody writes -- "wud", "hie", "ait", "phe",
-"tk", "nr" -- and each one does not merely compete with the intended word, it *beats* it, because
-the gesture passes through everything it asks for and then keeps going. A short word now has to
-earn its place much harder than a long one: two letters must be in the crawl's first 2,500, three
-in the first 10,000.
+This survived the decoder that first ran into it. The lexicon is now the dictionary that
+constrains the neural beam search, and a junk short word costs that exactly what it cost the
+old one.
 
 ### Where a row ends can only be learned by watching it wrap
 
@@ -467,48 +502,16 @@ Note that the harness check cannot tell an intentional change from drift. The lo
 one recorded ACCENT replay as GLIDE, which is the fix working; a threshold moving under your feet
 would look identical in that report. Read the disagreements, do not just count them.
 
-### Glide typing -- `glide/GlideConfig`, `gesture/GestureConfig`
+### Glide decoding -- `glide/FutoSwipe.kt`
 
-Decoding is two passes: every word in the bucket scored by a cheap point-for-point comparison,
-then the best forty-eight aligned to their own keys properly. Both passes score
-`-cost^2 / 2 tolerance^2 + frequency`, and the cost is a weighted sum of channels measured in key
-widths.
+FUTO Swipe, through the vendored `swipe-library`: a 635K-parameter layout-agnostic encoder, a
+304K English/QWERTY decoder, and a 1.5M context language model, with dictionary-constrained beam
+search over our own lexicon. About 10 MB of weights, ~2 MB of native library, and roughly 3 ms a
+word on a phone.
 
-| parameter | value | what it is |
-|---|---|---|
-| `samples` | 32 | points both paths are resampled to for the whole-path comparison |
-| `visitSamples` | 128 | finer grid for the per-key test; see above for why it must be finer |
-| `endpointRadiusRatio` | 1.15 | how far a word's first/last key may sit from the gesture's ends |
-| `shortlist` | 48 | words the cheap pass hands to the expensive one |
-| `locationWeight` | 1.0 | whole-path distance, the reference weight |
-| `visitWeight` | 1.2 | how close the finger came to each key, in order |
-| `shapeWeight` | 0.3 | the same paths with position and size normalised away |
-| `lengthWeight` | 2.5 | log ratio of travelled length to the word's own length |
-| `toleranceRatio` | 1.0 | error, in key widths, at which a match stops counting |
-| `frequencyWeight` | 1.8 | what one decade of word frequency is worth |
-
-**Only the ratio of the last two matters**, so the tolerance is pinned at one key width and the
-frequency weight is the dial. Swept over synthetic glides the whole region from 1.2 to 2.5 scores
-within noise of itself: the value above is the middle of a plateau, not a peak.
-
-Measured over 38 words x 3 seeds, straight through the key centres and then with progressively
-worse hands:
-
-| | first choice | offered in five |
-|---|---|---|
-| straight through the centres | 97% | 100% |
-| a steady hand (0.18 key jitter, corners cut 18%) | 92% | 100% |
-| an ordinary thumb (0.28, 30%) | 85% | 100% |
-| a hurried thumb (0.40, 45%) | 57% | 88% |
-
-**These are drawn glides, not recorded ones, and the difference matters.** They are the reason
-the decoder can be changed without flashing a build, and they will fail loudly if a change breaks
-a class of words -- but a synthetic thumb wobbles the way its author imagined a thumb wobbles.
-The numbers that will actually set these weights come from prose passages in the Gesture Lab, the
-same way the flick thresholds came from the collision drills.
-
-Decoding takes **0.23 ms** per word over 40,000 words on a laptop JVM, which is what makes it
-affordable at the lift rather than on a background thread with a result to reconcile afterwards.
+Nothing here is tuned by us and that is the point: the numbers that matter were fitted to over a
+million real swipes rather than to anything anyone could reason out. What this side owes the
+models is only the part they cannot check -- the coordinate frame, above -- and the dictionary.
 
 ### The lexicon -- `assets/lexicon_en.tsv`
 

@@ -105,36 +105,41 @@ go in a debug overlay screen so they can be tuned by feel on the real device.
 
 ## Phase 2 — Glide typing
 
-**Done, but with a hand-written decoder, and the reason given for that was wrong.**
+**Done, as the plan originally said: FUTO's `swipe-library`, vendored and built.** It took a
+detour first, and the detour is the interesting part.
 
-The plan was to vendor `swipe-library` from `gitlab.futo.org/keyboard/swipe-library` plus its
-three FUTO Swipe models and bridge to them over JNI from the GLIDE state. It was not, on the
-grounds of the risk noted below: that the decoder is trained on Android key geometry and ours is
-not. **Both halves of that are false**, and it is worth writing down which kind of false each is.
+The plan's second risk said the FUTO decoder was trained on Android key geometry, ours was not,
+and coordinate normalisation would be needed. Both halves were false. *Our geometry already is
+Android's* — the arrangement is iOS's, but the proportions were measured off Gboard on the device
+and Gboard is AOSP's grid, so every letter sits within 0.054 of a key width of where
+`rows_qwerty.xml` puts it (`AospGridTest` now asserts this). *And it would not have mattered* —
+the encoder is layout-agnostic in the strong sense, taking the key centres as a runtime tensor
+through a fixed DCT basis, and the paper measures a layout it had never seen at 97.7% top-1.
 
-*Our geometry already is Android's.* The layout's arrangement is iOS's, but its proportions were
-measured off Gboard on the device rather than taken from iOS, and Gboard is AOSP's grid. Every
-letter sits within **0.054 of a key width** — five pixels — of where `rows_qwerty.xml` puts it,
-the residual being our visible gaps and side margin. `AospGridTest` now asserts this rather than
-leaving it to be rediscovered.
+Believing that risk produced a hand-written Kotlin decoder instead. It was a reasonable thing —
+300 lines, no NDK, 0.23 ms a word — and it lost, on 64 recorded glides from this phone, 79% to
+95%. It has been deleted. See NOTES.md for what that comparison measured and why the loser was
+not kept as a fallback.
 
-*And it would not have mattered if it were not.* The FUTO encoder is layout-agnostic in the
-strong sense: the key centres enter the forward pass as a runtime tensor, evaluated through a
-fixed DCT basis, so a layout it has never seen costs it nothing and needs no retraining. The
-paper measures a *novel* layout at 97.7% top-1. There was never a coordinate-normalisation task
-to avoid.
+What ships:
 
-What shipped instead is `glide/GlideDecoder.kt`: resample the gesture and each candidate word to
-the same points, score them on four channels, add a log frequency, take the best. 300 lines of
-Kotlin over a committed 40,000-word lexicon, no NDK, no JNI, no model files, 0.23 ms a word, and
-tunable against gestures recorded on this layout. See NOTES.md for the two channels and why the
-second one asks its question backwards. It is a reasonable thing to have; it is not the best
-available thing, and the reason it was chosen over the best available thing does not hold up.
+- `third_party/swipe-library/` — GPL C++, ExecuTorch + XNNPACK, built for arm64-v8a and x86_64 by
+  `tools/fetch_swipe_runtime.sh`. Not committed: it compiles ExecuTorch, which is why it is a
+  script and not a checkout.
+- `assets/swipe/` — the encoder (2.6 MB), the English decoder (1.2 MB) and the context LM
+  (6.2 MB), under FUTO's model weights licence.
+- `glide/FutoSwipe.kt` — the coordinate frame, the layout tensor, and staging the models out of
+  the APK. The frame is the three letter rows, which nothing downstream can check for us.
+- `glide/Lexicon.kt` — still ours, now as the dictionary that constrains the beam search. One
+  word list, generated once, so the vocabulary is not a variable.
+- One local patch, `tools/patches/swipe-library-trie-jni.patch`: the shipped Kotlin binding has
+  no way to load a dictionary at all.
 
 The part that was not foreseen at all is the finger lift. A glide is one stroke in theory and
 often is not in practice, and ending the word at the first lift types something nobody asked for.
-`GLIDE_LIFTED` and a resume window handle it; `docs/GESTURE_BANK.md` covers how the window will
-be set from recordings rather than by feel.
+`GLIDE_LIFTED` and a resume window handle it, and no decoder helps — it is segmentation, not
+decoding. `docs/GESTURE_BANK.md` covers how the window gets set from recordings rather than by
+feel.
 
 **Milestone met: swiping a word inserts that word.**
 
@@ -247,7 +252,8 @@ seeing `nihao` survive is a test case, not a hope.
    within 0.054 of a key width, and the model takes key centres as a runtime tensor in any case,
    so a novel layout costs it nothing. Believing this risk is what produced a hand-written
    decoder instead: the cost of a misjudged risk is not always a failure, sometimes it is a
-   worse thing built carefully.
+   worse thing built carefully. The real risks turned out to be elsewhere and all three were
+   silent — see NOTES.md — and none of them was geometry.
 3. **ASR accuracy bar** — may not be reachable at acceptable size. This is measured in
    Phase 4 before investment, not assumed.
 4. **APK size** — models push well past 200MB. Fine for sideloading; models copy from assets

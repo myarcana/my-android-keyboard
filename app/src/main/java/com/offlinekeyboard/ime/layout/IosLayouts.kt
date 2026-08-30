@@ -131,4 +131,9 @@ object IosLayouts {
             bottomRow("ABC", "mode_abc"),
         ),
     )
+
+    /** Every layout, for anything replaying a recording that names one. */
+    val ALL = listOf(QWERTY_LOWER, QWERTY_UPPER, NUMBERS, SYMBOLS)
+
+    fun byId(id: String): Layout? = ALL.firstOrNull { it.id == id }
 }

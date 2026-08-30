@@ -16,14 +16,7 @@ import java.io.File
  */
 object GestureReplay {
 
-    private val LAYOUTS = listOf(
-        IosLayouts.QWERTY_LOWER,
-        IosLayouts.QWERTY_UPPER,
-        IosLayouts.NUMBERS,
-        IosLayouts.SYMBOLS,
-    )
-
-    fun layoutFor(id: String): Layout? = LAYOUTS.firstOrNull { it.id == id }
+    fun layoutFor(id: String): Layout? = IosLayouts.byId(id)
 
     /**
      * The verdict [config] would reach for this gesture, or null if it was recorded on a layout

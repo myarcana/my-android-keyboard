@@ -1,6 +1,6 @@
 package com.offlinekeyboard.ime.glide
 
-import java.io.BufferedReader
+import java.io.File
 import java.io.InputStream
 
 /**
@@ -37,6 +37,44 @@ class Lexicon private constructor(
 
     /** Word indices that begin with [first] and end with [last]. Empty when there are none. */
     fun bucket(first: Char, last: Char): IntArray = buckets[key(first, last)] ?: EMPTY
+
+    /**
+     * Writes this lexicon as an AOSP `.combined` dictionary, which is what swipe-library's
+     * beam search reads.
+     *
+     * Derived rather than shipped as a second asset, so both decoders are constrained to exactly
+     * the same words -- which is the only way the comparison between them measures decoding
+     * rather than vocabulary. It costs about a tenth of a second, once, on first use.
+     *
+     * The `f=` field is AOSP's 0-255 frequency, and mapping our log-frequency onto it linearly is
+     * the right shape: AOSP's own value is log-scaled too. The floor is 1 rather than 0 because
+     * 0 is AOSP's "known but never offer this" value.
+     */
+    fun writeCombined(target: File) {
+        if (logFrequency.isEmpty()) return
+        var low = logFrequency[0]
+        var high = logFrequency[0]
+        logFrequency.forEach {
+            if (it < low) low = it
+            if (it > high) high = it
+        }
+        val span = (high - low).coerceAtLeast(1)
+        target.parentFile?.mkdirs()
+        target.bufferedWriter().use { out ->
+            out.write("dictionary=main:en,locale=en,description=offline-keyboard,date=0,version=1\n")
+            words.forEachIndexed { i, word ->
+                // A comma would end the surface field early. Nothing in the generated asset has
+                // one, and a word that did would silently truncate rather than fail.
+                if (word.indexOf(',') >= 0) return@forEachIndexed
+                val f = 1 + 254 * (logFrequency[i] - low) / span
+                out.write(" word=")
+                out.write(word)
+                out.write(",f=")
+                out.write(f.toString())
+                out.write("\n")
+            }
+        }
+    }
 
     companion object {
         private val EMPTY = IntArray(0)

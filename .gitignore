@@ -15,3 +15,6 @@ asr-bench/
 
 # Dictation runtime and models: 290 MB, fetched by tools/fetch_asr_runtime.sh.
 app/src/main/assets/asr/
+
+# The swipe decoder runtime and models: built and fetched by tools/fetch_swipe_runtime.sh.
+app/src/main/assets/swipe/

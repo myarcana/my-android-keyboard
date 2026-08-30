@@ -148,6 +148,9 @@ for abi in ${=ABIS}; do
 
     mkdir -p $SRC/jniLibs/$abi
     cp $SRC/build-android-$abi/libswipe_jni.so $SRC/jniLibs/$abi/
+    # 26 MB unstripped, most of it ExecuTorch's debug symbols, all of it in the APK otherwise.
+    strip=$NDK/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip
+    [[ -x $strip ]] && $strip --strip-all $SRC/jniLibs/$abi/libswipe_jni.so
     case $abi in
         arm64-v8a) sysroot=aarch64-linux-android ;;
         x86_64)    sysroot=x86_64-linux-android ;;
@@ -163,20 +166,28 @@ cp $SRC/android/src/main/kotlin/org/futo/ml/inference/SwipeDecoder.kt \
    $SRC/kotlin-api/org/futo/ml/inference/
 
 # --- models ------------------------------------------------------------------------------------
-if [[ ! -f $ASSETS/encoder/model_fp32.pte ]]; then
-    echo "FUTO Swipe models…"
-    staging=$(mktemp -d)
-    git clone --quiet --depth 1 $MODELS_REPO $staging/futo-swipe
-    for pair in honorable_sturgeon:encoder magic_macaw:decoder hungry_jellyfish:contextlm; do
-        from=${pair%%:*}
-        to=${pair##*:}
-        [[ -d $staging/futo-swipe/$from ]] || continue
-        mkdir -p $ASSETS/$to
-        cp $staging/futo-swipe/$from/* $ASSETS/$to/ 2>/dev/null || true
-    done
-    rm -rf $staging
-    du -sh $ASSETS 2>/dev/null
-fi
+# Fetched file by file over https rather than by cloning the Hugging Face repository: the weights
+# are stored in git-lfs, and a plain clone silently produces 132-byte pointer files that look
+# exactly like models until ExecuTorch refuses to open them.
+MODEL_FILES=(
+    "honorable_sturgeon/model_fp32.pte:encoder/model_fp32.pte"
+    "honorable_sturgeon/metadata.json:encoder/metadata.json"
+    "magic_macaw/model_fp32.pte:decoder/model_fp32.pte"
+    "magic_macaw/metadata.json:decoder/metadata.json"
+    "hungry_jellyfish/context_lm.pte:contextlm/context_lm.pte"
+    "hungry_jellyfish/metadata.json:contextlm/metadata.json"
+    "hungry_jellyfish/vocab.txt:contextlm/vocab.txt"
+)
+for pair in $MODEL_FILES; do
+    from=${pair%%:*}
+    to=$ASSETS/${pair##*:}
+    # A pointer file from an earlier run is not a model; size is the cheapest way to tell.
+    if [[ -f $to && $(wc -c < $to) -gt 1000 ]]; then continue; fi
+    echo "model $from"
+    mkdir -p ${to:h}
+    curl -fsSL -o $to "$MODELS_REPO/resolve/main/$from"
+done
+echo "  models: $(du -sh $ASSETS | cut -f1)"
 
 echo
 echo "swipe runtime ready. Rebuild the app and glide decoding will use it:"

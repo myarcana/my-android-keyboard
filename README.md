@@ -50,6 +50,17 @@ Three version choices are deliberate and should not be casually "upgraded":
 
 ## Build
 
+Two runtimes are fetched rather than committed, and the build needs both:
+
+```sh
+tools/fetch_asr_runtime.sh        # sherpa-onnx + SenseVoice, ~290 MB, a download
+tools/fetch_swipe_runtime.sh      # FUTO Swipe + ExecuTorch, ~3 GB and a compile
+```
+
+The second one builds ExecuTorch from source for the NDK, which takes a while and only has to
+happen once. The keyboard runs without it -- glide typing falls back to the Kotlin decoder -- but
+the app will not compile without its Kotlin binding.
+
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
 ./gradlew assembleDebug
@@ -71,9 +82,10 @@ echo "sdk.dir=/opt/homebrew/share/android-commandlinetools" > local.properties
 - **Phase 1 — iOS layout and the gesture state machine: complete.** Flick-down symbols, the
   spacebar trackpad with 2D cursor and selection, and hold-backspace-swipe-up. Thresholds fitted
   to a bank of recorded gestures rather than by feel: `docs/GESTURE_BANK.md`.
-- **Phase 2 — glide typing: complete.** A Kotlin decoder over a committed 40,000-word lexicon,
-  with a lenient window for the mid-glide finger lifts that would otherwise type a word nobody
-  asked for. Not vendored from FUTO: see `docs/PLAN.md`.
+- **Phase 2 — glide typing: complete.** FUTO Swipe's neural models through the vendored
+  `swipe-library`, chosen over the Kotlin decoder written first by scoring both on the same
+  recorded glides — 95% against 79%. Both are still wired up, and a lenient window covers the
+  mid-glide finger lifts that would otherwise type a word nobody asked for.
 - **Phase 4 — dictation: complete.** SenseVoice via sherpa-onnx, chosen by measurement against
   Apple: `docs/ASR_BENCHMARK.md`.
 - **Phase 5 — the suggestion bar: half.** Emoji done; Chinese candidates wait on Phase 3.

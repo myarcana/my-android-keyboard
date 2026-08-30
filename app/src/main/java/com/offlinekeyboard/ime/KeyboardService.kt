@@ -29,7 +29,8 @@ import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.gesture.GestureOutput
-import com.offlinekeyboard.ime.glide.GlideDecoder
+import com.offlinekeyboard.ime.glide.FutoSwipe
+import com.offlinekeyboard.ime.glide.GlideEngine
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.IosLayouts
@@ -104,7 +105,7 @@ class KeyboardService : InputMethodService() {
 
     // --- glide typing ---
     /** Loaded off the main thread: 40,000 words is a fifth of a second the keyboard cannot wait. */
-    private var glide: GlideDecoder? = null
+    private var glide: GlideEngine? = null
     private var glideLoading = false
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
@@ -386,7 +387,7 @@ class KeyboardService : InputMethodService() {
         shift = ShiftState.OFF
         applyLayout()
         loadEmojiIndex()
-        loadGlideDecoder()
+        loadGlideEngine()
         refreshCandidates()
     }
 
@@ -475,7 +476,7 @@ class KeyboardService : InputMethodService() {
     private fun commitGlide(completed: GestureOutput.GlideCompleted): String? {
         val decoder = glide ?: return null
         val view = keyboardView ?: return null
-        val word = decoder.decode(completed.path, view.currentGeometry).firstOrNull()?.word
+        val word = decoder.decode(completed.path, view.currentGeometry).firstOrNull()
             ?: return null
         val ic = currentInputConnection ?: return null
 
@@ -642,20 +643,30 @@ class KeyboardService : InputMethodService() {
     // --- suggestion bar -------------------------------------------------------------------
 
     /**
-     * Loads the glide lexicon. Called alongside the emoji index, and for the same reason it is
-     * off the main thread: half a megabyte of words parsed on the UI thread is a keyboard that
-     * appears late the first time it is asked for.
+     * Loads the glide engine. Called alongside the emoji index, and off the main thread for a
+     * stronger version of the same reason: half a megabyte of words to parse, and, when it is
+     * present, ten megabytes of models to stage out of the APK and load.
      */
-    private fun loadGlideDecoder() {
+    private fun loadGlideEngine() {
         if (glide != null || glideLoading) return
         glideLoading = true
         Thread {
-            val loaded = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }
+            val lexicon = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }
                 .onFailure { android.util.Log.w(TAG, "glide lexicon failed to load", it) }
                 .getOrNull()
+            // The lexicon is still needed even though nothing here decodes with it: it is what
+            // the beam search's dictionary is generated from.
+            val engine: GlideEngine? = lexicon?.let { FutoSwipe.open(applicationContext, it) }
             handler.post {
-                glide = loaded?.let(::GlideDecoder)
+                glide = engine
                 glideLoading = false
+                if (engine == null) {
+                    // Not a silent degradation: with nothing to decode a glide, gliding types
+                    // nothing at all, and the reason belongs somewhere findable.
+                    android.util.Log.w(TAG, "no glide engine -- run tools/fetch_swipe_runtime.sh")
+                } else {
+                    android.util.Log.i(TAG, "glide engine: ${engine.name}")
+                }
             }
         }.start()
     }

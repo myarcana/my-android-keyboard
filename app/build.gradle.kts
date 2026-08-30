@@ -31,11 +31,25 @@ android {
     sourceSets["main"].kotlin.srcDir("../third_party/sherpa-onnx/kotlin-api")
     sourceSets["main"].jniLibs.srcDir("../third_party/sherpa-onnx/jniLibs")
 
+    /**
+     * Glide decoding: FUTO's swipe-library, taken the same way and for the same reason.
+     *
+     * Built rather than downloaded -- it compiles ExecuTorch, which is why it lives behind
+     * tools/fetch_swipe_runtime.sh rather than in the repository. The app is written to run
+     * without it: when the native library is absent, glide typing falls back to our own Kotlin
+     * decoder, which is also the switch the A/B comparison flips.
+     */
+    sourceSets["main"].kotlin.srcDir("../third_party/swipe-library/kotlin-api")
+    sourceSets["main"].jniLibs.srcDir("../third_party/swipe-library/jniLibs")
+
     androidResources {
         // SenseVoice is read straight out of the APK by the native runtime, which mmaps it and
         // needs it stored uncompressed. Compressing would also force a 239 MB copy to disk on
         // first run, which is exactly what reading from assets avoids.
-        noCompress += listOf("onnx")
+        //
+        // The .pte models cannot be read in place -- ExecuTorch opens a path, not an asset -- so
+        // they are copied out on first run and left uncompressed only to keep that copy cheap.
+        noCompress += listOf("onnx", "pte")
     }
 
     buildTypes {

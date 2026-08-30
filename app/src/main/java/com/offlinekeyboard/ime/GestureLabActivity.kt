@@ -33,6 +33,11 @@ import com.offlinekeyboard.ime.capture.Passages
 import com.offlinekeyboard.ime.capture.Target
 import com.offlinekeyboard.ime.gesture.GestureIntent
 import com.offlinekeyboard.ime.gesture.GestureRecord
+import com.offlinekeyboard.ime.glide.FutoSwipe
+import com.offlinekeyboard.ime.glide.GlideEngine
+import com.offlinekeyboard.ime.glide.GlideScoreboard
+import com.offlinekeyboard.ime.glide.LEXICON_ASSET
+import com.offlinekeyboard.ime.glide.Lexicon
 import java.util.concurrent.Executors
 
 /**
@@ -351,6 +356,70 @@ class GestureLabActivity : Activity() {
         }
     }
 
+    /**
+     * Runs every recorded glide through both decoders and says which read this thumb better.
+     *
+     * It has to happen here rather than in a unit test, and that is not a compromise: the engine
+     * is a native library that exists only on Android, so scoring it anywhere else would be
+     * scoring it by proxy.
+     *
+     * With one engine this is a measurement rather than a comparison, and it is still the thing
+     * worth having. A decoder reading this thumb at 95% and one reading it at 40% look identical
+     * from the outside until something asks -- and the most likely cause of the second is not the
+     * model at all, it is the coordinate frame it was handed.
+     */
+    private fun scoreEngines() {
+        val context = applicationContext
+        toast("Scoring the bank…")
+        io.execute {
+            val lexicon = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }.getOrNull()
+            if (lexicon == null) {
+                runOnUiThread { toast("No lexicon to score against") }
+                return@execute
+            }
+            val futo = FutoSwipe.open(context, lexicon)
+            val engines = listOfNotNull<GlideEngine>(futo)
+            val records = GestureBank.readAll(context)
+            val report = GlideScoreboard.score(records, engines)
+            futo?.close()
+
+            val text = buildString {
+                if (futo == null) {
+                    append("No glide engine in this build. Run tools/fetch_swipe_runtime.sh ")
+                    append("and reinstall.")
+                } else if (report.rows.all { it.scored == 0 }) {
+                    append("No glides recorded yet. Type one of the prose passages first.")
+                } else {
+                    report.rows.forEach { row ->
+                        append(row.engine)
+                        append(":  first choice ${row.percent(row.top1)}%")
+                        append("   offered ${row.percent(row.offered)}%")
+                        append("   (${row.top1}/${row.scored})")
+                        if (row.rejoined > 0) {
+                            append("\n   after a finger lift: ")
+                            append("${row.rejoinedTop1}/${row.rejoined}")
+                        }
+                        append("\n\n")
+                    }
+
+                    val worst = report.misses.groupBy { it.engine }
+                    worst.forEach { (engine, misses) ->
+                        append("$engine missed: ")
+                        append(misses.take(8).joinToString(", ") { "${it.expected}->${it.got}" })
+                        append("\n")
+                    }
+                }
+            }
+            runOnUiThread {
+                android.app.AlertDialog.Builder(this@GestureLabActivity)
+                    .setTitle("Glide decoders on ${report.rows.firstOrNull()?.scored ?: 0} glides")
+                    .setMessage(text)
+                    .setPositiveButton("ok", null)
+                    .show()
+            }
+        }
+    }
+
     private fun export() {
         val context = applicationContext
         io.execute {
@@ -457,10 +526,11 @@ class GestureLabActivity : Activity() {
 
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
-            addView(flatButton("Passage") { startPassage(passageIndex + 1) })
-            addView(flatButton("Restart") { startPassage(passageIndex) })
+            addView(flatButton("Next") { startPassage(passageIndex + 1) })
+            addView(flatButton("Again") { startPassage(passageIndex) })
             addView(flatButton("Skip") { skip() })
             addView(flatButton("Undo") { undoLast() })
+            addView(flatButton("Score") { scoreEngines() })
             addView(flatButton("Export") { export() })
         }
 
