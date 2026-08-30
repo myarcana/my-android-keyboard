@@ -101,25 +101,17 @@ private val ICON_KEYS = setOf(
  */
 private const val FLICK_SETTLE_MS = 40f
 
-/**
- * How quickly a tapped key shrinks back out of its flash, as an exponential time constant in
- * milliseconds.
- *
- * The growth itself has no clock: the key is at full size on the frame the finger lands, because
- * a quick tap can be over in forty milliseconds and anything that ramps up would still be on its
- * way in when the finger has already gone. Only the shrink is timed, and it starts from wherever
- * the key was, so a key tapped twice in quick succession jumps back up rather than continuing
- * whatever it was doing.
- */
-private const val POP_SETTLE_MS = 90f
+/** How wide the preview bubble is, in widths of the key it stands over. */
+private const val PREVIEW_WIDTH = 1.32f
 
-/**
- * How much bigger a key gets at the peak of its flash, in key widths.
- *
- * Spent as *pixels* rather than as a scale factor -- see [KeyboardView.drawPoppedKey] -- so
- * every key swells by the same visible amount whatever its size.
- */
-private const val POP_GROWTH = 0.30f
+/** How tall it is, in key heights. */
+private const val PREVIEW_HEIGHT = 1.15f
+
+/** How far its bottom edge sinks into the key, in key heights. */
+private const val PREVIEW_OVERLAP = 0.10f
+
+/** The size of the glyph inside it, in key units -- against 0.62 for the key's own. */
+private const val PREVIEW_TEXT = 0.95f
 
 class KeyboardView @JvmOverloads constructor(
     context: Context,
@@ -193,14 +185,14 @@ class KeyboardView @JvmOverloads constructor(
      * finger has lifted keeps its place with no pointer left to hold it.
      */
     private val flicks = mutableMapOf<String, Flick>()
-
-    /**
-     * Keys mid-flash, by key id -- for the same reason as [flicks]: a key shrinking back after
-     * the finger has lifted has no pointer left to hold its place.
-     */
-    private val pops = mutableMapOf<String, Pop>()
     private var lastFrameNanos = 0L
     private var accentPopup: Triple<KeyRect, List<String>, Int>? = null
+
+    /**
+     * The bubbles standing above the keys fingers are on. A list rather than one, because two
+     * thumbs can be on two keys.
+     */
+    private var previews: List<Preview> = emptyList()
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
     private var selecting = false
@@ -320,7 +312,7 @@ class KeyboardView @JvmOverloads constructor(
     override fun onDraw(canvas: Canvas) {
         val g = geometry()
         val t = theme
-        advanceAnimations()
+        advanceFlicks()
         canvas.drawColor(t.background)
 
         if (trackpadActive) {
@@ -330,15 +322,12 @@ class KeyboardView @JvmOverloads constructor(
 
         val radius = g.cornerRadius
         drawCandidates(canvas, g, t, radius)
-        // Flashing keys are drawn after the rest, so a key grown past its neighbours is not
-        // painted over by the ones that come later in the row.
-        g.keyRects.forEach { rect -> if (popOf(rect) == 0f) drawKey(canvas, rect, radius, t, g) }
-        g.keyRects.forEach { rect ->
-            val pop = popOf(rect)
-            if (pop > 0f) drawPoppedKey(canvas, rect, radius, t, g, pop)
-        }
+        g.keyRects.forEach { rect -> drawKey(canvas, rect, radius, t, g) }
 
         if (glidePath.size > 1) drawGlideTrail(canvas, g, t)
+        // After every key: a bubble stands over the row above its own, and over the suggestion
+        // strip from the top row.
+        previews.forEach { drawKeyPreview(canvas, g, t, it) }
         accentPopup?.let { (anchor, accents, selected) ->
             drawAccentPopup(canvas, g, t, anchor, accents, selected, radius)
         }
@@ -417,12 +406,10 @@ class KeyboardView @JvmOverloads constructor(
 
     private fun drawKey(canvas: Canvas, rect: KeyRect, radius: Float, t: Theme, g: LayoutGeometry) {
         val isSpecial = rect.key.type != KeyType.CHARACTER && rect.key.type != KeyType.SPACE
-        val base = if (isSpecial) t.specialKey else t.key
-        // The pressed tint fades out along with the flash rather than being dropped the instant
-        // the finger leaves, so the key does one thing on release instead of two.
         fill.color = when {
             rect.key.id == highlightedKeyId -> t.keyPressed
-            else -> blend(base, t.keyPressed, popOf(rect))
+            isSpecial -> t.specialKey
+            else -> t.key
         }
         canvas.drawRoundRect(
             RectF(rect.left, rect.top, rect.right, rect.bottom),
@@ -585,10 +572,10 @@ class KeyboardView @JvmOverloads constructor(
      * key with no finger on it is released to settle home, which covers the lift, a cancel, and a
      * flick escaping into a glide without any of the three being handled separately.
      */
-    /** Re-aims everything a finger holds in place: the flick glyphs and the tap flash. */
+    /** Re-aims everything a finger holds in place: the flick glyphs and the key bubbles. */
     private fun syncPressAnimations() {
         syncFlickTargets()
-        syncPops()
+        syncPreviews()
     }
 
     private fun syncFlickTargets() {
@@ -621,7 +608,15 @@ class KeyboardView @JvmOverloads constructor(
      * return should take its length from how far there is to go. It also cannot overshoot: an
      * iPadOS key slides back, it does not bounce.
      */
-    private fun advanceFlicks(dtMs: Float): Boolean {
+    private fun advanceFlicks() {
+        if (flicks.isEmpty()) return
+        val now = System.nanoTime()
+        // A dropped frame must not teleport the glyphs, and the first frame after a lift has no
+        // previous one to measure from.
+        val dtMs =
+            if (lastFrameNanos == 0L) 0f
+            else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
+        lastFrameNanos = now
         val step = 1f - exp(-dtMs / FLICK_SETTLE_MS)
 
         var settling = false
@@ -636,111 +631,96 @@ class KeyboardView @JvmOverloads constructor(
             if (flick.progress == 0f) entries.remove() else settling = true
         }
 
-        return settling
-    }
-
-    /**
-     * Steps every clocked animation one frame and asks for another while any of them is moving.
-     *
-     * They share a single clock because they share a frame: reading the time twice would hand
-     * the second one a zero-length interval and leave it frozen for as long as the first was
-     * running.
-     */
-    private fun advanceAnimations() {
-        if (flicks.isEmpty() && pops.isEmpty()) return
-        val now = System.nanoTime()
-        // A dropped frame must not teleport the glyphs, and the first frame after a lift has no
-        // previous one to measure from.
-        val dtMs =
-            if (lastFrameNanos == 0L) 0f
-            else ((now - lastFrameNanos) / 1_000_000f).coerceIn(0f, 64f)
-        lastFrameNanos = now
-        // `or`, not `||`: both have to be stepped, whatever the first one answers.
-        val settling = advanceFlicks(dtMs) or advancePops(dtMs)
         if (settling) postInvalidateOnAnimation() else lastFrameNanos = 0L
     }
 
-    // --- the tap flash ---------------------------------------------------------------------
+    // --- the key preview -------------------------------------------------------------------
 
-    /** One key's flash: how far it is grown, and whether a finger is still holding it there. */
-    private class Pop {
-        var progress = 0f
-        var held = false
-    }
-
-    private fun popOf(rect: KeyRect): Float = pops[rect.key.id]?.progress ?: 0f
+    /** A bubble standing above a key: which key, and the glyph it is showing. */
+    private data class Preview(val rect: KeyRect, val text: String)
 
     /**
-     * Grows the key each finger is pressing, and lets go of every key no finger is.
+     * Works out which keys have a bubble over them, and what each one says.
      *
-     * Read from the state machines for the same reason the flick is: they already know what a
+     * Read from the state machines for the same reason the flick is: they already know what each
      * finger is doing, and only two of the things it can be doing are still a keypress. A press
      * that has become a glide, the trackpad, an accent popup or a backspace repeat has taken the
-     * finger somewhere else entirely, and the key it started on settles back while the gesture it
-     * turned into carries on -- which also means no key can be left standing up with nothing
-     * holding it, however the gesture ends.
+     * finger somewhere else, and its bubble goes at that moment rather than waiting for a lift --
+     * which also means no bubble can be left standing with nothing holding it up, however the
+     * gesture ends.
+     *
+     * Only character keys get one, as on every keyboard that does this. A bubble exists to show
+     * the glyph the thumb is covering, and shift, backspace, return and the space bar have no
+     * glyph worth uncovering -- putting one over them would be decoration.
      */
-    private fun syncPops() {
-        var changed = false
-        pops.values.forEach {
-            if (it.held) {
-                it.held = false
-                changed = true
-            }
-        }
-        pointers.values.forEach { fsm ->
+    private fun syncPreviews() {
+        val shown = pointers.values.mapNotNull { fsm ->
             if (fsm.state != GestureState.PRESSED && fsm.state != GestureState.FLICK) {
-                return@forEach
+                return@mapNotNull null
             }
-            val keyId = fsm.originKeyId ?: return@forEach
-            val pop = pops.getOrPut(keyId) { Pop() }
-            if (pop.progress != 1f || !pop.held) changed = true
-            pop.progress = 1f
-            pop.held = true
+            val rect = keyRectOf(fsm.originKeyId) ?: return@mapNotNull null
+            if (rect.key.type != KeyType.CHARACTER) return@mapNotNull null
+            // What releasing right now would type. Pulled down far enough and the bubble reads
+            // the symbol, because a bubble showing a letter the key will not type is worse than
+            // no bubble at all.
+            val text = rect.key.secondary?.takeIf { fsm.flickArmed } ?: rect.key.primary
+            Preview(rect, text)
         }
-        if (changed) invalidate()
+        if (shown != previews) {
+            previews = shown
+            invalidate()
+        }
     }
 
-    /** Shrinks every released key one frame, exactly as [advanceFlicks] settles the glyphs. */
-    private fun advancePops(dtMs: Float): Boolean {
-        var settling = false
-        val step = 1f - exp(-dtMs / POP_SETTLE_MS)
-        val entries = pops.entries.iterator()
-        while (entries.hasNext()) {
-            val pop = entries.next().value
-            if (pop.held) continue
-            pop.progress -= pop.progress * step
-            // An exponential only approaches zero; the last sliver is not worth a frame.
-            if (pop.progress < 0.01f) pop.progress = 0f
-            if (pop.progress == 0f) entries.remove() else settling = true
-        }
-        return settling
-    }
+    private fun keyRectOf(keyId: String?): KeyRect? =
+        keyId?.let { id -> geometry().keyRects.firstOrNull { it.key.id == id } }
 
     /**
-     * Draws a key grown out of the keyboard under the finger that is on it.
+     * Draws one bubble: the pressed key's glyph, at nearly twice its size, in the space above the
+     * key where the thumb is not.
      *
-     * The size is chosen in pixels and only then turned back into a scale factor. A flat scale
-     * would be wrong on the wide keys: the same 25% that reads as a flash on a letter throws the
-     * space bar a third of a row sideways. Growing every key by the same number of pixels along
-     * its longest side makes the gesture feel identical wherever it lands.
+     * That placement is the whole point of the thing, and it is what Gboard, FUTO and iOS all do.
+     * The confirmation has to appear somewhere the finger making it is not covering, so growing
+     * the key in place -- which is where this started -- confirms the keystroke in exactly the
+     * spot the user cannot see.
      *
-     * The pivot sits below the key's centre so most of the growth goes upward, away from the
-     * thumb that is covering the key and toward the part of it the user can actually see.
+     * Nothing here is animated. The bubble is up on the frame the touch lands and gone on the
+     * frame it lifts, because a tap can be over in forty milliseconds: a bubble that faded in
+     * would still be arriving when the finger had already gone, and one that faded out would
+     * lag behind a fast typist by a key or two.
      */
-    private fun drawPoppedKey(
-        canvas: Canvas,
-        rect: KeyRect,
-        radius: Float,
-        t: Theme,
-        g: LayoutGeometry,
-        pop: Float,
-    ) {
-        val scale = 1f + POP_GROWTH * g.keyUnit * pop / maxOf(rect.width, rect.height)
-        canvas.save()
-        canvas.scale(scale, scale, rect.centerX, rect.centerY + rect.height * 0.3f)
-        drawKey(canvas, rect, radius, t, g)
-        canvas.restore()
+    private fun drawKeyPreview(canvas: Canvas, g: LayoutGeometry, t: Theme, preview: Preview) {
+        val rect = preview.rect
+        val w = rect.width * PREVIEW_WIDTH
+        // Wider than the key, so the outer columns would otherwise hang over the edge of the
+        // keyboard. Sliding them in is what the accent popup does with the same problem.
+        val left = (rect.centerX - w / 2f).coerceIn(g.margin, width - g.margin - w)
+        // The bottom sinks a little way into the key, so the bubble reads as that key lifted
+        // rather than as a card floating loose above it.
+        val bottom = rect.top + g.keyHeight * PREVIEW_OVERLAP
+        val top = bottom - g.keyHeight * PREVIEW_HEIGHT
+
+        fill.color = t.popup
+        fill.setShadowLayer(g.keyUnit * 0.10f, 0f, g.keyUnit * 0.03f, 0x33000000)
+        canvas.drawRoundRect(
+            RectF(left, top, left + w, bottom),
+            g.cornerRadius * 1.6f,
+            g.cornerRadius * 1.6f,
+            fill,
+        )
+        fill.clearShadowLayer()
+
+        label.color = t.text
+        label.textSize = g.keyUnit * PREVIEW_TEXT
+        // Centred on the bubble above the part buried in the key, so the glyph sits in the
+        // middle of what can actually be seen.
+        val visibleBottom = bottom - g.keyHeight * PREVIEW_OVERLAP * 2f
+        canvas.drawText(
+            preview.text,
+            left + w / 2f,
+            (top + visibleBottom) / 2f - (label.descent() + label.ascent()) / 2f,
+            label,
+        )
     }
 
     /** Straight per-channel interpolation, for the secondary taking on the primary's colour. */
@@ -913,7 +893,7 @@ class KeyboardView @JvmOverloads constructor(
         val runnable = Runnable {
             emit(fsm.onLongPressTimeout(System.currentTimeMillis()))
             // A press that becomes an accent popup or a trackpad is no longer a possible flick
-            // and no longer a key standing up, and no touch event is coming to notice that.
+            // and no longer a bubble either, and no touch event is coming to notice that.
             syncPressAnimations()
         }
         longPressRunnables[id] = runnable
