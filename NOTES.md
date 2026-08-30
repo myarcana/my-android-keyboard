@@ -751,7 +751,9 @@ device reached, to the sample.
 
 | parameter | value |
 |---|---|
-| rise | 0.70 key heights, upward only, character keys only |
+| rise | 1.45 key heights, upward only, character keys only |
+| accent popup | opens level with the raised key's top, from the same number |
+| ceiling | the top of the keyboard, which only binds on the top row |
 | contents | carried up bodily; both glyphs, at their resting sizes |
 | colour | `keyPressed`, taken and given back with the rise |
 | timing | instant both ways — the rise is never eased, in or out |
@@ -766,6 +768,14 @@ on the finger-down it appears for touches that turn out to be glides, and at the
 after the finger has gone and needs a clock to take it away again. Stretching the key upward has
 none of that. It is the same object, so there is nothing to place, nothing to clamp to the edge of
 the keyboard, and nothing to decide about: it is up exactly while a finger is on the key.
+
+**The alternatives open where the letter already is.** A press and a long press are one gesture
+arriving at two depths, so the accent popup's top edge is the raised key's top edge, from the same
+constant. Holding a key would otherwise jog its contents a second time for no reason the hand
+could feel. It also fixes how high the rise should be, which was guesswork before: high enough to
+reach where the alternatives have always opened. The one clamp is the top of the keyboard -- there
+is nowhere above the view to draw, and on the top row a key would have its rounded top sliced off
+by the window edge, which looks broken in a way that being twenty pixels lower does not.
 
 **One number does the whole thing.** The body is drawn from `top - lift`; the contents are drawn in
 the key's own coordinates and the canvas is translated up by the same `lift`. So the glyphs land at

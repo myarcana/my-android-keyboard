@@ -103,21 +103,25 @@ private val ICON_KEYS = setOf(
 private const val FLICK_SETTLE_MS = 40f
 
 /**
- * How far a pressed key grows upward, in key heights.
+ * How far a pressed key's contents stand above the key's own top edge, in key heights.
  *
  * The key does not get a popup; it becomes one. Pressing stretches the key itself up out of the
  * board and carries its contents to the top of the taller shape, which puts the glyph clear of
  * the thumb while leaving it attached to the key it belongs to -- the finger is holding the
- * bottom of the same object it is reading the top of. 0.70 lifts the contents a little over half
- * a key above where they sit at rest, which clears a fingertip without reaching the row above's
- * own glyphs.
+ * bottom of the same object it is reading the top of.
+ *
+ * The accent popup's top edge is this same height, and shares this number to stay that way. A
+ * press and a long press are one gesture arriving at two depths: the letter rises to here when
+ * the finger lands, and the alternatives to that letter open at the height the letter is already
+ * standing at. If they disagreed, holding a key would jog its contents a second time for no
+ * reason the hand could feel.
  *
  * The change is instant in both directions, never eased. The rise is not a movement the key makes
  * -- it is the shape a key has while a finger is on it, and the finger arrives and leaves at a
  * definite moment. Growing into it would also lose the race on every fast tap: a tap can be over
  * in forty milliseconds, and a key still on its way up when the finger has gone has shown nothing.
  */
-private const val PRESS_LIFT = 0.70f
+private const val PRESS_LIFT = 1.45f
 
 class KeyboardView @JvmOverloads constructor(
     context: Context,
@@ -414,7 +418,7 @@ class KeyboardView @JvmOverloads constructor(
         val press = motion?.press ?: 0f
         // How far this key has grown up out of the board, in pixels. 0 for a key nobody is on,
         // which is what makes everything below reduce to the resting keyboard.
-        val lift = press * PRESS_LIFT * g.keyHeight
+        val lift = press * liftAbove(rect, g)
         val base = if (isSpecial) t.specialKey else t.key
         // A key that rises takes its colour from the rise, and gives it back on the way down, so
         // the two are one movement. The keys that do not rise -- shift, backspace, the space bar
@@ -525,8 +529,9 @@ class KeyboardView @JvmOverloads constructor(
     ) {
         val w = accents.size * g.keyUnit
         val left = (anchor.centerX - w / 2f).coerceIn(g.margin, width - g.margin - w)
-        val bottom = anchor.top - g.rowGap * 0.4f
-        val top = bottom - g.keyHeight * 1.15f
+        // Opens level with the top of the raised key it grew out of -- see [PRESS_LIFT].
+        val top = anchor.top - liftAbove(anchor, g)
+        val bottom = top + g.keyHeight * 1.15f
 
         fill.color = t.popup
         canvas.drawRoundRect(RectF(left, top, left + w, bottom), radius * 2, radius * 2, fill)
@@ -677,6 +682,16 @@ class KeyboardView @JvmOverloads constructor(
 
         if (settling) postInvalidateOnAnimation() else lastFrameNanos = 0L
     }
+
+    /**
+     * How far above its own top edge this key's contents stand once it is raised, in pixels.
+     *
+     * Clamped at the top of the keyboard, which only ever binds on the top row: there is nowhere
+     * above the view to draw, and a key with its rounded top sliced off by the window edge looks
+     * broken in a way that being twenty pixels lower does not.
+     */
+    private fun liftAbove(rect: KeyRect, g: LayoutGeometry): Float =
+        minOf(PRESS_LIFT * g.keyHeight, rect.top)
 
     private fun keyRectOf(keyId: String?): KeyRect? =
         keyId?.let { id -> geometry().keyRects.firstOrNull { it.key.id == id } }
