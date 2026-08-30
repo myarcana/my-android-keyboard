@@ -520,6 +520,14 @@ time `Metrics` is recalibrated, and nothing would fail loudly.
   a tap on the suggestion strip stays a tap on the strip. `nearestKey` had already been written
   for the glide decoder with a comment saying the gaps swallow samples; the lesson just had not
   been carried across to taps.
+- **The emoji strip must not touch the top letter row.** The strip sits directly above `q`-`p`,
+  it took taps across its whole height, and tapping an emoji *replaces the word being typed*. So
+  a press aimed at a top-row letter that came in slightly high did not cost a character, it cost
+  the word: a recorded press 26px above `e`, horizontally dead centre of `e`'s column, turned
+  "book" into 📖. The strip now stops taking taps at `STRIP_TOUCH_FRACTION` (0.78) of its height
+  and the emoji are drawn smaller and higher to match, so the picture and the touch area say the
+  same thing. The freed band is not dead -- `keyForPress` snaps it into the top row -- because a
+  buffer that swallowed presses would just be the gap bug again in a new place.
 - **In the Gesture Lab, every line of chrome is a line of passage.** Reading ahead is the whole
   reason the lab produces natural gestures rather than aimed ones, and the screen it has to do it
   in is what the keyboard leaves over -- roughly a third of the display. So the header, the

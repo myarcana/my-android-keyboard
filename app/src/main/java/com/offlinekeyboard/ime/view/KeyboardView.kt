@@ -362,8 +362,11 @@ class KeyboardView @JvmOverloads constructor(
         }
         if (candidates.isEmpty()) return
         val cell = candidateCellWidth(g)
-        val top = g.stripHeight * 0.12f
-        val bottom = g.stripHeight * 0.88f
+        // Drawn smaller than the strip and sitting high in it, so the emoji read as their own
+        // band rather than as a row above the letters, and so the picture matches the touch
+        // area -- which stops at stripTouchBottom to keep high presses on q-p off the strip.
+        val top = g.stripHeight * 0.10f
+        val bottom = g.stripHeight * 0.70f
         label.textSize = (bottom - top) * 0.74f
         candidates.take(visibleCandidateCount(g)).forEachIndexed { i, candidate ->
             val left = g.margin + i * cell
@@ -409,7 +412,7 @@ class KeyboardView @JvmOverloads constructor(
 
     /** Which suggestion a touch landed on, or -1 for none. */
     private fun candidateAt(x: Float, y: Float, g: LayoutGeometry): Int {
-        if (y >= g.stripHeight || candidates.isEmpty() || status != null) return -1
+        if (y >= g.stripTouchBottom || candidates.isEmpty() || status != null) return -1
         val i = ((x - g.margin) / candidateCellWidth(g)).toInt()
         return if (i in 0 until minOf(candidates.size, visibleCandidateCount(g))) i else -1
     }

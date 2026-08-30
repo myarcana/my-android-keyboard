@@ -44,6 +44,21 @@ object Metrics {
     const val ROW_GAP = 10.33f
     /** Suggestion bar: emoji in English, candidates in Chinese. Never English word suggestions. */
     const val STRIP_HEIGHT = 50f
+
+    /**
+     * How much of the strip's height actually accepts a tap, measured from its top.
+     *
+     * The remainder is a buffer above the top letter row. It is here because the strip sits
+     * directly above `q`-`p` and a press aimed at a top-row letter that comes in slightly high
+     * used to land on a suggestion -- and tapping an emoji suggestion *replaces the word being
+     * typed*, so a miss of a few pixels destroyed a whole word rather than costing a character.
+     * A recorded passage caught one: a press 26px above `e`, horizontally dead centre of `e`'s
+     * column, turned "book" into a book emoji.
+     *
+     * The buffer is not dead space -- LayoutGeometry.keyForPress snaps it into the top row --
+     * so the near-miss becomes the letter that was meant.
+     */
+    const val STRIP_TOUCH_FRACTION = 0.78f
     const val BOTTOM_PADDING = 7.7f
     const val CORNER_RADIUS = 8f
     const val ROW_COUNT = 4
@@ -91,6 +106,8 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
     val cornerRadius = Metrics.CORNER_RADIUS * scale
     /** Reserved above the keys for the suggestion bar. */
     val stripHeight = Metrics.STRIP_HEIGHT * scale
+    /** Where the strip stops taking taps; below this is the buffer above the top row. */
+    val stripTouchBottom = stripHeight * Metrics.STRIP_TOUCH_FRACTION
     val heightPx = Metrics.HEIGHT_IN_KEY_WIDTHS * keyUnit
 
     val keyRects: List<KeyRect> = buildList {
@@ -185,12 +202,14 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
      * centre distance picks the horizontally closer key in the wrong row. Distance to the edge
      * picks the row you were reaching for and then the column you were over.
      *
-     * The snap is confined to the key area: above the top row is the suggestion strip, and a tap
-     * there must stay a tap on the strip rather than silently becoming a letter.
+     * The snap reaches up to [stripTouchBottom] rather than to the top row: the last slice of the
+     * strip does not take taps, precisely so a high press on a top-row letter arrives here and
+     * becomes that letter. Above that line the strip owns the touch, and a tap there must stay a
+     * tap on the strip rather than silently becoming a letter.
      */
     fun keyForPress(x: Float, y: Float): KeyRect? {
         keyAt(x, y)?.let { return it }
-        if (y < stripHeight || y > keyAreaBottom + Metrics.BOTTOM_PADDING * scale) return null
+        if (y < stripTouchBottom || y > keyAreaBottom + Metrics.BOTTOM_PADDING * scale) return null
         return keyRects.minByOrNull { r ->
             val dx = when {
                 x < r.left -> r.left - x

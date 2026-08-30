@@ -72,6 +72,29 @@ class KeyForPressTest {
     }
 
     @Test
+    fun `the buffer below the strip belongs to the top row, not the strip`() {
+        val e = geometry.keyRects.first { it.key.id == "e" }
+        var y = geometry.stripTouchBottom
+        while (y < e.top) {
+            assertEquals(
+                "a press at y=$y, between the strip and the top row, should reach a key",
+                "e",
+                idAt(e.centerX, y),
+            )
+            y += 1f
+        }
+    }
+
+    /**
+     * The press that turned "book" into a book emoji, replayed. It was 26px above `e` and dead
+     * centre of `e`'s column, and it landed on the emoji strip.
+     */
+    @Test
+    fun `the recorded press that ate a word now types the letter it aimed at`() {
+        assertEquals("e", idAt(254.1f, 124.3f))
+    }
+
+    @Test
     fun `a press well below the last row is not snapped upward`() {
         assertNull(idAt(geometry.widthPx / 2f, geometry.heightPx + 100f))
     }
