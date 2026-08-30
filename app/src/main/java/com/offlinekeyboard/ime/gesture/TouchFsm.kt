@@ -396,13 +396,6 @@ class TouchFsm(
         }
     }
 
-    /**
-     * True while the finger has stayed where it landed -- the same question the long press asks,
-     * and the one the key preview asks: whether this is still a plain press, or has become the
-     * beginning of something else.
-     */
-    val holdingStill: Boolean get() = !hasDrifted()
-
     /** True once the finger has travelled far enough that it is no longer holding still. */
     private fun hasDrifted(): Boolean {
         val start = down ?: return false
