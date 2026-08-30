@@ -12,14 +12,23 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 
 /**
- * A scratch text field for exercising the keyboard during development.
+ * Scratch text fields for exercising the keyboard during development.
  *
- * Multi-line and pre-filled on purpose: the spacebar trackpad has to move the cursor up and
- * down across real wrapped lines, which needs more than a single empty row to test against.
+ * Two of them, because they are not interchangeable and one of them silently was not testing
+ * what it looked like it was testing.
+ *
+ * The **cursor pad** is multi-line and pre-filled on purpose: the spacebar trackpad has to move
+ * the cursor up and down across real wrapped lines, which needs more than a single empty row to
+ * test against. It declares NO_SUGGESTIONS so that nothing between the keys and the field can
+ * alter the text a cursor test is measuring.
+ *
+ * The **word field** is there because that flag also turns off tap decoding, which reads a run of
+ * letter taps as a word. Typing into the cursor pad to check it therefore proved nothing, twice:
+ * the feature was correctly disabled and looked broken. A field that does not opt out is the only
+ * place on this phone where its behaviour can be seen at all.
  *
  * Its own app, because it shares nothing with the keyboard but a developer -- no code, no
- * process, no files. Any focusable field would do; this one differs only in that its contents
- * were chosen to make the cursor work hard.
+ * process, no files.
  */
 class TestPadActivity : Activity() {
 
@@ -87,8 +96,23 @@ class TestPadActivity : Activity() {
             )
         }
 
+        // Single-line and suggestion-friendly: an ordinary field, of the kind the keyboard meets
+        // everywhere outside this app. Deliberately not pre-filled -- what is being watched here
+        // is a word appearing letter by letter.
+        val words = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            hint = "word field -- tap decoding runs here"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setPadding(32, 32, 32, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            addView(words)
             addView(field)
         }
         setContentView(root)
@@ -106,6 +130,8 @@ class TestPadActivity : Activity() {
             insets
         }
 
+        // The cursor pad keeps the focus, so every existing way of using this app is unchanged.
+        // Reaching the word field is one tap.
         field.requestFocus()
         // Start at the top: the short-line section is the interesting part, and focusing the
         // field otherwise leaves the view wherever it was last scrolled.

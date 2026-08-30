@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.inputmethodservice.InputMethodService
+import android.text.InputType
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -36,6 +37,9 @@ import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
+import com.offlinekeyboard.ime.tap.PendingWord
+import com.offlinekeyboard.ime.tap.TapDecoder
+import com.offlinekeyboard.ime.tap.WordIndex
 import com.offlinekeyboard.ime.view.KeyboardView
 
 /**
@@ -109,6 +113,25 @@ class KeyboardService : InputMethodService() {
     private var glideLoading = false
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
+
+    // --- tap decoding ---
+    /**
+     * Re-reads a run of letter taps once there is enough of a word to read. Shares the lexicon
+     * with the glide engine and is built beside it, off the main thread.
+     */
+    private var tapDecoder: TapDecoder? = null
+
+    /** Letter taps held as composing text, waiting for the word to end. */
+    private val pending = PendingWord()
+
+    /**
+     * Whether this field wants a word held open at all.
+     *
+     * Off for passwords, URLs and anything asking for no suggestions. The keyboard has nothing
+     * useful to say about a password and composing text in one is a way to leak it into the
+     * field's own autofill; a URL is mostly not English and would be re-read as though it were.
+     */
+    private var tapDecodingAllowed = false
 
     /** Repeats while backspace is held; counts its own repeats to know when to switch to words. */
     private var backspaceRepeats = 0
@@ -374,6 +397,7 @@ class KeyboardService : InputMethodService() {
         // A glide waiting to see whether the finger comes back never will now, and the word it
         // drew belongs in the field it was drawn over rather than in whatever is focused next.
         keyboardView?.finishPendingGlide()
+        flushPending()
         endSelection()
         stopTrackpad()
         stopBackspaceRepeat()
@@ -384,6 +408,9 @@ class KeyboardService : InputMethodService() {
 
     override fun onStartInputView(info: EditorInfo?, restarting: Boolean) {
         super.onStartInputView(info, restarting)
+        // A word held over from the last field must not follow the focus into this one.
+        flushPending()
+        tapDecodingAllowed = allowsTapDecoding(info)
         shift = ShiftState.OFF
         applyLayout()
         loadEmojiIndex()
@@ -407,6 +434,16 @@ class KeyboardService : InputMethodService() {
         super.onUpdateSelection(
             oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
         )
+        // The caret has moved for a reason this keyboard may not have had anything to do with:
+        // a tap into the middle of the text, an autofill, the app's own editing. A word being
+        // held is only meaningful where it was typed, so anything that is not "the caret is
+        // sitting at the end of the region we are composing" ends it. Writing composing text
+        // reports exactly that shape, so the ordinary case does not trip this.
+        if (!pending.isEmpty &&
+            (candidatesStart < 0 || newSelStart != newSelEnd || newSelEnd != candidatesEnd)
+        ) {
+            flushPending()
+        }
         if (!trackpadActive) refreshCandidates()
     }
 
@@ -429,7 +466,7 @@ class KeyboardService : InputMethodService() {
         var decoded: String? = null
         outputs.forEach { out ->
             when (out) {
-                is GestureOutput.CommitPrimary -> commit(out.text)
+                is GestureOutput.CommitPrimary -> if (!pendLetter(out)) commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
                 is GestureOutput.CommitAccent -> commit(out.text)
                 GestureOutput.SelectionStarted -> beginSelection()
@@ -455,6 +492,10 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun commit(text: String) {
+        // Whatever this is, it is not another letter of the word being held, so that word is
+        // over. Settling it first keeps the two edits in order: the word, then the thing that
+        // ended it.
+        flushPending()
         currentInputConnection?.commitText(text, 1)
         // iOS one-shot shift: the next letter is capitalised, then shift releases.
         if (shift == ShiftState.ONE_SHOT && text.isNotBlank()) {
@@ -462,6 +503,84 @@ class KeyboardService : InputMethodService() {
             applyLayout()
         }
         refreshCandidates()
+    }
+
+    // --- tap decoding ---------------------------------------------------------------------
+
+    /**
+     * Takes a letter tap into the word being held, and shows what that word now reads as.
+     *
+     * Returns false for anything that is not a letter of a word -- the space bar, a field that
+     * has opted out, a build whose lexicon has not finished loading -- leaving the caller to
+     * commit it the old way. Letter keys are identified by their id rather than by the text they
+     * would type, because that text is "Q" under shift and the decoder works in lowercase.
+     *
+     * The word goes into the field as composing text rather than being withheld. A word the user
+     * cannot see until it is finished would be a far worse trade than the one this is making:
+     * the letters are there, in order, from the moment they are typed, and the only thing
+     * deferred is the keyboard's final opinion about which letters they were.
+     */
+    private fun pendLetter(out: GestureOutput.CommitPrimary): Boolean {
+        if (!tapDecodingAllowed) return false
+        val decoder = tapDecoder ?: return false
+        val geometry = keyboardView?.currentGeometry ?: return false
+        val ic = currentInputConnection ?: return false
+        val id = out.keyId
+        if (id.length != 1 || id[0] !in 'a'..'z') return false
+        if (pending.length >= TapDecoder.MAX_TAPS) flushPending()
+
+        pending.add(out.x, out.y, id[0], upper = shift != ShiftState.OFF)
+        // iOS one-shot shift: the next letter is capitalised, then shift releases.
+        if (shift == ShiftState.ONE_SHOT) {
+            shift = ShiftState.OFF
+            applyLayout()
+        }
+
+        val text = pending.textFor(decoder.read(pending.taps, geometry))
+        if (pending.hasChanged(text)) {
+            pending.markShown(text)
+            ic.setComposingText(text, 1)
+        }
+        refreshCandidates()
+        return true
+    }
+
+    /**
+     * Whether a field is one where holding a word open is appropriate.
+     *
+     * The exclusions are all the same kind of mistake in different clothes: a field whose
+     * contents are not English words, where re-reading them as English words can only do harm.
+     * A password is not a word and must not linger in a composing region; an address or an email
+     * is not a word; and a field that has set NO_SUGGESTIONS has said so outright.
+     */
+    private fun allowsTapDecoding(info: EditorInfo?): Boolean {
+        val type = info?.inputType ?: return false
+        if (type and InputType.TYPE_MASK_CLASS != InputType.TYPE_CLASS_TEXT) return false
+        if (type and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0) return false
+        return when (type and InputType.TYPE_MASK_VARIATION) {
+            InputType.TYPE_TEXT_VARIATION_PASSWORD,
+            InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
+            InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
+            InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
+            InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS,
+            InputType.TYPE_TEXT_VARIATION_URI,
+            InputType.TYPE_TEXT_VARIATION_FILTER,
+            -> false
+            else -> true
+        }
+    }
+
+    /**
+     * Settles the word being held: whatever it reads as now becomes ordinary text.
+     *
+     * Every way out of a pending word is this one. There is no path that keeps a half-decided
+     * word across a caret move, a focus change or a delete, which is what makes it safe to hold
+     * one at all next to a trackpad that can put the caret anywhere.
+     */
+    private fun flushPending() {
+        if (pending.isEmpty) return
+        pending.clear()
+        currentInputConnection?.finishComposingText()
     }
 
     /**
@@ -474,6 +593,8 @@ class KeyboardService : InputMethodService() {
      * where the emoji bar is still looking at a word rather than at nothing.
      */
     private fun commitGlide(completed: GestureOutput.GlideCompleted): String? {
+        // A glide writes a whole word of its own; the tapped one before it is finished.
+        flushPending()
         val decoder = glide ?: return null
         val view = keyboardView ?: return null
         val word = decoder.decode(completed.path, view.currentGeometry).firstOrNull()
@@ -495,6 +616,10 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun handleSpecialKey(type: KeyType, keyId: String) {
+        // Shift alone does not end a word -- it capitalises the next letter of one, and the
+        // upper and lower layouts put their keys in identical places, so a word may span it.
+        // Everything else here either moves the caret, changes the field or changes the plane.
+        if (type != KeyType.SHIFT) flushPending()
         when (type) {
             KeyType.SHIFT -> toggleShift()
             KeyType.BACKSPACE -> backspace()
@@ -550,6 +675,10 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun backspace() {
+        // Also reached by the held-backspace repeat, which never passes through
+        // handleSpecialKey. A delete against composing text is the one edit that would make the
+        // held word and the field disagree, so it is settled first, every time.
+        flushPending()
         val ic = currentInputConnection ?: return
         val selected = ic.getSelectedText(0)
         if (selected.isNullOrEmpty()) ic.deleteSurroundingText(1, 0) else ic.commitText("", 1)
@@ -588,6 +717,7 @@ class KeyboardService : InputMethodService() {
      * break: a held backspace should pause at the start of each line rather than run past it.
      */
     private fun deleteWordBackwards() {
+        flushPending()
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
         if (before.isNullOrEmpty()) return
@@ -609,6 +739,7 @@ class KeyboardService : InputMethodService() {
      * cannot see, and there is no undo to answer for it.
      */
     private fun bulkDelete() {
+        flushPending()
         val ic = currentInputConnection ?: return
         ic.beginBatchEdit()
         ic.finishComposingText()
@@ -658,11 +789,15 @@ class KeyboardService : InputMethodService() {
             val lexicon = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }
                 .onFailure { android.util.Log.w(TAG, "glide lexicon failed to load", it) }
                 .getOrNull()
-            // The lexicon is still needed even though nothing here decodes with it: it is what
-            // the beam search's dictionary is generated from.
+            // The lexicon is what the beam search's dictionary is generated from, and it is
+            // also the language model the tap decoder reads. Building the index here rather than
+            // on its own thread is deliberate: it is a sort of the same 40,000 strings that were
+            // just parsed, and doing it twice over would be two loads of the asset.
             val engine: GlideEngine? = lexicon?.let { FutoSwipe.open(applicationContext, it) }
+            val index = lexicon?.let { TapDecoder(WordIndex.of(it)) }
             handler.post {
                 glide = engine
+                tapDecoder = index
                 glideLoading = false
                 if (engine == null) {
                     // Not a silent degradation: with nothing to decode a glide, gliding types
@@ -723,6 +858,9 @@ class KeyboardService : InputMethodService() {
 
     /** Replaces the typed word with the emoji, the way the iOS emoji suggestion does. */
     private fun commitCandidate(position: Int) {
+        // The emoji replaces a run of characters counted off the field, so the word being held
+        // has to be in the field and not in this keyboard before that count is taken.
+        flushPending()
         val text = keyboardView?.candidates?.getOrNull(position) ?: return
         val ic = currentInputConnection ?: return
         ic.beginBatchEdit()
@@ -748,6 +886,8 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun startTrackpad() {
+        // The caret is about to go somewhere else entirely. Settle the word where it was typed.
+        flushPending()
         trace("=== TRACKPAD START selecting=$extendingSelection ===")
         trackpadActive = true
         // IMMEDIATE as well as MONITOR. MONITOR alone only delivers when the cursor *moves*,

@@ -219,6 +219,78 @@ a hand and a screen. So both are recorded with every gesture, along with the ind
 strokes join, and the whole bank can be rescored under any other pair. The defaults below are a
 starting point and are expected to move.
 
+### The thumb does not aim at the middle of the key
+
+The bank was built to settle flick-versus-glide thresholds, and it turns out to answer a question
+nobody had asked it: 94 of its records are plain taps, each carrying the point the finger landed
+on and the letter the passage had asked for. `tools/fit_spatial.py` reads them.
+
+**The thumb lands a fifth of a key height low, on every key measured and in all three rows.** The
+mean offset is +0.204 key heights down and 0.063 key widths left; the per-key means run from
++0.118 on `u` to +0.348 on `k`, and not one of them is near zero. That is not noise -- the
+standard error on each is about 0.035.
+
+What makes it worth acting on is the size of it against the scatter it hides in. Measured about
+the *drawn* key centre, the vertical spread of a tap is 0.242 key heights. Measured about where
+the thumb actually aims, it is 0.130. Nearly half the apparent sloppiness of typing on this
+keyboard was never sloppiness; it was a constant that had never been subtracted.
+
+The practical consequence is sharp. Rows sit 1.26 key heights apart, so under the uncorrected
+figure a neighbouring row is only about five sigma away and *no tap is ever unambiguous
+vertically*. Under the corrected one the same tap is nine sigma clear. Correcting the offset is
+what makes it possible to say that a tap has exactly one possible reading -- and everything the
+tap decoder does rests on being able to say that.
+
+It ships as one global pair rather than a table per key, and that is a statement about the bank
+rather than about thumbs. Eight keys is not twenty-six, and the per-key spread is real and far
+outside its standard error, so a table is the right shape and the wrong thing to fit today. The
+numbers are printed per key so the day the bank covers the alphabet, it is a data change.
+
+### A word can be held open without being guessed at
+
+Autocorrect is the thing this keyboard refuses to do: a tapped key produces exactly that
+character. The refusal is worth keeping and it was costing something real, because the letter a
+tap meant is often not decidable from that tap and is obvious three letters later. Committing at
+the moment of the tap throws that away.
+
+What separates the two is a **constraint, not a confidence threshold**. A reading has exactly one
+letter per tap, and every letter is one the finger could plausibly have been aiming at. Nothing is
+inserted, deleted or substituted; the output is always a re-reading of keys that were actually
+hit. So a name, a handle or an abbreviation is typed by hitting its keys, and hitting them
+accurately is the *whole* requirement -- an accurate tap has no second reading available to lose
+to. "Rhys" typed accurately comes out as "Rhys" no matter how much likelier "This" is.
+
+**A tap is pinned when the touch evidence against every other letter exceeds the entire dynamic
+range of the language model.** That range is not a tuned number: it is the whole corpus against
+one ordinary word, read off the lexicon at 13.0 nats. Past it, no word in the dictionary, however
+common, could buy the alternative back. On the measured sigmas that band reaches 0.41 of a key
+width and 0.45 of a key height from the aim point -- past the far edge of the drawn key in both
+directions. Ordinary typing pins every tap and the decoder never runs at all.
+
+The scoring underneath has no thumb on the scale. `ln P(touch | letters)` from the spatial model,
+plus `ln P(letters)` from the lexicon, both in nats, both real. The literal reading gets no bonus
+and needs none: it has the best touch score by construction, so it wins every tie and every case
+where the language model has nothing much to say.
+
+**The prior is prefix mass, not word frequency, and that is what stops the display flickering.**
+Scoring complete words only, a literal "rhe" loses to "the" at three letters and wins again at
+four, because neither "rhet" nor "thet" is a word and both fall back to the unknown-spelling
+floor. The reading would appear and then be taken away while the finger was still moving -- the
+same flicker a suspended glide exists to avoid, in yet another costume. Summing the corpus counts
+of every word a prefix can still become removes it outright: adding a letter can only narrow that
+set, so a reading that is ahead stays ahead for the reason it was ahead. It is also just the right
+quantity. P(prefix) is the probability the word starts this way, which is the question being asked
+at every keystroke but the last.
+
+Holding state about the field is the other thing this keyboard had refused to do, for a reason
+that still applies -- the cursor trackpad can put the caret anywhere at any moment, and a buffer
+that outlives the caret it described is worse than none. What makes it safe is that every way out
+is the same way: the word is flushed, and flushing commits the reading that is already on screen.
+Nothing has to judge whether a held word is still valid, because nothing is ever asked to keep one
+that might not be. Backspace, a glide, the trackpad, a mode change, a focus change, and any caret
+move the keyboard did not make itself all flush. So do passwords, addresses and any field asking
+for no suggestions, which never hold a word at all.
+
 ### The frame is the three letter rows, and nothing checks it for you
 
 A layout-agnostic swipe decoder is handed the key centres and the finger's path in one [0,1]
@@ -669,6 +741,28 @@ Four rules do the work, and each one was a bug first:
   rest are floored at a fixed share of their leading word, because "theyve" is written by almost
   nobody while "they've" is written constantly. Where the two spellings share a shape and the
   contraction is the commoner one -- "it's", "I'll", "I'd", "let's" -- an explicit list says so.
+
+### Tap decoding -- `tap/SpatialModel`, `tap/WordIndex`
+
+| parameter | value | where it comes from |
+|---|---|---|
+| `MEASURED_OFFSET_X` | -0.063 key widths | mean landing point of 94 bank taps |
+| `MEASURED_OFFSET_Y` | +0.204 key heights | the same; positive is down the screen |
+| `MEASURED_SIGMA_X` | 0.122 key widths | scatter about that point, not about the drawn centre |
+| `MEASURED_SIGMA_Y` | 0.130 key heights | 0.242 if measured about the drawn centre |
+| `priorRange` | 13.0 nats | derived: `ln(whole corpus) - ln(median word)` |
+| `oovLogPrior` | median word | the value of a spelling the lexicon has never seen |
+| `MIN_TAPS` | 2 | at one letter the prior is about the alphabet, not about a word |
+| `beamWidth` | 24 | a ceiling; a tap usually contributes one candidate and rarely three |
+
+Rerun `tools/fit_spatial.py` after any sitting with the Gesture Lab; the first four move with the
+bank. The next two are not tunable at all -- they are read off `assets/lexicon_en.tsv`, so
+regenerating the lexicon moves them and the pinned band with them.
+
+`MIN_TAPS` is the one that looks arbitrary and is not. At a single letter the prior is not about
+a word, it is about which letters English words begin with -- a fact about the dictionary rather
+than about the person typing, and one that would otherwise apply to every first keystroke ever
+made. Two letters is where it starts describing a word shape instead of an alphabet.
 
 ### The finger-lift window -- `gesture/GestureConfig`
 

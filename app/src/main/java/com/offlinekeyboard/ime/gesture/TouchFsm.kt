@@ -172,7 +172,21 @@ data class GestureConfig(
 
 sealed interface GestureOutput {
     data class KeyHighlighted(val keyId: String?) : GestureOutput
-    data class CommitPrimary(val keyId: String, val text: String) : GestureOutput
+
+    /**
+     * A plain keypress. Carries the point the finger went *down* on as well as the key it
+     * resolved to, because the tap decoder scores that point against every nearby letter and
+     * "which key was nearest" has already thrown away most of what it needs. The down point
+     * rather than the lift: they are the same point for an ordinary tap -- all 94 in the bank
+     * travel zero pixels -- and where the thumb first landed is the aim, where it left is a
+     * roll off the glass.
+     */
+    data class CommitPrimary(
+        val keyId: String,
+        val text: String,
+        val x: Float,
+        val y: Float,
+    ) : GestureOutput
     data class CommitSecondary(val keyId: String, val text: String) : GestureOutput
 
     /** Flick is previewed but NOT committed, so it can still become a glide. */
@@ -678,8 +692,10 @@ class TouchFsm(
      */
     private fun tapOutput(key: KeyRect?): List<GestureOutput> = when {
         key == null -> emptyList()
-        key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE ->
-            listOf(GestureOutput.CommitPrimary(key.key.id, key.key.primary))
+        key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE -> {
+            val at = down ?: PathPoint(key.centerX, key.centerY, 0L)
+            listOf(GestureOutput.CommitPrimary(key.key.id, key.key.primary, at.x, at.y))
+        }
         else -> listOf(GestureOutput.SpecialKey(key.key.type, key.key.id))
     }
 
