@@ -509,6 +509,13 @@ time `Metrics` is recalibrated, and nothing would fail loudly.
   it with the glyph at nearly twice its size, and it is raised at the keystroke rather than at the
   touch -- so it says what *was* typed rather than what a finger happens to be resting on. It is
   paired with a click: the eye and the hand are told the same thing at the same moment.
+- **In the Gesture Lab, every line of chrome is a line of passage.** Reading ahead is the whole
+  reason the lab produces natural gestures rather than aimed ones, and the screen it has to do it
+  in is what the keyboard leaves over -- roughly a third of the display. So the header, the
+  progress line, the feedback and the bank counts are each held to one line and truncated rather
+  than allowed to wrap, the title bar is off, and the button row is given an explicit 34dp
+  instead of the platform Button's 48. The passage card takes the rest. Truncated lines are
+  ordered most-useful-first, because only the front of them survives on a narrow screen.
 - **The flick is a manoeuvre, not an animation.** Swiping down on a key drags its symbol out of
   the small grey slot and into the letter's own place — position, size and colour — while the
   letter drops out of the bottom of the key. It tracks the thumb pixel for pixel in both

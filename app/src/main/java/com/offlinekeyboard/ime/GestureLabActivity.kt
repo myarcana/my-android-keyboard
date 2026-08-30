@@ -10,12 +10,14 @@ import android.provider.Settings
 import android.text.InputType
 import android.text.SpannableStringBuilder
 import android.text.Spanned
+import android.text.TextUtils
 import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.StyleSpan
 import android.graphics.Typeface
 import android.util.TypedValue
 import android.view.View
+import android.view.Window
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
 import android.widget.Button
@@ -128,6 +130,9 @@ class GestureLabActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // No title bar: it names an activity that is already the only thing on screen, and the
+        // line it costs is a line of passage.
+        requestWindowFeature(Window.FEATURE_NO_TITLE)
         setContentView(buildUi())
         deck = LabDeck(LabDeck.prefs(this), library())
         start(deck.current())
@@ -380,7 +385,7 @@ class GestureLabActivity : Activity() {
                 bankLine.text = buildString {
                     append("today ${day.today}/${LabProgress.DAILY_GOAL}")
                     if (day.streak > 0) append("   ·   ${day.streak} day streak")
-                    append("\nbank ${summary.total}")
+                    append("   ·   bank ${summary.total}")
                     append("  (${summary.breakdown})")
                     if (summary.decided > 0) {
                         append("   ·   current heuristic ")
@@ -388,7 +393,7 @@ class GestureLabActivity : Activity() {
                         append(" of ${summary.decided}")
                     }
                     if (sessionRecorded > 0) {
-                        append("\nthis session $sessionRecorded")
+                        append("   ·   session $sessionRecorded")
                         if (sessionDecided > 0) {
                             append(" · $sessionAgreed/$sessionDecided read correctly")
                         }
@@ -591,14 +596,21 @@ class GestureLabActivity : Activity() {
     // --- ui ---------------------------------------------------------------------------------
 
     private fun buildUi(): View {
+        // Every line of chrome here is a line of passage the reader does not get, so the
+        // header, the progress line, the feedback and the bank are all held to one line each
+        // and truncated rather than allowed to wrap. Reading ahead is the whole task.
         title = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
             setTextColor(ink)
             setTypeface(typeface, Typeface.BOLD)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
         note = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(muted)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
         passageView = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
@@ -606,20 +618,27 @@ class GestureLabActivity : Activity() {
             setLineSpacing(dp(5).toFloat(), 1f)
         }
         progress = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
             setTextColor(muted)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
         // Capped, because it is the one line here whose length is not under this file's control:
         // a long word plus a decoded word plus a lift report can run to three lines, and every
         // one of them comes out of the passage's height, which is the thing being read.
         feedback = TextView(this).apply {
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-            setTextColor(muted)
-            maxLines = 2
-        }
-        bankLine = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
             setTextColor(muted)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
+        }
+        // The counts are ordered most useful first, because only the front of this line
+        // survives on a narrow screen.
+        bankLine = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+            setTextColor(muted)
+            maxLines = 1
+            ellipsize = TextUtils.TruncateAt.END
         }
         imeWarning = TextView(this).apply {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
@@ -637,7 +656,8 @@ class GestureLabActivity : Activity() {
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setTextColor(ink)
             hint = "type here"
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            maxLines = 1
+            setPadding(dp(14), dp(7), dp(14), dp(7))
             background = GradientDrawable().apply {
                 setColor(card)
                 cornerRadius = dp(10).toFloat()
@@ -664,19 +684,30 @@ class GestureLabActivity : Activity() {
             )
         }
 
+        // Title and note ride on one line together: they name the passage, and naming it is
+        // worth a line only once.
+        val header = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(title, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            ))
+            addView(note, LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f,
+            ).apply { marginStart = dp(8) })
+        }
+
         val cardBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(14), dp(12), dp(14), dp(12))
+            setPadding(dp(12), dp(8), dp(12), dp(8))
             background = GradientDrawable().apply {
                 setColor(card)
                 cornerRadius = dp(14).toFloat()
             }
-            addView(title)
-            addView(note, marginTop(dp(2)))
+            addView(header)
             addView(passageScroller, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-            ).apply { topMargin = dp(10) })
-            addView(progress, marginTop(dp(8)))
+            ).apply { topMargin = dp(6) })
+            addView(progress, marginTop(dp(4)))
             layoutParams = LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
             )
@@ -695,15 +726,15 @@ class GestureLabActivity : Activity() {
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setBackgroundColor(bg)
-            setPadding(dp(14), dp(10), dp(14), dp(10))
+            setPadding(dp(10), dp(6), dp(10), dp(6))
             addView(imeWarning)
             addView(cardBox, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f,
-            ).apply { topMargin = dp(8) })
-            addView(feedback, marginTop(dp(8)))
-            addView(bankLine, marginTop(dp(4)))
-            addView(buttons, marginTop(dp(6)))
-            addView(field, marginTop(dp(6)))
+            ).apply { topMargin = dp(4) })
+            addView(feedback, marginTop(dp(5)))
+            addView(bankLine, marginTop(dp(2)))
+            addView(buttons, marginTop(dp(4)))
+            addView(field, marginTop(dp(4)))
         }
 
         // The keyboard is the instrument here, so the window must resize around it rather than
@@ -712,10 +743,10 @@ class GestureLabActivity : Activity() {
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             val ime = insets.getInsets(WindowInsetsCompat.Type.ime())
             v.setPadding(
-                dp(14) + bars.left,
-                dp(10) + bars.top,
-                dp(14) + bars.right,
-                dp(10) + maxOf(bars.bottom, ime.bottom),
+                dp(10) + bars.left,
+                dp(6) + bars.top,
+                dp(10) + bars.right,
+                dp(6) + maxOf(bars.bottom, ime.bottom),
             )
             insets
         }
@@ -753,12 +784,14 @@ class GestureLabActivity : Activity() {
             setTextColor(ink)
             isAllCaps = false
             setPadding(dp(2), 0, dp(2), 0)
+            minHeight = 0
+            minimumHeight = 0
             background = GradientDrawable().apply {
                 setColor(card)
                 cornerRadius = dp(10).toFloat()
             }
             setOnClickListener { onClick() }
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, dp(34), 1f)
                 .apply { marginEnd = dp(4) }
         }
 
