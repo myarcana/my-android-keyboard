@@ -754,8 +754,8 @@ device reached, to the sample.
 | rise | 0.70 key heights, upward only, character keys only |
 | contents | carried up bodily; both glyphs, at their resting sizes |
 | colour | `keyPressed`, taken and given back with the rise |
-| going up | no ramp — full height on the frame the touch lands |
-| coming down | the flick's own 40 ms settle, body and glyphs on one clock |
+| timing | instant both ways — the rise is never eased, in or out |
+| still on a clock | only a released flick's glyphs, at the same 40 ms as before |
 | haptic | `KEYBOARD_TAP`, at the commit, following the system touch-feedback setting |
 
 **The key becomes the popup rather than getting one.** This is FUTO's answer and it is better than
@@ -779,12 +779,17 @@ key's outline rather than to the stretched body, so the letter still leaves thro
 of the key's own shape and the stem stays clear. That the flick animation now happens in the raised
 part of a pressed key took no code at all -- it is what carrying the contents up already means.
 
-**Up with no ramp, down on the flick's clock.** A tap can be over in forty milliseconds, so a key
-that grew over any duration at all would still be growing when the finger had gone: it is at full
-height on the frame the touch lands. The way back is the flick's own 40 ms settle, and the two run
-as one `KeyMotion` on one clock at one rate -- a finger lifted mid-flick leaves a key that is both
-standing up and part-way pulled, and settling them separately would bring the body home before its
-contents.
+**The rise is not a movement; it is a shape.** It is what a key looks like while a finger is on
+it, and a finger arrives and leaves at a definite moment -- so the change is instant in both
+directions and never eased. Easing it would have the renderer inventing a state the hand is not in,
+and on the way up it would lose the race outright: a tap can be over in forty milliseconds, and a
+key still growing when the finger has gone has shown nothing at all.
+
+The only thing left on a clock is a released flick's glyphs finding their slot, which is unchanged
+and still 40 ms. Both live in one `KeyMotion` because they are one finger's effect on one key, but
+`press` is a fact -- 0 or 1, never anything between -- and only `pull` is ever interpolated. A key
+let go mid-flick is therefore down on the next frame with its symbol still sliding home inside it,
+which is what the flick did before any of this was added.
 
 **Character keys only.** The space bar has nothing to lift, and shift or backspace would be raising
 an icon over nothing. They tint, as they always did.

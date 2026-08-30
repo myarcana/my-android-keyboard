@@ -111,6 +111,11 @@ private const val FLICK_SETTLE_MS = 40f
  * bottom of the same object it is reading the top of. 0.70 lifts the contents a little over half
  * a key above where they sit at rest, which clears a fingertip without reaching the row above's
  * own glyphs.
+ *
+ * The change is instant in both directions, never eased. The rise is not a movement the key makes
+ * -- it is the shape a key has while a finger is on it, and the finger arrives and leaves at a
+ * definite moment. Growing into it would also lose the race on every fast tap: a tap can be over
+ * in forty milliseconds, and a key still on its way up when the finger has gone has shown nothing.
  */
 private const val PRESS_LIFT = 0.70f
 
@@ -565,11 +570,13 @@ class KeyboardView @JvmOverloads constructor(
      * What a finger is doing to one key: how far it has raised it, how far it has pulled its
      * glyphs, and whether it is still there.
      *
-     * The two live together because they end together. A lifted finger leaves a key that is both
-     * standing up and part-way through a flick, and settling them on one clock at one rate is
-     * what makes the key come home as a single object rather than as a body and its contents.
+     * The two live together because they are one finger's effect on one key, and because a lifted
+     * finger ends both at once. Neither is eased: [press] is a fact about whether a finger is on
+     * the key, and [pull] is a distance the thumb has dragged. The only thing on a clock here is
+     * a released [pull] finding its way home, and it takes the entry's lifetime with it.
      */
     private class KeyMotion {
+        /** 1 while a finger is on the key, 0 otherwise. Never anything in between. */
         var press = 0f
         var pull = 0f
 
@@ -608,6 +615,10 @@ class KeyboardView @JvmOverloads constructor(
         motions.values.forEach {
             if (it.held) {
                 it.held = false
+                // The rise has no clock in either direction. A key is up because a finger is on
+                // it, so it comes down when that stops being true and not a moment afterwards --
+                // easing it down would be the renderer inventing a state the hand is not in.
+                it.press = 0f
                 changed = true
             }
         }
@@ -620,8 +631,6 @@ class KeyboardView @JvmOverloads constructor(
             val motion = motions.getOrPut(rect.key.id) { KeyMotion() }
             val pull = fsm.flickProgress
             if (motion.pull != pull || motion.press != 1f || !motion.held) changed = true
-            // No ramp on the way up. A tap can be over in forty milliseconds, so a key that grew
-            // over any duration at all would still be growing when the finger had gone.
             motion.press = 1f
             motion.pull = pull
             motion.held = true
@@ -630,14 +639,18 @@ class KeyboardView @JvmOverloads constructor(
     }
 
     /**
-     * Settles every released key one frame further home, and asks for another frame while any is
-     * still moving. Keys under a finger are skipped: [syncPressAnimations] is already placing
-     * those, and a touch event repaints them.
+     * Settles every released key's glyphs one frame further home, and asks for another frame while
+     * any is still moving. Keys under a finger are skipped: [syncPressAnimations] is already
+     * placing those, and a touch event repaints them.
      *
-     * Exponential rather than a fixed-duration tween because a key can be let go from anywhere --
-     * fully raised and fully pulled, or a tenth of the way down after a change of mind -- and the
-     * return should take its length from how far there is to go. It also cannot overshoot: an
-     * iPadOS key slides back, it does not bounce.
+     * Only the flick's pull is here. The rise is not animated at all, so a key that was let go
+     * is already down by the time this runs, and what is left settling is the symbol finding its
+     * slot inside it.
+     *
+     * Exponential rather than a fixed-duration tween because a flick can be let go from anywhere
+     * -- fully pulled, or a tenth of the way down after a change of mind -- and the return should
+     * take its length from how far there is to go. It also cannot overshoot: an iPadOS key slides
+     * back, it does not bounce.
      */
     private fun advanceMotions() {
         if (motions.isEmpty()) return
@@ -655,13 +668,11 @@ class KeyboardView @JvmOverloads constructor(
         while (entries.hasNext()) {
             val motion = entries.next().value
             if (motion.held) continue
-            motion.press -= motion.press * step
             motion.pull -= motion.pull * step
             // An exponential only ever approaches zero, so it is landed by hand -- otherwise a key
             // at rest would keep asking for frames forever.
-            if (motion.press < 0.004f) motion.press = 0f
             if (motion.pull < 0.004f) motion.pull = 0f
-            if (motion.press == 0f && motion.pull == 0f) entries.remove() else settling = true
+            if (motion.pull == 0f) entries.remove() else settling = true
         }
 
         if (settling) postInvalidateOnAnimation() else lastFrameNanos = 0L
