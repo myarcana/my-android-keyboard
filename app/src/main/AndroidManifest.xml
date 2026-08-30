@@ -21,22 +21,13 @@
         android:label="@string/app_name"
         android:supportsRtl="true">
 
-        <!-- Development scratch pad: gives a focusable text field to test the keyboard against. -->
-        <activity
-            android:name=".TestPadActivity"
-            android:exported="true"
-            android:label="@string/testpad_name"
-            android:windowSoftInputMode="stateVisible|adjustResize">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-        </activity>
-
         <!--
           Requirement 3/4 tuning rig: labelled gesture collection. See docs/GESTURE_BANK.md.
-          Its own launcher entry rather than a corner of the test pad, because a data-collection
-          session is a thing you sit down to do.
+
+          This is the app's only launcher entry, and it is inside this APK rather than beside it
+          because it has to be: the keyboard hands it each finished gesture through an
+          in-process singleton, and it reads the bank out of this app's own sandbox. The test
+          pad, which shares none of that, is its own app in :testpad.
         -->
         <activity
             android:name=".GestureLabActivity"

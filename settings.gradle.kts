@@ -15,3 +15,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "OfflineKeyboard"
 include(":app")
+include(":testpad")

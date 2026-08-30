@@ -3,6 +3,12 @@
 An Android IME that behaves like the iOS keyboard, supports English + Chinese
 (Traditional/Taiwan and Simplified/mainland), and never touches the network.
 
+Two apps come out of this repository. `:app` is the keyboard, and it carries the **Gesture
+Lab** -- the labelled-gesture collection rig, which lives inside the keyboard's APK because it
+reads gestures the IME hands it in-process and reads its bank out of the same sandbox
+(`docs/GESTURE_BANK.md`). `:testpad` is a scratch text field to type into while testing, and it
+is a separate app because it shares nothing with the keyboard but a developer.
+
 Full design and phase plan: `docs/PLAN.md`.
 How the granular cursor and selection work: `docs/CURSOR_AND_SELECTION.md`.
 Environment gotchas: `NOTES.md`.
@@ -15,7 +21,8 @@ can leave the device even in principle.
 
 The `checkDebugHasNoInternet` / `checkReleaseHasNoInternet` Gradle tasks parse the *merged*
 manifest and fail the build if the permission ever appears, including via a transitive
-dependency. They run automatically as part of `assemble`.
+dependency. They run automatically as part of `assemble`, in **both** modules -- the test pad is
+something typed into, so it gets the same guarantee.
 
 Verify independently at any time:
 
@@ -65,7 +72,10 @@ the app will not compile without its Kotlin binding.
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
 ./gradlew assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+adb install -r testpad/build/outputs/apk/debug/testpad-debug.apk   # optional: the scratch pad
 ```
+
+or `tools/deploy.sh`, which does both and screenshots the result.
 
 Then enable "Offline Keyboard" in Settings → System → Languages & input → On-screen keyboards.
 

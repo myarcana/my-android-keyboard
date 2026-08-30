@@ -1,4 +1,4 @@
-package com.offlinekeyboard.ime
+package com.offlinekeyboard.testpad
 
 import android.app.Activity
 import android.graphics.Color
@@ -16,6 +16,10 @@ import androidx.core.view.WindowInsetsCompat
  *
  * Multi-line and pre-filled on purpose: the spacebar trackpad has to move the cursor up and
  * down across real wrapped lines, which needs more than a single empty row to test against.
+ *
+ * Its own app, because it shares nothing with the keyboard but a developer -- no code, no
+ * process, no files. Any focusable field would do; this one differs only in that its contents
+ * were chosen to make the cursor work hard.
  */
 class TestPadActivity : Activity() {
 

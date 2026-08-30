@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Build, install, select the keyboard, open the test pad, and screenshot it.
+# Build, install both apps, select the keyboard, open the test pad, and screenshot it.
 #
 # Encodes the sequence that is easy to get wrong by hand: never force-stop the package (the
 # system falls back to another keyboard), always re-select the IME after installing, and take
@@ -30,13 +30,16 @@ fi
 $ADB shell input keyevent KEYCODE_WAKEUP >/dev/null 2>&1 || true
 $ADB shell wm dismiss-keyguard >/dev/null 2>&1 || true   # this phone has no PIN
 
+# Two apps now: the keyboard, and the pad it is typed into. The pad shares no code with the
+# keyboard and is installed separately, which is also what makes the -S below safe -- it
+# force-stops the pad's package rather than the keyboard's, so the IME selection survives it.
 $ADB install -r app/build/outputs/apk/debug/app-debug.apk >/dev/null
-# -S forces a fresh activity instance. Without it am start merely resumes the existing one,
-# so onCreate never runs and the pad keeps whatever text and caret position it had.
-# It force-stops the package, so re-select the IME afterwards.
-$ADB shell am start -S -n com.offlinekeyboard.ime/.TestPadActivity >/dev/null
+$ADB install -r testpad/build/outputs/apk/debug/testpad-debug.apk >/dev/null
 $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
 $ADB shell ime set "$IME" >/dev/null
+# -S forces a fresh activity instance. Without it am start merely resumes the existing one,
+# so onCreate never runs and the pad keeps whatever text and caret position it had.
+$ADB shell am start -S -n com.offlinekeyboard.testpad/.TestPadActivity >/dev/null
 
 sleep 1.5   # let the window animation settle before capturing
 $ADB exec-out screencap -p > "$SHOT"
