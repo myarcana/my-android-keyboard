@@ -5,6 +5,7 @@ import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 import com.offlinekeyboard.ime.layout.Metrics
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -142,6 +143,24 @@ class GestureCaptureTest {
         )
         val decoded = GestureRecordCodec.decode(GestureRecordCodec.encode(original))
         assertEquals(original, decoded)
+    }
+
+    /**
+     * A withdrawn label has to survive the file, and so does the absence of one. A reader that
+     * turned a missing `void` into an empty string would quietly withdraw the entire bank, and a
+     * writer that emitted one on every line would put the exception on 286 lines that are fine.
+     */
+    @Test
+    fun `a withdrawal survives the round trip, and its absence stays an absence`() {
+        val path = listOf(PathPoint(100f, 200f, 0), PathPoint(101f, 418f, 550))
+        val evidence = record("d", path)
+        assertNull(evidence.voidReason)
+        assertFalse(GestureRecordCodec.encode(evidence).contains("void"))
+        assertNull(GestureRecordCodec.decode(GestureRecordCodec.encode(evidence))!!.voidReason)
+
+        val withdrawn = evidence.copy(voidReason = "an abandoned flick, not the tap it claims")
+        val decoded = GestureRecordCodec.decode(GestureRecordCodec.encode(withdrawn))
+        assertEquals(withdrawn, decoded)
     }
 
     /**

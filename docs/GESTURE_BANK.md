@@ -105,6 +105,26 @@ underneath says what was read, what was typed, and whether the finger lifted on 
 Nothing is recorded outside the lab. The keyboard emits every completed gesture, but with no
 target armed they are dropped, so ordinary typing never reaches the file.
 
+### Withdrawing a label
+
+A gesture the keyboard read wrongly is evidence. A gesture whose *label* is untrue is not, and
+the two are easy to confuse because both show up as a mistake in the report.
+
+The second kind happens: the hand starts a flick on `d`, thinks better of it and comes back, and
+the passage was asking for a plain tap the whole time. Filed as a tap, that path is 218px of
+travel over 1.4 seconds wearing a label that says the finger did not move — and a sweep can only
+score it correctly by dragging the glide thresholds somewhere they should not go. One line like
+that is worth more than a hundred good ones, in the wrong direction.
+
+So such a line carries a `void` field saying why it is not evidence, and `analyse` sets it aside
+and prints it rather than scoring it. **The line stays in the file.** Deleting it would throw away
+a real recording of a real thing a hand did — the abandoned flick above is the only record in the
+bank of what abandoning one looks like — and a file that quietly loses its awkward lines is one
+nobody can audit afterwards.
+
+The lab's **Undo** button is the cheaper fix when the fumble is noticed as it happens: it drops
+the last sample and re-arms the same token, so the passage can simply be retyped.
+
 ## Glide typing, and the finger lift
 
 A glide is one continuous stroke in theory and very often is not in practice. A thumb crossing
@@ -168,7 +188,7 @@ One JSON object per line. Written and read by `gesture/GestureRecord.kt`, which 
 the JVM tests use, so the two ends cannot disagree.
 
 ```json
-{"v":2,"id":"892f902b","at":1756000004000,
+{"v":3,"id":"892f902b","at":1756000004000,
  "intent":"WORD","prompt":"glide:morning","expected":"morning","decoded":"morning",
  "startKey":"m","layout":"en_qwerty_lower",
  "widthPx":1080.0,"keyUnitPx":92.0,"keyHeightPx":120.0,
@@ -189,10 +209,18 @@ build had none — the number exists so a reader can tell which absences are rea
 can be refused. The bank is the one thing here that must never be invalidated by a change to the
 code that reads it.
 
+Version 3 is the one that matters in the other direction. A missing `void` means the same thing
+at every version — the sample is evidence — so reading an old line is never ambiguous. The number
+is there for a reader going the other way: anything that scores a v3 bank without honouring
+`void` will silently count samples whose labels were withdrawn, and the version is the only
+warning it gets.
+
 Four fields are worth defending:
 
 - **`intent`** is the label, and the only thing in the record that cannot be recomputed. It is
   what makes the file worth keeping.
+- **`void`**, when present, withdraws that label: the path is real but it is not an example of
+  what `intent` says, so `analyse` sets it aside. Present only on the rare line that needs it.
 - **`thresholds`** is what was live at the time. Without it, `verdict` would say what some
   unknown build once thought, which is worse than saying nothing. With it, a record made under
   one set of thresholds is still honest evidence after they move.

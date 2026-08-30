@@ -31,9 +31,18 @@ class GestureBankReplayTest {
             return
         }
 
-        val records = GestureReplay.load(file)
-        if (records.isEmpty()) {
+        val all = GestureReplay.load(file)
+        if (all.isEmpty()) {
             println("\nGesture bank at $file is empty.\n")
+            return
+        }
+
+        // A withdrawn sample keeps its line in the file but is not evidence of its label, so it
+        // is set aside here instead of scored. Listed rather than dropped in silence: a report
+        // that quietly measures fewer gestures than the file holds is one nobody can check.
+        val (withdrawn, records) = all.partition { it.voidReason != null }
+        if (records.isEmpty()) {
+            println("\nEvery line in $file has been withdrawn. Nothing to score.\n")
             return
         }
 
@@ -45,6 +54,10 @@ class GestureBankReplayTest {
         println("  keys: " + records.groupingBy { it.trace.startKeyId }.eachCount()
             .toList().sortedByDescending { it.second }
             .joinToString(" ") { "${it.first}=${it.second}" })
+        if (withdrawn.isNotEmpty()) {
+            println("  ${withdrawn.size} withdrawn, kept in the file but not scored:")
+            withdrawn.forEach { println("    ${it.id}  ${it.promptId}  ${it.voidReason}") }
+        }
 
         // Checked here but asserted at the very end: if the harness has drifted, the report
         // below is the thing that shows how, and aborting before printing it would hide that.

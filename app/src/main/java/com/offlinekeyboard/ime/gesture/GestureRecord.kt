@@ -101,6 +101,21 @@ data class GestureRecord(
      * file that can be counted.
      */
     val decoded: String? = null,
+    /**
+     * Why this sample is not evidence of the label it carries, or null when it is.
+     *
+     * Not the same thing as a gesture the keyboard read *wrongly*. Those are the most valuable
+     * lines in the bank and they stay in the scoring. This is for a sample whose **label** is
+     * untrue: a flick the hand abandoned halfway and turned back from, a swipe made while the
+     * passage was asking for a plain tap. Left in a sweep such a line does active harm, because
+     * the only way to score it correctly is to move a threshold somewhere it should not go.
+     *
+     * The line itself stays. Deleting it would throw away a real recording of a real thing a
+     * hand did -- the abandoned flick is the only evidence in the bank of what abandoning one
+     * looks like -- and a file that quietly loses its awkward lines is one nobody can audit. So
+     * the path is kept and only the claim about it is withdrawn.
+     */
+    val voidReason: String? = null,
 ) {
     val path get() = trace.path
 
@@ -160,23 +175,35 @@ object GestureRecordCodec {
 
     /**
      * 2 added the two glide-resume thresholds and the stroke boundaries within a path.
+     * 3 added [GestureRecord.voidReason].
      *
      * Version 1 lines still read: they were recorded before a glide could be interrupted at all,
      * so a missing `strokes` genuinely means one stroke, and a missing resume threshold genuinely
      * means the build had none. Bumping the number is not about refusing old data -- the bank is
      * the one thing here that must never be invalidated by a change to the code that reads it --
      * it is so that a reader can tell which absences are real.
+     *
+     * 3 is the one version that matters in the other direction. A missing `void` means the same
+     * thing at every version -- the sample is evidence -- so nothing is ambiguous about reading
+     * an old line. What the number is for is a reader going the other way: something that scores
+     * a v3 bank without honouring `void` will quietly count samples that were withdrawn, and the
+     * version is the only warning it gets.
      */
-    const val SCHEMA = 2
+    const val SCHEMA = 3
 
     fun encode(record: GestureRecord): String {
         val t0 = record.path.firstOrNull()?.t ?: 0L
+        val fields = linkedMapOf<String, Any?>(
+            "v" to SCHEMA,
+            "id" to record.id,
+            "at" to record.at,
+            "intent" to record.intent,
+        )
+        // Written only when there is one, and next to the label it withdraws. A sample that is
+        // evidence should not have to say so on every line, and almost every line is evidence.
+        record.voidReason?.let { fields["void"] = it }
         return Json.write(
-            linkedMapOf(
-                "v" to SCHEMA,
-                "id" to record.id,
-                "at" to record.at,
-                "intent" to record.intent,
+            fields + linkedMapOf(
                 "prompt" to record.promptId,
                 "expected" to record.expected,
                 "decoded" to record.decoded,
@@ -222,6 +249,7 @@ object GestureRecordCodec {
             promptId = o["prompt"] as String,
             expected = o["expected"] as String,
             decoded = o["decoded"] as? String,
+            voidReason = o["void"] as? String,
             trace = GestureTrace(
                 startKeyId = o["startKey"] as String,
                 verdict = GestureVerdict.valueOf(o["verdict"] as String),
