@@ -42,6 +42,10 @@ data class GestureThresholds(
     val verticalDominance: Float,
     val glideDistanceRatio: Float,
     val flickToGlideRatio: Float,
+    /** How long a mid-glide lift may last. See [GestureConfig.glideResumeMs]. */
+    val glideResumeMs: Long = GestureConfig().glideResumeMs,
+    /** How far from the lift the finger may return. See [GestureConfig.glideResumeRadiusRatio]. */
+    val glideResumeRadiusRatio: Float = GestureConfig().glideResumeRadiusRatio,
 ) {
     companion object {
         fun of(config: GestureConfig) = GestureThresholds(
@@ -49,6 +53,8 @@ data class GestureThresholds(
             verticalDominance = config.verticalDominance,
             glideDistanceRatio = config.glideDistanceRatio,
             flickToGlideRatio = config.flickToGlideRatio,
+            glideResumeMs = config.glideResumeMs,
+            glideResumeRadiusRatio = config.glideResumeRadiusRatio,
         )
     }
 }
@@ -66,6 +72,16 @@ data class GestureTrace(
     val keyHeightPx: Float,
     val thresholds: GestureThresholds,
     val path: List<PathPoint>,
+    /**
+     * Indices into [path] at which a new stroke begins, so a glide that was interrupted by a
+     * lifted finger can be told from one that was not.
+     *
+     * This is the whole reason the leniency is recordable rather than only tunable by feel. The
+     * gap's length and how far the finger moved across it are both derivable from the samples on
+     * either side of each index, which means a bank collected under one resume window can be
+     * rescored under any other.
+     */
+    val strokeStarts: List<Int> = emptyList(),
 )
 
 /** A trace plus the label it was collected under. One line of the bank. */
@@ -76,6 +92,15 @@ data class GestureRecord(
     val promptId: String,
     val expected: String,
     val trace: GestureTrace,
+    /**
+     * The word the glide decoder produced for this path, or null when nothing decoded it.
+     *
+     * Stored because it is the answer, and the answer is not recoverable later: it depends on
+     * the lexicon and the weights that were live at the time, and both will change. Keeping it
+     * next to the path turns "the decoder got this wrong" from an impression into a line in a
+     * file that can be counted.
+     */
+    val decoded: String? = null,
 ) {
     val path get() = trace.path
 
@@ -94,6 +119,24 @@ data class GestureRecord(
 
     val durationMs: Long
         get() = (path.lastOrNull()?.t ?: 0L) - (path.firstOrNull()?.t ?: 0L)
+
+    /** One mid-glide finger lift: how long it lasted and how far the finger moved across it. */
+    data class Gap(val ms: Long, val px: Float)
+
+    /**
+     * Every lift in the middle of this gesture.
+     *
+     * Derived rather than stored, because both numbers come from the samples either side of a
+     * stroke boundary and storing them as well would be two ways to be wrong. This is what the
+     * resume window is scored against: a bank of these says how long a real skip lasts, and how
+     * far the thumb really travels while it is off the glass.
+     */
+    val gaps: List<Gap>
+        get() = trace.strokeStarts.mapNotNull { at ->
+            val before = path.getOrNull(at - 1) ?: return@mapNotNull null
+            val after = path.getOrNull(at) ?: return@mapNotNull null
+            Gap(after.t - before.t, hypot(after.x - before.x, after.y - before.y))
+        }
 
     /** The verdict the shipped heuristic reached, reduced to the question the bank asks. */
     val verdictIntent: GestureIntent?
@@ -115,7 +158,16 @@ data class GestureRecord(
  */
 object GestureRecordCodec {
 
-    const val SCHEMA = 1
+    /**
+     * 2 added the two glide-resume thresholds and the stroke boundaries within a path.
+     *
+     * Version 1 lines still read: they were recorded before a glide could be interrupted at all,
+     * so a missing `strokes` genuinely means one stroke, and a missing resume threshold genuinely
+     * means the build had none. Bumping the number is not about refusing old data -- the bank is
+     * the one thing here that must never be invalidated by a change to the code that reads it --
+     * it is so that a reader can tell which absences are real.
+     */
+    const val SCHEMA = 2
 
     fun encode(record: GestureRecord): String {
         val t0 = record.path.firstOrNull()?.t ?: 0L
@@ -127,6 +179,7 @@ object GestureRecordCodec {
                 "intent" to record.intent,
                 "prompt" to record.promptId,
                 "expected" to record.expected,
+                "decoded" to record.decoded,
                 "startKey" to record.trace.startKeyId,
                 "layout" to record.trace.layoutId,
                 "widthPx" to round1(record.trace.widthPx),
@@ -138,11 +191,14 @@ object GestureRecordCodec {
                     "verticalDominance" to record.trace.thresholds.verticalDominance,
                     "glideDistanceRatio" to record.trace.thresholds.glideDistanceRatio,
                     "flickToGlideRatio" to record.trace.thresholds.flickToGlideRatio,
+                    "glideResumeMs" to record.trace.thresholds.glideResumeMs,
+                    "glideResumeRadiusRatio" to record.trace.thresholds.glideResumeRadiusRatio,
                 ),
                 // [x, y, ms since the finger went down]
                 "path" to record.path.map {
                     listOf(round1(it.x), round1(it.y), (it.t - t0).toInt())
                 },
+                "strokes" to record.trace.strokeStarts,
             ),
         )
     }
@@ -157,12 +213,15 @@ object GestureRecordCodec {
         val path = (o["path"] as List<List<Any?>>).map {
             PathPoint(num(it[0]), num(it[1]), num(it[2]).toLong())
         }
+        @Suppress("UNCHECKED_CAST")
+        val strokes = (o["strokes"] as? List<Any?>)?.map { num(it).toInt() } ?: emptyList()
         GestureRecord(
             id = o["id"] as String,
             at = (o["at"] as Number).toLong(),
             intent = GestureIntent.valueOf(o["intent"] as String),
             promptId = o["prompt"] as String,
             expected = o["expected"] as String,
+            decoded = o["decoded"] as? String,
             trace = GestureTrace(
                 startKeyId = o["startKey"] as String,
                 verdict = GestureVerdict.valueOf(o["verdict"] as String),
@@ -175,8 +234,13 @@ object GestureRecordCodec {
                     verticalDominance = num(thresholds["verticalDominance"]),
                     glideDistanceRatio = num(thresholds["glideDistanceRatio"]),
                     flickToGlideRatio = num(thresholds["flickToGlideRatio"]),
+                    glideResumeMs = thresholds["glideResumeMs"]?.let { num(it).toLong() }
+                        ?: GestureConfig().glideResumeMs,
+                    glideResumeRadiusRatio = thresholds["glideResumeRadiusRatio"]?.let { num(it) }
+                        ?: GestureConfig().glideResumeRadiusRatio,
                 ),
                 path = path,
+                strokeStarts = strokes,
             ),
         )
     }.getOrNull()

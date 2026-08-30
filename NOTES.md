@@ -76,6 +76,113 @@ bank without them lets the sweep drive that threshold to zero unopposed. It did 
 recommending 12 pixels, under Android's own touch slop -- on 48 samples containing no ordinary
 keypress at all.
 
+### A gesture made to order is not the gesture
+
+The Gesture Lab used to print an instruction -- *"Swipe down on O to type 9"* -- wait, record, and
+move on. The labels were unimpeachable, because it asked before it recorded. The gestures were
+not.
+
+Reading an instruction, finding the named key and performing the named movement is a different
+motor task from typing. It is slower, more deliberate, and aimed at a key the eye has just
+located rather than one the thumb already knows. Every threshold fitted to those was fitted to
+somebody doing an exercise, and the keyboard will never see one of those again.
+
+The fix keeps the label and throws away the instruction: show a **passage** and let it be typed.
+The passage still says what each gesture is meant to be before it is made, so nothing about the
+ground truth changes -- but the eye reads ahead, the thumb moves without being told where, and
+the gestures come out at speed with typing's sloppiness in them.
+
+The two passage kinds answer different questions and neither could do the other's job. Collision
+streams -- `u u 7 um u 7 on 9 o` -- exist because the flick-versus-glide boundary lives on six
+keys and nowhere else, so prose would spend a hundred gestures to collect three useful ones.
+Prose exists because glide decoding is only half geometry: the other half is which words exist
+and how often they are written, and a passage of random words would measure the shape matching
+alone -- and flatter it, because random words sit further apart than real ones do.
+
+### A lifted finger is not a finished word
+
+A glide is one continuous stroke in theory and often is not in practice. A thumb crossing the
+keyboard skips, catches on a screen protector, or leaves the glass for a frame going over a ridge
+in it.
+
+The naive handling of that is much worse than a wrong word. The fragment already drawn gets
+decoded and **typed** -- into the field, while the finger is still travelling toward the rest of
+the word -- and then the remainder types a second word beside it. One skip produces two wrong
+words and a correction, for something the user never asked to be committed at all.
+
+So a lift suspends the glide rather than ending it, and nothing is shown while it is suspended.
+Not a preview, not a candidate: a word displayed and then replaced is the same flicker in a
+quieter costume.
+
+**The cost of that is 120ms of latency on every glided word**, paid by every word to protect the
+one in fifty that was interrupted, and it is worth stating rather than hiding. The alternative --
+type the word immediately, then delete and replace it if the finger comes back -- pays nothing on
+the common case and pays the actual failure on the rare one: the wrong word really does get
+committed, briefly, into a field that may have an undo stack or a listener watching it. A delay
+short enough to sit inside the time it takes to look at what you typed is the cheaper of the
+two.
+
+What decides whether the finger came back is mostly **distance**, not time. A thumb that skipped
+never meant to leave and returns within a key of where it went; a thumb starting the next word
+has *travelled*, to the first letter of something else. Duration is the cheap first test rather
+than the real one. The third condition is the one that is easy to leave out: a finger coming back
+down on backspace or the space bar has plainly finished the word however fast it got there, and
+reading that as a continuation would swallow the very keypress meant to correct it.
+
+Neither number can be derived -- how long a thumb is off the glass when it skips is a fact about
+a hand and a screen. So both are recorded with every gesture, along with the indices where the
+strokes join, and the whole bank can be rescored under any other pair. The defaults below are a
+starting point and are expected to move.
+
+### Two channels, and the second one asks the question backwards on purpose
+
+Comparing a glide to a candidate word by resampling both to 32 points and measuring point against
+point is the obvious method, and on its own it is remarkably weak. "how" and "house" leave the
+same key, sweep right and then far left, and cover nearly the same distance doing it; point for
+point they are equally good matches for each other's gesture, and "how" is the commoner word, so
+it wins. Measured over synthetic glides, that comparison alone got 61% of words right.
+
+The channel that fixes it asks about the word's keys rather than about the gesture's samples:
+*was the finger ever near `h`, and then near `o`, and then near `w`* -- a monotonic alignment,
+pinned at both ends. A glide of "house" has no answer to offer for `w`.
+
+Getting the direction wrong is subtle and costs everything. The first version asked whether the
+finger was always near *some* key of the candidate, which every word answers well, because a
+glide spends most of its time in the gaps between keys and there is always a key nearby. The
+correct word scored no better than a wrong one and frequently worse.
+
+The other thing that channel needs is a **finer grid than the comparison does**. At 32 samples a
+long word puts a quarter of a key width between neighbouring samples, so a finger that went
+straight over a key centre is still recorded as having missed it by that much -- uniformly, which
+made every long word look badly executed. Whole-path comparison is happy to be coarse because
+both sides are coarse in the same places; asking about one key is not.
+
+### Squaring is what lets a distance and a frequency be added
+
+The shortlist that feeds the second pass originally scored `-distance + frequency`, and duly
+filled its forty-eight places with the commonest words in English regardless of what had been
+drawn. A linear cost lets frequency buy an unbounded amount of sloppiness. Squared over a
+tolerance, a word three key widths off pays nine times what a word one key width off pays, which
+no realistic frequency can make up.
+
+The same form is used in both passes for a second reason: the cheap pass only has to keep the
+right word *somewhere* in its top few dozen, and a shortlist scored on different terms from the
+final ranking will discard words the final ranking would have liked.
+
+### A short word hides inside a long gesture
+
+"jd" fits comfortably along the first third of a glide of "keyboard", and every distance measure
+that does not know the gesture kept going scores it on that third alone. The cheap fix is the
+ratio of travelled length to the length the word asks for, as a log so that half and double cost
+the same.
+
+The expensive version of the same problem is in the lexicon rather than the decoder. Both the
+crawl and web2 are full of three-letter entries nobody writes -- "wud", "hie", "ait", "phe",
+"tk", "nr" -- and each one does not merely compete with the intended word, it *beats* it, because
+the gesture passes through everything it asks for and then keeps going. A short word now has to
+earn its place much harder than a long one: two letters must be in the crawl's first 2,500, three
+in the first 10,000.
+
 ### Where a row ends can only be learned by watching it wrap
 
 Nothing tells you where a soft wrap falls. `editorBoundsInfo` is not published by every editor,
@@ -94,6 +201,41 @@ so arriving on another row simply has nothing learned yet.
 
 The wrap that teaches it is also undone immediately with a single step back, rather than left
 for the vertical correction to drag the caret to the row's start and walk it out again.
+
+### Measure the overlap; do not ask the host where the navigation bar is
+
+From targetSdk 35 the IME window is laid out edge to edge, so the keyboard has to reserve the
+navigation bar's space itself. The obvious source for the size of it is the inset dispatched to
+the input view -- and it is wrong often enough to matter: Firefox's address bar leaves the
+window running to the bottom of the display while reporting a navigation-bar inset of zero, so
+the bottom key row rendered underneath the back and home buttons in the browser and nowhere
+else. A keyboard that is only as correct as the app it happens to be typing into is not correct.
+
+So `KeyboardView` measures the overlap instead of being told it: how far its own bottom edge
+reaches past the top of the navigation bar, from `maximumWindowMetrics` and
+`getLocationOnScreen`. Nothing about the host enters into it.
+
+Feeding a measurement back into layout usually oscillates. It does not here, and the reason is
+worth keeping: the IME window is anchored to the bottom of the display, so making it taller
+moves its top edge and never its bottom. The quantity being measured is therefore not a function
+of the reserve it produces, and the second layout pass agrees with the first. It is the same
+shape of argument as *prefer a stateless constraint to a stateful correction*, above.
+
+### The return key is not a character
+
+Return carries `"\n"` as its primary in the layout, but committing that string is nearly always
+the wrong thing. An address bar, a search field and a chat composer each declare an *editor
+action* -- Go, Search, Send -- and nothing happens until `performEditorAction` fires it; text
+that merely appears in the field is ignored. A text box inside a web page has no editor action
+at all, and submits its form because a key went *down*, so it wants a real `KEYCODE_ENTER`
+rather than either of the other two.
+
+That is three behaviours from one key, and only the field can say which. So the FSM stops
+calling return a character key and hands the service a `SpecialKey`, and `ReturnKey.actionFor`
+turns the field's `imeOptions` into an action or into nothing. `IME_FLAG_NO_ENTER_ACTION` is the
+case that is easy to miss: a multi-line field declares an action so the key can be *labelled*
+with it while still wanting the line break, and ignoring the flag turns every paragraph break in
+a message app into a sent message.
 
 ### Never act on a stale reading more than once
 
@@ -277,6 +419,85 @@ the lexicon at decode time rather than another number.
 Note that the harness check cannot tell an intentional change from drift. The long-press fix made
 one recorded ACCENT replay as GLIDE, which is the fix working; a threshold moving under your feet
 would look identical in that report. Read the disagreements, do not just count them.
+
+### Glide typing -- `glide/GlideConfig`, `gesture/GestureConfig`
+
+Decoding is two passes: every word in the bucket scored by a cheap point-for-point comparison,
+then the best forty-eight aligned to their own keys properly. Both passes score
+`-cost^2 / 2 tolerance^2 + frequency`, and the cost is a weighted sum of channels measured in key
+widths.
+
+| parameter | value | what it is |
+|---|---|---|
+| `samples` | 32 | points both paths are resampled to for the whole-path comparison |
+| `visitSamples` | 128 | finer grid for the per-key test; see above for why it must be finer |
+| `endpointRadiusRatio` | 1.15 | how far a word's first/last key may sit from the gesture's ends |
+| `shortlist` | 48 | words the cheap pass hands to the expensive one |
+| `locationWeight` | 1.0 | whole-path distance, the reference weight |
+| `visitWeight` | 1.2 | how close the finger came to each key, in order |
+| `shapeWeight` | 0.3 | the same paths with position and size normalised away |
+| `lengthWeight` | 2.5 | log ratio of travelled length to the word's own length |
+| `toleranceRatio` | 1.0 | error, in key widths, at which a match stops counting |
+| `frequencyWeight` | 1.8 | what one decade of word frequency is worth |
+
+**Only the ratio of the last two matters**, so the tolerance is pinned at one key width and the
+frequency weight is the dial. Swept over synthetic glides the whole region from 1.2 to 2.5 scores
+within noise of itself: the value above is the middle of a plateau, not a peak.
+
+Measured over 38 words x 3 seeds, straight through the key centres and then with progressively
+worse hands:
+
+| | first choice | offered in five |
+|---|---|---|
+| straight through the centres | 97% | 100% |
+| a steady hand (0.18 key jitter, corners cut 18%) | 92% | 100% |
+| an ordinary thumb (0.28, 30%) | 85% | 100% |
+| a hurried thumb (0.40, 45%) | 57% | 88% |
+
+**These are drawn glides, not recorded ones, and the difference matters.** They are the reason
+the decoder can be changed without flashing a build, and they will fail loudly if a change breaks
+a class of words -- but a synthetic thumb wobbles the way its author imagined a thumb wobbles.
+The numbers that will actually set these weights come from prose passages in the Gesture Lab, the
+same way the flick thresholds came from the collision drills.
+
+Decoding takes **0.23 ms** per word over 40,000 words on a laptop JVM, which is what makes it
+affordable at the lift rather than on a background thread with a result to reconcile afterwards.
+
+### The lexicon -- `assets/lexicon_en.tsv`
+
+40,000 words, 500 KB, generated by `tools/build_lexicon.py` from Norvig's `count_1w.txt` (the
+ranking) and macOS's web2 (the "is this a word at all" test). Committed, not fetched: the app has
+no INTERNET permission and could not download it if it wanted to.
+
+Four rules do the work, and each one was a bug first:
+
+- **The dictionary check applies only past rank 15,000.** The head of the crawl is where the
+  modern vocabulary lives -- "blog", "iphone", "website" are all absent from web2 -- and the tail
+  is where the typos and product codes live. One rule for both either admits the junk or rejects
+  the vocabulary.
+- **Inflections count as known if their stem is.** web2 lists headwords, so it has "peep" and
+  "message" but not "peeped" or "messaged", and an inflected form is exactly what a phone types.
+- **Short words need a much better rank**, for the reason above: their shapes are subsets rather
+  than rivals.
+- **Contractions are scored from their bare form, but only when the bare form is not a word.**
+  "we'll" strips to "well", and taking that count scored the contraction as if every use of
+  "well" were one -- which tied them exactly, competing for a shape only one of them can win. The
+  rest are floored at a fixed share of their leading word, because "theyve" is written by almost
+  nobody while "they've" is written constantly. Where the two spellings share a shape and the
+  contraction is the commoner one -- "it's", "I'll", "I'd", "let's" -- an explicit list says so.
+
+### The finger-lift window -- `gesture/GestureConfig`
+
+| parameter | value | why |
+|---|---|---|
+| `glideResumeMs` | 120 | long enough for a skip, short enough that a deliberate reach beats it |
+| `glideResumeRadiusRatio` | 1.25 x key width | a finger that skipped comes back where it left |
+
+Both are placeholders with a mechanism behind them rather than measurements. They are recorded
+with every gesture, the stroke boundaries are recorded in the path, and `tools/gestures.sh
+analyse` prints what the lifts actually looked like -- duration and distance, min to max, against
+the window -- plus the statistic that decides whether the leniency is helping at all: how well
+rejoined glides decode compared with uninterrupted ones.
 
 ### Trackpad gain and acceleration
 

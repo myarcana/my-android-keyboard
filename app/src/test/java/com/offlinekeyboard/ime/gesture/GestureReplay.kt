@@ -35,12 +35,13 @@ object GestureReplay {
         val fsm = TouchFsm(geometry, config)
         val path = record.path
         val down = path.firstOrNull() ?: return null
+        val boundaries = record.trace.strokeStarts.toSet()
 
         fsm.onDown(down.x, down.y, down.t)
         var longPressFired = false
-        val rest = path.drop(1)
 
-        rest.forEachIndexed { i, p ->
+        for (i in 1 until path.size) {
+            val p = path[i]
             // The host schedules the long-press callback off a clock; here it is inferred from
             // the timestamps, so a gesture that dwelled long enough opens accents in replay
             // exactly as it did on the phone.
@@ -48,24 +49,42 @@ object GestureReplay {
                 fsm.onLongPressTimeout(down.t + config.longPressMs)
                 longPressFired = true
             }
-            if (i < rest.size - 1) {
+            if (i in boundaries) {
+                // A recorded finger lift. Whether it ends the gesture is the question the resume
+                // thresholds answer, and it is asked here rather than assumed -- which is what
+                // makes a bank recorded under one resume window scorable under another.
+                val lifted = path[i - 1]
+                fsm.onUp(lifted.x, lifted.y, lifted.t)
+                if (fsm.canResume(p.x, p.y, p.t)) {
+                    fsm.onResume(p.x, p.y, p.t)
+                    continue
+                }
+                return verdictOf(fsm.onGlideResumeTimeout())
+            }
+            if (i < path.size - 1) {
                 fsm.onMove(p.x, p.y, p.t)
-                // GLIDE is a terminal state -- onMove has no transition out of it -- so once it
-                // is reached the remaining samples cannot change the answer. Skipping them turns
-                // a sweep from quadratic into linear, because every glide move copies the whole
-                // path so far for the trail overlay. `glide is terminal` in TouchFsmTest guards
-                // this shortcut.
-                if (fsm.state == GestureState.GLIDE) return GestureVerdict.GLIDE
+                // GLIDE cannot be left by moving, so once it is reached and there are no more
+                // lifts to come, the remaining samples cannot change the answer. Skipping them
+                // turns a sweep from quadratic into linear, because every glide move copies the
+                // whole path so far for the trail overlay. `glide is terminal` in
+                // GestureCaptureTest guards this shortcut.
+                if (fsm.state == GestureState.GLIDE && boundaries.none { it > i }) {
+                    return GestureVerdict.GLIDE
+                }
             }
         }
 
-        val last = rest.lastOrNull() ?: down
-        return fsm.onUp(last.x, last.y, last.t)
-            .filterIsInstance<GestureOutput.GestureCaptured>()
-            .firstOrNull()
-            ?.trace
-            ?.verdict
+        val last = path.last()
+        val out = fsm.onUp(last.x, last.y, last.t)
+        if (fsm.isSuspended) return verdictOf(fsm.onGlideResumeTimeout())
+        return verdictOf(out)
     }
+
+    private fun verdictOf(outputs: List<GestureOutput>): GestureVerdict? = outputs
+        .filterIsInstance<GestureOutput.GestureCaptured>()
+        .firstOrNull()
+        ?.trace
+        ?.verdict
 
     /** The intent a verdict amounts to, or null when the gesture typed none of the three. */
     fun intentOf(verdict: GestureVerdict?): GestureIntent? = when (verdict) {
@@ -117,8 +136,9 @@ object GestureReplay {
         /**
          * The mean of the per-label recalls, not plain accuracy.
          *
-         * A drill session is never evenly split -- the catalogue has more flicks in it than
-         * words, because more keys have a symbol than have a word hanging below them. Plain
+         * A session is never evenly split -- the collision passage has more flicks in it than
+         * words, because more keys have a symbol than have a word hanging below them, and prose
+         * is almost all glides. Plain
          * accuracy on that rewards a heuristic which simply favours whichever label is commoner.
          * Averaging the recalls makes every kind of mistake cost the same, which is the actual
          * requirement: "my symbol turned into a word", "my word turned into a symbol" and "my

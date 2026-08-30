@@ -50,7 +50,10 @@ lab)
     $ADB shell am start -S -n $PKG/.GestureLabActivity >/dev/null
     $ADB shell ime enable "$IME" >/dev/null 2>&1 || true
     $ADB shell ime set "$IME" >/dev/null
-    echo "Gesture Lab is open. Swipe as asked; every gesture is filed under what it asked for."
+    echo "Gesture Lab is open. Type the passage straight through; every gesture is filed"
+    echo "under the token it was aimed at. Passage cycles through the collision stream and"
+    echo "the prose ones -- prose is where glide typing and the finger-lift window get their"
+    echo "evidence."
 
     # Says up front whether the last session ever reached the repository, because the way this
     # data gets lost is a session that was recorded, enjoyed, and never pulled.
@@ -172,6 +175,38 @@ wrong = [r for r in rows
          or r["verdict"] not in ("FLICK", "GLIDE")]
 print()
 print(f"  {len(wrong)} of {len(rows)} were read wrongly by the build that recorded them")
+
+# The glide half. Decoding and the finger-lift window are only scorable once prose passages
+# have been typed, so this stays quiet until there is something to say.
+def letters(s):
+    return "".join(c for c in s.lower() if c.isalpha())
+
+glides = [r for r in rows if r["intent"] == "WORD"]
+decoded = [r for r in glides if r.get("decoded")]
+if decoded:
+    right = sum(1 for r in decoded if letters(r["decoded"]) == letters(r["expected"]))
+    print()
+    print(f"  {right} of {len(decoded)} glides decoded to the word asked for "
+          f"({100 * right // len(decoded)}%)")
+    for r in decoded:
+        if letters(r["decoded"]) != letters(r["expected"]):
+            print(f"    wanted {r['expected']:<12} typed {r['decoded']}")
+
+gaps = []
+for r in glides:
+    path = r["path"]
+    for at in r.get("strokes", []):
+        if 0 < at < len(path):
+            before, after = path[at - 1], path[at]
+            dx, dy = after[0] - before[0], after[1] - before[1]
+            gaps.append((after[2] - before[2], (dx * dx + dy * dy) ** 0.5))
+if gaps:
+    ms = sorted(g[0] for g in gaps)
+    px = sorted(g[1] for g in gaps)
+    print()
+    print(f"  {len(gaps)} mid-glide finger lifts were rejoined")
+    print(f"    duration ms  min {ms[0]}  median {ms[len(ms) // 2]}  max {ms[-1]}")
+    print(f"    distance px  min {px[0]:.0f}  median {px[len(px) // 2]:.0f}  max {px[-1]:.0f}")
 PY
     ;;
 

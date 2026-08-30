@@ -56,8 +56,13 @@ class GestureCaptureTest {
         assertEquals(config.flickDistanceRatio, trace.thresholds.flickDistanceRatio, 0.001f)
     }
 
+    /**
+     * A lifted glide is not a finished one, so the capture comes from the resume window closing
+     * rather than from the lift. Anything that recorded at the lift would be recording a
+     * fragment: the finger may still be coming back to finish the word.
+     */
     @Test
-    fun `a glide is captured as a glide`() {
+    fun `a glide is captured when its resume window closes`() {
         val q = key("q")
         val w = key("w")
         val e = key("e")
@@ -65,7 +70,8 @@ class GestureCaptureTest {
         f.onDown(q.centerX, q.centerY, 0)
         f.onMove(w.centerX, w.centerY, 30)
         f.onMove(e.centerX, e.centerY, 60)
-        val trace = f.onUp(e.centerX, e.centerY, 90).captured()
+        assertNull(f.onUp(e.centerX, e.centerY, 90).captured())
+        val trace = f.onGlideResumeTimeout().captured()
         assertEquals(GestureVerdict.GLIDE, trace!!.verdict)
     }
 
@@ -182,138 +188,5 @@ class GestureCaptureTest {
         assertEquals(90f, r.displacement, 0.01f)
         assertEquals(120L, r.durationMs)
         assertEquals(GestureIntent.WORD, r.verdictIntent)
-    }
-
-    // --- the drill catalogue ------------------------------------------------------------------
-
-    @Test
-    fun `every drill starts on a key that exists and can flick`() {
-        val ids = geometry.keyRects.associateBy { it.key.id }
-        com.offlinekeyboard.ime.capture.Drills.session(reps = 1).forEach { drill ->
-            val key = ids[drill.startKeyId]
-            assertNotNull("no key '${drill.startKeyId}' for drill ${drill.id}", key)
-            assertNotNull(
-                "key '${drill.startKeyId}' has no flick secondary, so ${drill.id} is impossible",
-                key!!.key.secondary,
-            )
-        }
-    }
-
-    @Test
-    fun `symbol drills ask for the secondary the key actually has`() {
-        val ids = geometry.keyRects.associateBy { it.key.id }
-        com.offlinekeyboard.ime.capture.Drills.session(reps = 1)
-            .filter { it.intent == GestureIntent.SYMBOL }
-            .forEach { drill ->
-                assertEquals(
-                    "drill ${drill.id} asks for the wrong symbol",
-                    ids[drill.startKeyId]!!.key.secondary,
-                    drill.expected,
-                )
-            }
-    }
-
-    /**
-     * The criterion that makes a word drill worth collecting: two letters, the second below the
-     * first. Both halves matter, and neither is obvious.
-     *
-     * *Two letters*, because that makes the whole glide a single stroke with no corner in it. A
-     * longer word gives itself away as soon as it changes direction: "was" leaves w heading down
-     * and half a key left, which looks exactly like a flick -- for about forty pixels, after
-     * which the path turns back rightward towards s and stops resembling one. Note that "was"
-     * passes the below-the-start test perfectly well, since s does sit below w. Only the corner
-     * rules it out, which is why counting the letters is the part that does the work.
-     *
-     * *Below*, because a flick only ever goes downward, so a word leaving sideways or upward was
-     * never in the running.
-     *
-     * This test exists because the first version of the catalogue got both halves wrong.
-     */
-    @Test
-    fun `word drills are two-key words that hang below their start key`() {
-        val ids = geometry.keyRects.associateBy { it.key.id }
-        val pitch = geometry.keyUnit + geometry.gap
-        com.offlinekeyboard.ime.capture.Drills.session(reps = 1)
-            .filter { it.intent == GestureIntent.WORD }
-            .forEach { drill ->
-                // Glide typing goes letter to letter; punctuation such as the apostrophe in
-                // "I'm" is filled in afterwards and is never part of the path.
-                val letters = drill.expected.lowercase().filter { it.isLetter() }
-                assertEquals(
-                    "${drill.id}: '${drill.expected}' is ${letters.length} keys, so its glide has " +
-                        "a corner in it and stops looking like a flick",
-                    2,
-                    letters.length,
-                )
-                val start = ids[drill.startKeyId]!!
-                val end = ids[letters.last().toString()]
-                assertNotNull("no key '${letters.last()}' for drill ${drill.id}", end)
-                assertTrue(
-                    "${drill.id}: '${drill.expected}' ends on '${letters.last()}', which is not " +
-                        "below '${drill.startKeyId}'",
-                    end!!.centerY - start.centerY >= geometry.keyHeight,
-                )
-                assertTrue(
-                    "${drill.id}: '${drill.expected}' ends %.1f keys sideways -- too far across "
-                        .format(kotlin.math.abs(end.centerX - start.centerX) / pitch) +
-                        "to be mistaken for a swipe down",
-                    kotlin.math.abs(end.centerX - start.centerX) <= 1.6f * pitch,
-                )
-            }
-    }
-
-    /** Word drills exist to collide with the flick, so they must start on the flick's key. */
-    @Test
-    fun `word drills spell words that start on the drill key`() {
-        com.offlinekeyboard.ime.capture.Drills.session(reps = 1)
-            .filter { it.intent == GestureIntent.WORD }
-            .forEach { drill ->
-                assertEquals(
-                    "drill ${drill.id} spells a word that does not start on its key",
-                    drill.startKeyId,
-                    drill.expected.first().lowercase(),
-                )
-            }
-    }
-
-    /**
-     * The anti-rhythm property. Two drills of the same kind back to back on the same key would
-     * be sampling a habit rather than a gesture.
-     */
-    @Test
-    fun `a session never asks for the same kind twice in a row on one key`() {
-        com.offlinekeyboard.ime.capture.Drills.session(reps = 3)
-            .windowed(2)
-            .forEach { (a, b) ->
-                if (a.startKeyId == b.startKeyId) {
-                    assertTrue(
-                        "two ${a.intent} drills in a row on ${a.startKeyId}",
-                        a.intent != b.intent,
-                    )
-                }
-            }
-    }
-
-    /**
-     * Without taps in the bank, nothing at all penalises a sweep for lowering the flick
-     * threshold, so it lowers it until sloppy taps start flicking. Every key that gets flick
-     * drills needs tap drills too, on that same key.
-     */
-    @Test
-    fun `keys drilled as taps are also drilled as flicks`() {
-        val session = com.offlinekeyboard.ime.capture.Drills.session(reps = 1)
-        val tapped = session.filter { it.intent == GestureIntent.LETTER }.map { it.startKeyId }.toSet()
-        val flicked = session.filter { it.intent == GestureIntent.SYMBOL }.map { it.startKeyId }.toSet()
-        assertTrue("no tap drills at all -- the flick threshold has no floor", tapped.isNotEmpty())
-        assertTrue(
-            "tap drills on keys that are never flicked: ${tapped - flicked}",
-            (tapped - flicked).isEmpty(),
-        )
-    }
-
-    @Test
-    fun `every kind of label is represented in a session`() {
-        val kinds = com.offlinekeyboard.ime.capture.Drills.session(reps = 1).map { it.intent }.toSet()
-        assertEquals(GestureIntent.entries.toSet(), kinds)
     }
 }

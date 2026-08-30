@@ -62,8 +62,8 @@ sample it can see is improved by doing so.
 
 The first collected session had exactly this hole, and the sweep duly recommended more than
 halving the threshold — down to 12 pixels, below Android's own touch slop — on the strength of
-evidence that contained not one ordinary keypress. Every key that gets flick drills now gets tap
-drills on that same key, in the same minute of the same hand, and a test enforces it.
+evidence that contained not one ordinary keypress. Every key that gets flick tokens now gets tap
+tokens on that same key, in the same minute of the same hand, and a test enforces it.
 
 ## Collecting
 
@@ -71,16 +71,69 @@ drills on that same key, in the same minute of the same hand, and a test enforce
 tools/gestures.sh lab      # build, install, open the lab with our keyboard selected
 ```
 
-The lab asks for one gesture at a time and alternates symbol and word within a key. It alternates
-on purpose: eight flicks in a row are not eight samples of a flick, they are one sample of a
-rhythm the hand falls into, and a heuristic tuned on that works only for people doing drills.
+The lab shows a passage and you type it. Every gesture is filed under the token it was aimed at,
+so the label is still asked for before the gesture is made — which was always the point — but the
+gesture itself is now made the way gestures are actually made.
+
+**This replaced asking one at a time, and the reason is worth stating.** The first lab printed an
+instruction — *"Swipe down on O to type 9"* — waited, recorded, and moved on. The labels were
+unimpeachable. The gestures were not: reading an instruction, finding the named key and
+performing the named movement is a different motor task from typing, and it produces a different
+movement. Slower, more deliberate, aimed at a key the eye has just located rather than one the
+thumb already knows. Thresholds fitted to those are thresholds fitted to somebody doing an
+exercise, and the keyboard will never see one again.
+
+A passage restores the missing thing, which is flow. The eye reads ahead, the thumb moves without
+being told where, and the gestures arrive at typing speed with typing's sloppiness in them.
+
+Two kinds of passage, for two different questions:
+
+- **Collisions** are token streams — `u u 7 um u 7 on 9 o` — because the flick-versus-glide
+  boundary lives on a handful of keys and nowhere else. Prose would spend a hundred gestures to
+  collect three useful ones. Every token here is on the boundary, and the three kinds still
+  alternate within a key: eight flicks in a row are not eight samples of a flick, they are one
+  sample of a rhythm the hand falls into.
+- **Prose** is real English, because glide decoding is only half geometry. The other half is
+  which words exist and how often they are written, and a decoder is only as good as the word
+  distribution it is scored against. Random words would measure the shape matching alone — and
+  would flatter it, because random words sit further apart than real ones do.
 
 Every attempt is kept, including the ones the keyboard reads wrongly — those are the most useful
-samples in the file. The lab shows what the current build decided, so it is obvious in the moment
-when you are on the boundary.
+samples in the file. The passage colours each token by what the keyboard made of it, and the line
+underneath says what was read, what was typed, and whether the finger lifted on the way.
 
 Nothing is recorded outside the lab. The keyboard emits every completed gesture, but with no
-drill armed they are dropped, so ordinary typing never reaches the file.
+target armed they are dropped, so ordinary typing never reaches the file.
+
+## Glide typing, and the finger lift
+
+A glide is one continuous stroke in theory and very often is not in practice. A thumb crossing
+the width of the keyboard skips, catches on a screen protector, or leaves the glass for a frame
+or two going over a ridge in it.
+
+Handled naively, each of those ends the word early: the fragment already drawn is decoded and
+**typed**, into the field, while the finger is still travelling toward the rest of the word — and
+then the remainder of the gesture types a second word beside it. One skip produces two wrong
+words and a correction, which is a far worse failure than a misdecoded word, because the user
+never asked for anything to be committed at all.
+
+So a lift does not finish a glide. It suspends it: `GLIDE_LIFTED`, a window of
+`glideResumeMs`, and either the finger comes back — within `glideResumeRadiusRatio` of where it
+left, onto a letter key — or the window closes and the word is typed. Nothing is shown and
+nothing is committed in between, because a word displayed and then replaced is exactly the
+flicker the window exists to prevent.
+
+The opposite mistake is just as real: two words deliberately glided in succession must not run
+together into one. What separates the cases is mostly the distance — a finger that skipped never
+meant to leave and comes back within a key of where it went, while a finger starting the next
+word has *travelled* — with the duration as the cheap first test, since a deliberate reach takes
+time.
+
+**Neither number can be derived.** How long a thumb is off the glass when it skips is a fact
+about a hand and a screen. So both are recorded with every gesture, the boundaries between
+strokes are recorded in the path, and `analyse` reports what the lifts actually looked like: the
+largest gap that was a genuine skip, which the window has to clear, and the smallest gap between
+two deliberate words, which it must not.
 
 ## Storing
 
@@ -115,26 +168,42 @@ One JSON object per line. Written and read by `gesture/GestureRecord.kt`, which 
 the JVM tests use, so the two ends cannot disagree.
 
 ```json
-{"v":1,"id":"892f902b","at":1756000004000,
- "intent":"SYMBOL","prompt":"i:symbol","expected":"8",
- "startKey":"i","layout":"en_qwerty_lower",
+{"v":2,"id":"892f902b","at":1756000004000,
+ "intent":"WORD","prompt":"glide:morning","expected":"morning","decoded":"morning",
+ "startKey":"m","layout":"en_qwerty_lower",
  "widthPx":1080.0,"keyUnitPx":92.0,"keyHeightPx":120.0,
- "verdict":"FLICK",
- "thresholds":{"flickDistanceRatio":0.45,"verticalDominance":1.5,
-               "glideDistanceRatio":1.2,"flickToGlideRatio":2.0},
- "path":[[807.2,210.0,0],[806.1,241.3,18],[808.4,299.7,44]]}
+ "verdict":"GLIDE",
+ "thresholds":{"flickDistanceRatio":0.2,"verticalDominance":4.25,
+               "glideDistanceRatio":1.2,"flickToGlideRatio":2.5,
+               "glideResumeMs":120,"glideResumeRadiusRatio":1.25},
+ "path":[[807.2,210.0,0],[806.1,241.3,18],[808.4,299.7,44]],
+ "strokes":[17]}
 ```
 
 `path` is `[x, y, milliseconds since the finger went down]`, in the keyboard's own pixels, at the
 width in `widthPx` — which is all the geometry needed to rebuild the exact layout it was made on.
 
-Two fields are worth defending:
+Version 1 lines still read. They were recorded before a glide could be interrupted at all, so a
+missing `strokes` genuinely means one stroke and a missing resume threshold genuinely means the
+build had none — the number exists so a reader can tell which absences are real, not so old data
+can be refused. The bank is the one thing here that must never be invalidated by a change to the
+code that reads it.
+
+Four fields are worth defending:
 
 - **`intent`** is the label, and the only thing in the record that cannot be recomputed. It is
   what makes the file worth keeping.
 - **`thresholds`** is what was live at the time. Without it, `verdict` would say what some
   unknown build once thought, which is worse than saying nothing. With it, a record made under
   one set of thresholds is still honest evidence after they move.
+- **`decoded`** is the word the glide decoder produced, and it is not recoverable later: it
+  depends on the lexicon and the weights that were live at the time, and both will change.
+  Keeping it beside the path turns "the decoder got this one wrong" from an impression into a
+  line in a file that can be counted.
+- **`strokes`** are the indices at which the finger came back down. How long each lift lasted and
+  how far the finger moved across it are both derived from the samples either side, which is why
+  they are not stored: two ways to say the same thing is one way to be wrong. This is what makes
+  a bank collected under one resume window scorable under any other.
 
 Raw paths are stored rather than features, because a feature is a guess about what matters, and
 the point of the exercise is that nobody knows yet.
@@ -166,6 +235,10 @@ It prints:
   not doing any work, and should be left where it is rather than moved to whatever the sweep
   happened to pick. If a plateau runs to the edge of a grid, the grid was the constraint and not
   the data — widen it and re-run before believing the number.
+- **the glide report**: how many glides decoded to the word that was asked for, split by
+  whether the finger lifted on the way. That split is the leniency's own scoreboard — a rejoined
+  glide should decode about as well as an uninterrupted one, and if it decodes markedly worse the
+  window is joining things it should not. Underneath it, the distribution of the lifts themselves.
 - **the gestures still misread**, which is the next thing to think about.
 
 Then move the numbers in `GestureConfig` and re-run. The sweep proposes; it does not decide,

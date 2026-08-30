@@ -114,6 +114,35 @@ data class GestureConfig(
     val trackpadMaxAccelY: Float = 7f,
     /** A single move event is a noisy speed estimate, so it is smoothed. 1 = no smoothing. */
     val trackpadSpeedSmoothing: Float = 0.4f,
+    /**
+     * How long the finger may leave the glass in the middle of a glide and still be gliding.
+     *
+     * A glide is one continuous stroke in theory and very often is not in practice: a thumb
+     * crossing the width of the keyboard skips, catches on a screen protector, or lifts for a
+     * frame or two over a ridge in the glass. Without this, each of those ends the word early
+     * and types whatever the first fragment happened to spell -- a word the user did not intend,
+     * inserted while their finger was still moving toward the rest of it.
+     *
+     * The cost of being generous here is the opposite mistake: two deliberately separate glides
+     * run together into one nonsense word. What separates the two cases is not really the pause
+     * -- it is the distance, below -- but the pause is what makes it cheap to decide, because a
+     * deliberate second word starts with a reach and a reach takes time.
+     *
+     * The value is a starting point and is expected to move. It is recorded with every gesture
+     * so that a bank collected under one value still scores honestly under another, and the
+     * Gesture Lab's glide passages exist to collect the evidence that will set it.
+     */
+    val glideResumeMs: Long = 120L,
+    /**
+     * How far from the lift the finger may come back down and still be the same glide, in key
+     * widths.
+     *
+     * This is the discriminating half. A finger that skipped is a finger that never meant to
+     * leave: it comes back within a key of where it went, usually much less. A finger starting
+     * the next word has *travelled* -- to the first letter of something else, which on a
+     * keyboard is a key width or more away far more often than not.
+     */
+    val glideResumeRadiusRatio: Float = 1.25f,
 )
 
 sealed interface GestureOutput {
@@ -132,7 +161,16 @@ sealed interface GestureOutput {
 
     data object GlideStarted : GestureOutput
     data class GlideUpdated(val path: List<PathPoint>) : GestureOutput
-    data class GlideCompleted(val path: List<PathPoint>) : GestureOutput
+
+    /**
+     * The finger left the glass mid-glide and the word has *not* been decided yet.
+     *
+     * Emitted instead of [GlideCompleted] at every lift, and followed by one or the other once
+     * the resume window closes. The host keeps the trail on screen and types nothing: a word
+     * shown and then replaced is exactly the flicker this window exists to prevent.
+     */
+    data object GlideSuspended : GestureOutput
+    data class GlideCompleted(val path: List<PathPoint>, val strokeStarts: List<Int>) : GestureOutput
 
     /** Backspace was held: the host should start repeating deletions until it is released. */
     data object BackspaceRepeatStarted : GestureOutput
@@ -174,6 +212,15 @@ enum class GestureState {
     PRESSED,
     FLICK,
     GLIDE,
+
+    /**
+     * A glide whose finger has lifted, waiting to see whether it comes straight back.
+     *
+     * The state exists so that the leniency is one transition in the machine rather than a timer
+     * bolted onto the view. Everything downstream -- the replay harness, the sweep, the bank --
+     * then sees the same gesture the phone saw, including the gap in the middle of it.
+     */
+    GLIDE_LIFTED,
     ACCENTS,
     TRACKPAD,
     SELECTING,
@@ -212,14 +259,23 @@ class TouchFsm(
     /** Smoothed finger speed in px/ms, for pointer acceleration. */
     private var trackpadSpeed = 0f
 
+    /** Indices into [path] where each stroke after the first begins. Empty for one stroke. */
+    private val strokeStarts = mutableListOf<Int>()
+    /** Where and when the finger left the glass, while a glide is suspended. */
+    private var lift: PathPoint? = null
+
     private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
     private val flickTravel get() = config.flickTravelRatio * geometry.keyHeight
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
     private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
+    private val glideResumeRadius get() = config.glideResumeRadiusRatio * geometry.keyUnit
 
     /** Deadline the host should schedule a [onLongPressTimeout] callback for, or null. */
     val longPressDeadline: Long? get() = down?.let { it.t + config.longPressMs }
+
+    /** True while a lifted glide is waiting to see whether the finger comes back. */
+    val isSuspended: Boolean get() = state == GestureState.GLIDE_LIFTED
 
     /** The key the finger came down on, or null between gestures. */
     val originKeyId: String? get() = origin?.key?.id
@@ -341,7 +397,7 @@ class TouchFsm(
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x)
             GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
             GestureState.BACKSPACE -> bulkDeleteIfSwipedUp(dy)
-            GestureState.IDLE, GestureState.SPENT -> emptyList()
+            GestureState.GLIDE_LIFTED, GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
     }
 
@@ -495,7 +551,7 @@ class TouchFsm(
                     )
                 }
             }
-            GestureState.GLIDE -> listOf(GestureOutput.GlideCompleted(path.toList()))
+            GestureState.GLIDE -> return suspendGlide(x, y, t)
             GestureState.ACCENTS -> {
                 val accents = key?.key?.accents.orEmpty()
                 buildList {
@@ -508,18 +564,94 @@ class TouchFsm(
             GestureState.TRACKPAD, GestureState.SELECTING -> listOf(GestureOutput.TrackpadEnded)
             // The repeat already deleted; releasing must not delete once more.
             GestureState.BACKSPACE -> listOf(GestureOutput.BackspaceRepeatEnded)
-            GestureState.IDLE, GestureState.SPENT -> emptyList()
+            GestureState.GLIDE_LIFTED, GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
         val captured = capture(PathPoint(x, y, t), armedAtRelease)
         reset()
         return result + listOfNotNull(captured) + GestureOutput.KeyHighlighted(null)
     }
 
-    /** What releasing a key with no gesture on it does. */
+    /**
+     * A glide whose finger has lifted. The word is not decided here: the machine waits, and the
+     * host either brings the finger back with [onResume] or closes the window with
+     * [onGlideResumeTimeout].
+     *
+     * The lift point joins the path like any other sample. It is the last thing the finger did
+     * before the gap, so a decoder bridging that gap starts from where the finger actually was
+     * rather than from the last sample the device happened to send.
+     */
+    private fun suspendGlide(x: Float, y: Float, t: Long): List<GestureOutput> {
+        val up = PathPoint(x, y, t)
+        if (path.lastOrNull() != up) path += up
+        lift = up
+        state = GestureState.GLIDE_LIFTED
+        return listOf(GestureOutput.GlideSuspended)
+    }
+
+    /** When the host should call [onGlideResumeTimeout], or null when nothing is suspended. */
+    val glideResumeDeadline: Long? get() = lift?.let { it.t + config.glideResumeMs }
+
+    /**
+     * Whether a finger going down at this point continues the suspended glide.
+     *
+     * Three conditions, and the third is the one that is easy to leave out. Time and distance
+     * both describe a finger that never meant to leave, but a finger coming back down on
+     * backspace or the space bar has plainly finished the word however quickly it got there --
+     * and reading that as a continuation would swallow the very keypress meant to correct it.
+     */
+    fun canResume(x: Float, y: Float, t: Long): Boolean {
+        val from = lift ?: return false
+        if (state != GestureState.GLIDE_LIFTED) return false
+        if (t - from.t > config.glideResumeMs) return false
+        if (hypot(x - from.x, y - from.y) > glideResumeRadius) return false
+        return geometry.keyAt(x, y)?.key?.type == KeyType.CHARACTER
+    }
+
+    /**
+     * The finger came back. The gap is left in the path as a gap -- nothing is interpolated
+     * here -- and the index it resumes at is recorded, so a reader can tell a stroke boundary
+     * from an ordinary long sample and score the leniency afterwards.
+     */
+    fun onResume(x: Float, y: Float, t: Long): List<GestureOutput> {
+        if (state != GestureState.GLIDE_LIFTED) return emptyList()
+        val previous = path.lastOrNull()
+        strokeStarts += path.size
+        val p = PathPoint(x, y, t)
+        if (previous != null) pathLength += hypot(x - previous.x, y - previous.y)
+        path += p
+        lift = null
+        state = GestureState.GLIDE
+        return listOf(GestureOutput.GlideUpdated(path.toList()))
+    }
+
+    /**
+     * The window closed with no finger back on the glass: the word is whatever was drawn.
+     *
+     * Alone among the entry points here it takes no timestamp, and deliberately so. Everything
+     * else is an event with a time; this is the *absence* of one, and the moment the window
+     * happened to close is not part of the gesture. The gesture ended when the finger left, and
+     * that sample is already in the path -- stamping it with the timeout's clock instead would
+     * stretch every interrupted glide by the length of the window and, on Android, mix two
+     * different clocks while doing it.
+     */
+    fun onGlideResumeTimeout(): List<GestureOutput> {
+        if (state != GestureState.GLIDE_LIFTED) return emptyList()
+        val up = lift ?: return emptyList()
+        val completed = GestureOutput.GlideCompleted(path.toList(), strokeStarts.toList())
+        val captured = capture(up, armed = false, verdict = GestureVerdict.GLIDE)
+        reset()
+        return listOfNotNull(completed, captured, GestureOutput.KeyHighlighted(null))
+    }
+
+    /**
+     * What releasing a key with no gesture on it does.
+     *
+     * Return is not a character key even though it carries "\n" as its primary: what it does
+     * depends on the field being typed into, which only the service can see.
+     */
     private fun tapOutput(key: KeyRect?): List<GestureOutput> = when {
         key == null -> emptyList()
-        key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE ||
-            key.key.type == KeyType.RETURN ->
+        key.key.type == KeyType.CHARACTER || key.key.type == KeyType.SPACE ->
             listOf(GestureOutput.CommitPrimary(key.key.id, key.key.primary))
         else -> listOf(GestureOutput.SpecialKey(key.key.type, key.key.id))
     }
@@ -533,21 +665,26 @@ class TouchFsm(
      * counts as part of "exact": a tap that never moved still has to record when it ended, or a
      * replay of it has no duration and cannot tell a tap from a long press.
      */
-    private fun capture(up: PathPoint, armed: Boolean): GestureOutput.GestureCaptured? {
+    private fun capture(
+        up: PathPoint,
+        armed: Boolean,
+        /** Set when the gesture is being closed out from a state that is no longer live. */
+        verdict: GestureVerdict? = null,
+    ): GestureOutput.GestureCaptured? {
         val key = origin ?: return null
         val last = path.lastOrNull() ?: return null
         val full = if (last == up) path.toList() else path + up
         return GestureOutput.GestureCaptured(
             GestureTrace(
                 startKeyId = key.key.id,
-                verdict = when (state) {
+                verdict = verdict ?: when (state) {
                     GestureState.PRESSED -> GestureVerdict.TAP
                     GestureState.FLICK -> if (armed) GestureVerdict.FLICK else GestureVerdict.TAP
                     GestureState.GLIDE -> GestureVerdict.GLIDE
                     GestureState.ACCENTS -> GestureVerdict.ACCENT
                     GestureState.TRACKPAD, GestureState.SELECTING -> GestureVerdict.TRACKPAD
-                    GestureState.BACKSPACE, GestureState.SPENT, GestureState.IDLE ->
-                        GestureVerdict.NONE
+                    GestureState.GLIDE_LIFTED, GestureState.BACKSPACE, GestureState.SPENT,
+                    GestureState.IDLE -> GestureVerdict.NONE
                 },
                 layoutId = geometry.layout.id,
                 widthPx = geometry.widthPx,
@@ -555,12 +692,18 @@ class TouchFsm(
                 keyHeightPx = geometry.keyHeight,
                 thresholds = GestureThresholds.of(config),
                 path = full,
+                strokeStarts = strokeStarts.toList(),
             ),
         )
     }
 
+    /**
+     * The touch stream was taken away -- another view claimed it, or the window went. A
+     * suspended glide is dropped rather than committed: a gesture the system interrupted is not
+     * evidence that the user finished a word.
+     */
     fun onCancel(): List<GestureOutput> {
-        val wasGlide = state == GestureState.GLIDE
+        val wasGlide = state == GestureState.GLIDE || state == GestureState.GLIDE_LIFTED
         // Must still emit TrackpadEnded: the service holds a physical shift key down for the
         // duration of a selection, and would otherwise never release it.
         val wasTrackpad = state == GestureState.TRACKPAD || state == GestureState.SELECTING
@@ -583,6 +726,8 @@ class TouchFsm(
         accentIndex = 0
         trackpadAnchor = null
         trackpadSpeed = 0f
+        strokeStarts.clear()
+        lift = null
     }
 
     /** Keys the glide path passed through, nearest-centre per sample, de-duplicated. */

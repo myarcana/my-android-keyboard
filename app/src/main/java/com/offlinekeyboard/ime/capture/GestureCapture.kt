@@ -12,10 +12,10 @@ import java.util.UUID
 /**
  * The bridge between the keyboard and the lab.
  *
- * The keyboard hands it every completed gesture. It keeps one only while a drill is armed, and
- * labels it with what that drill asked for. Nothing is collected during ordinary typing: an
- * unlabelled gesture is not evidence, and silently recording what someone types would be a
- * strange thing for a keyboard that exists to be incapable of talking to the network.
+ * The keyboard hands it every completed gesture. It keeps one only while the lab has a target
+ * armed, and labels it with what that target asked for. Nothing is collected during ordinary
+ * typing: an unlabelled gesture is not evidence, and silently recording what someone types would
+ * be a strange thing for a keyboard that exists to be incapable of talking to the network.
  *
  * Held in a singleton because the input method and the lab activity are the same process but
  * have no reference to each other -- the IME belongs to the system, and its view is created and
@@ -34,7 +34,7 @@ object GestureCapture {
         TOO_SMALL,
     }
 
-    data class Result(val outcome: Outcome, val drill: Drill, val record: GestureRecord?)
+    data class Result(val outcome: Outcome, val target: Target, val record: GestureRecord?)
 
     /**
      * Movement below this fraction of a key width is not treated as an attempt at anything.
@@ -47,7 +47,7 @@ object GestureCapture {
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile
-    private var armed: Drill? = null
+    private var armed: Target? = null
 
     /** Set by the lab while it is in the foreground. Always called on the main thread. */
     @Volatile
@@ -55,39 +55,46 @@ object GestureCapture {
 
     val isArmed: Boolean get() = armed != null
 
-    fun arm(drill: Drill) {
-        armed = drill
+    fun arm(target: Target) {
+        armed = target
     }
 
     fun disarm() {
         armed = null
     }
 
-    /** Called from the keyboard for every gesture that ends. Cheap and silent when disarmed. */
-    fun onGesture(context: Context, trace: GestureTrace) {
-        val drill = armed ?: return
+    /**
+     * Called from the keyboard for every gesture that ends. Cheap and silent when disarmed.
+     *
+     * [decoded] is what the glide decoder made of the path, when anything did. It is passed in
+     * rather than computed here because the keyboard has already done it -- and recording a
+     * second, separately-computed answer would eventually record one the user never saw.
+     */
+    fun onGesture(context: Context, trace: GestureTrace, decoded: String? = null) {
+        val target = armed ?: return
 
-        if (trace.startKeyId != drill.startKeyId) {
-            publish(Result(Outcome.WRONG_KEY, drill, null))
+        if (trace.startKeyId != target.startKeyId) {
+            publish(Result(Outcome.WRONG_KEY, target, null))
             return
         }
-        // A tap drill is *asking* for a gesture that barely moves, so the guard below would
+        // A tap target is *asking* for a gesture that barely moves, so the guard below would
         // throw away every sample it collected.
-        if (drill.intent != GestureIntent.LETTER && isNegligible(trace)) {
-            publish(Result(Outcome.TOO_SMALL, drill, null))
+        if (target.intent != GestureIntent.LETTER && isNegligible(trace)) {
+            publish(Result(Outcome.TOO_SMALL, target, null))
             return
         }
 
         val record = GestureRecord(
             id = UUID.randomUUID().toString().substring(0, 8),
             at = System.currentTimeMillis(),
-            intent = drill.intent,
-            promptId = drill.id,
-            expected = drill.expected,
+            intent = target.intent,
+            promptId = target.id,
+            expected = target.expected,
             trace = trace,
+            decoded = decoded,
         )
         GestureBank.append(context.applicationContext, record)
-        publish(Result(Outcome.RECORDED, drill, record))
+        publish(Result(Outcome.RECORDED, target, record))
     }
 
     private fun isNegligible(trace: GestureTrace): Boolean {

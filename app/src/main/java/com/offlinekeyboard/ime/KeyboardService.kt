@@ -10,6 +10,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.Gravity
 import android.view.KeyEvent
+import android.view.KeyEvent.KEYCODE_ENTER
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.CursorAnchorInfo
@@ -28,6 +29,9 @@ import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.gesture.GestureOutput
+import com.offlinekeyboard.ime.glide.GlideDecoder
+import com.offlinekeyboard.ime.glide.LEXICON_ASSET
+import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
@@ -36,8 +40,9 @@ import com.offlinekeyboard.ime.view.KeyboardView
 /**
  * Translates gesture outputs into edits on the focused text field.
  *
- * Deliberately absent: autocorrect. A tapped key produces exactly that character, always.
- * Word decoding will exist only to turn a glide gesture into a word (Phase 2).
+ * Deliberately absent: autocorrect. A tapped key produces exactly that character, always. Word
+ * decoding exists only to turn a glide gesture into a word -- a gesture that has no letters of
+ * its own to preserve, and so is the one place where guessing is the whole point.
  */
 private const val TAG = "OfflineKeyboard"
 
@@ -73,6 +78,12 @@ private const val BULK_DELETE_MAX_CHUNKS = 64
 private const val EMOJI_ASSET = "emoji_en.tsv"
 
 /**
+ * Characters after which a glided word takes no space in front of it. Everything else that is
+ * not already whitespace does, which is the common case: the end of the previous word.
+ */
+private const val OPENERS = "([{\u201c\u2018\u00ab"
+
+/**
  * Debug tooling: logs every gesture output, and registers a broadcast receiver that stands in
  * for the second finger of the selection gesture, which adb cannot send. Tied to the build type
  * so the receiver -- which is necessarily exported -- never exists in a release build.
@@ -90,6 +101,11 @@ class KeyboardService : InputMethodService() {
      */
     private var emoji: EmojiIndex? = null
     private var emojiLoading = false
+
+    // --- glide typing ---
+    /** Loaded off the main thread: 40,000 words is a fifth of a second the keyboard cannot wait. */
+    private var glide: GlideDecoder? = null
+    private var glideLoading = false
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
 
@@ -354,6 +370,9 @@ class KeyboardService : InputMethodService() {
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
+        // A glide waiting to see whether the finger comes back never will now, and the word it
+        // drew belongs in the field it was drawn over rather than in whatever is focused next.
+        keyboardView?.finishPendingGlide()
         endSelection()
         stopTrackpad()
         stopBackspaceRepeat()
@@ -367,6 +386,7 @@ class KeyboardService : InputMethodService() {
         shift = ShiftState.OFF
         applyLayout()
         loadEmojiIndex()
+        loadGlideDecoder()
         refreshCandidates()
     }
 
@@ -402,6 +422,10 @@ class KeyboardService : InputMethodService() {
 
     private fun handleOutputs(outputs: List<GestureOutput>) {
         if (DEBUG_GESTURES) outputs.forEach { android.util.Log.d(TAG, "gesture: $it") }
+        // What a glide in this batch decoded to, so the capture below can record the answer next
+        // to the path that produced it. A completed glide is always emitted before the capture
+        // of the gesture that made it, which is the only reason this can be a local.
+        var decoded: String? = null
         outputs.forEach { out ->
             when (out) {
                 is GestureOutput.CommitPrimary -> commit(out.text)
@@ -421,9 +445,9 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
                 GestureOutput.BulkDelete -> bulkDelete()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
-                is GestureOutput.GlideCompleted -> Unit // Phase 2: decode the path into a word
-                // Kept only while the gesture lab has a drill armed; a no-op otherwise.
-                is GestureOutput.GestureCaptured -> GestureCapture.onGesture(this, out.trace)
+                is GestureOutput.GlideCompleted -> decoded = commitGlide(out)
+                // Kept only while the gesture lab is asking for something; a no-op otherwise.
+                is GestureOutput.GestureCaptured -> GestureCapture.onGesture(this, out.trace, decoded)
                 else -> Unit
             }
         }
@@ -439,6 +463,36 @@ class KeyboardService : InputMethodService() {
         refreshCandidates()
     }
 
+    /**
+     * Types the word a glide drew, and returns it so the gesture bank can record what was
+     * decoded alongside the path that decoded to it.
+     *
+     * The space goes in *front* of the word rather than after it. Both conventions put one space
+     * between two glided words; only this one leaves the caret against the last letter, where
+     * backspace deletes a character of the word just typed instead of an invisible space, and
+     * where the emoji bar is still looking at a word rather than at nothing.
+     */
+    private fun commitGlide(completed: GestureOutput.GlideCompleted): String? {
+        val decoder = glide ?: return null
+        val view = keyboardView ?: return null
+        val word = decoder.decode(completed.path, view.currentGeometry).firstOrNull()?.word
+            ?: return null
+        val ic = currentInputConnection ?: return null
+
+        val cased = if (shift == ShiftState.OFF) word else word.replaceFirstChar { it.uppercase() }
+        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
+        val needsSpace = before != null && !before.isWhitespace() && before !in OPENERS
+        ic.beginBatchEdit()
+        ic.commitText(if (needsSpace) " $cased" else cased, 1)
+        ic.endBatchEdit()
+        if (shift == ShiftState.ONE_SHOT) {
+            shift = ShiftState.OFF
+            applyLayout()
+        }
+        refreshCandidates()
+        return cased
+    }
+
     private fun handleSpecialKey(type: KeyType) {
         when (type) {
             KeyType.SHIFT -> toggleShift()
@@ -446,8 +500,26 @@ class KeyboardService : InputMethodService() {
             KeyType.MODE_SWITCH -> cycleplane()
             KeyType.GLOBE -> switchToNextInputMethod(false)
             KeyType.MIC -> toggleDictation()
+            KeyType.RETURN -> pressReturn()
             else -> Unit
         }
+    }
+
+    /**
+     * Return either fires the field's editor action or sends a real Enter key. It never commits
+     * a newline as text, which is what it used to do.
+     *
+     * Both halves matter in a browser. The address bar declares IME_ACTION_GO and loads nothing
+     * until [android.view.inputmethod.InputConnection.performEditorAction] tells it to, and a
+     * text box inside a page has no editor action at all but submits its form on a key going
+     * down -- neither of them so much as notices text that merely appears in it. See
+     * [ReturnKey].
+     */
+    private fun pressReturn() {
+        val ic = currentInputConnection ?: return
+        val action = ReturnKey.actionFor(currentInputEditorInfo?.imeOptions ?: 0)
+        if (action != null) ic.performEditorAction(action) else sendDownUpKeyEvents(KEYCODE_ENTER)
+        refreshCandidates()
     }
 
     /** Tap for one-shot shift; a second tap within 300ms locks caps, as on iOS. */
@@ -568,6 +640,25 @@ class KeyboardService : InputMethodService() {
     }
 
     // --- suggestion bar -------------------------------------------------------------------
+
+    /**
+     * Loads the glide lexicon. Called alongside the emoji index, and for the same reason it is
+     * off the main thread: half a megabyte of words parsed on the UI thread is a keyboard that
+     * appears late the first time it is asked for.
+     */
+    private fun loadGlideDecoder() {
+        if (glide != null || glideLoading) return
+        glideLoading = true
+        Thread {
+            val loaded = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }
+                .onFailure { android.util.Log.w(TAG, "glide lexicon failed to load", it) }
+                .getOrNull()
+            handler.post {
+                glide = loaded?.let(::GlideDecoder)
+                glideLoading = false
+            }
+        }.start()
+    }
 
     private fun loadEmojiIndex() {
         if (emoji != null || emojiLoading) return

@@ -50,6 +50,7 @@ class GestureBankReplayTest {
         // below is the thing that shows how, and aborting before printing it would hide that.
         val harness = checkReplayMatchesTheDevice(records)
         reportPerKey(records)
+        reportGlides(records)
 
         val base = GestureReplay.score(records, defaults)
         println()
@@ -125,6 +126,69 @@ class GestureBankReplayTest {
             }
     }
 
+    /**
+     * What the glide passages collected: how well words decoded, and what the finger lifts in
+     * the middle of them actually looked like.
+     *
+     * The second half is the whole reason strokes are recorded. The resume window cannot be
+     * derived -- how long a thumb is off the glass when it skips is a fact about a hand and a
+     * screen, not something to be reasoned out -- so it is measured here and set from what comes
+     * back. The number to read is not the mean: it is the largest gap that was a genuine skip,
+     * because the window has to clear that, and the smallest gap between two words deliberately
+     * glided in succession, because it must not.
+     */
+    private fun reportGlides(records: List<GestureRecord>) {
+        val glides = records.filter { it.intent == GestureIntent.WORD }
+        if (glides.isEmpty()) return
+        val decoded = glides.filter { it.decoded != null }
+        println()
+        println("  glides: ${glides.size}, ${decoded.size} with a decoded word")
+        if (decoded.isNotEmpty()) {
+            fun right(rows: List<GestureRecord>) = rows.count { r ->
+                r.decoded!!.lowercase().filter(Char::isLetter) ==
+                    r.expected.lowercase().filter(Char::isLetter)
+            }
+            val whole = right(decoded)
+            println("    decoded correctly: $whole of ${decoded.size} " +
+                "(${"%.0f%%".format(whole * 100f / decoded.size)})")
+
+            // The comparison the leniency lives or dies by. A glide that was interrupted and
+            // rejoined should decode about as well as one that was never interrupted; if it
+            // decodes markedly worse, the window is joining things it should not.
+            val (interrupted, clean) = decoded.partition { it.gaps.isNotEmpty() }
+            if (interrupted.isNotEmpty()) {
+                println("      uninterrupted ${right(clean)}/${clean.size}" +
+                    "   ·   rejoined after a lift ${right(interrupted)}/${interrupted.size}")
+            }
+            decoded.filterNot { r ->
+                r.decoded!!.lowercase().filter(Char::isLetter) ==
+                    r.expected.lowercase().filter(Char::isLetter)
+            }.take(12).forEach { println("      wanted ${it.expected}, typed ${it.decoded}") }
+        }
+
+        val gaps = glides.flatMap { it.gaps }
+        if (gaps.isEmpty()) {
+            println("    no finger lifts recorded mid-glide yet")
+            return
+        }
+        val ms = gaps.map { it.ms }.sorted()
+        val px = gaps.map { it.px }.sorted()
+        fun <T : Comparable<T>> at(values: List<T>, fraction: Float) =
+            values[((values.size - 1) * fraction).toInt()]
+        println("    ${gaps.size} mid-glide lifts were rejoined")
+        println("      duration ms: min ${ms.first()}  median ${at(ms, 0.5f)}  " +
+            "90th ${at(ms, 0.9f)}  max ${ms.last()}   (window ${defaults.glideResumeMs})")
+        println("      distance px: min ${"%.0f".format(px.first())}  " +
+            "median ${"%.0f".format(at(px, 0.5f))}  90th ${"%.0f".format(at(px, 0.9f))}  " +
+            "max ${"%.0f".format(px.last())}")
+        // A gap that only just fitted is a gap the next one like it will not.
+        val marginal = ms.count { it > defaults.glideResumeMs * 0.8 }
+        if (marginal > 0) {
+            println("      $marginal of them were within a fifth of the window -- the next " +
+                "skip like that splits the word")
+        }
+    }
+
     // --- sweep ------------------------------------------------------------------------------
 
     private data class Best(
@@ -143,11 +207,12 @@ class GestureBankReplayTest {
      * the finger stationary, and a keyboard that has already decided you flicked while the OS
      * says you have not yet moved is not tunable, it is broken.
      *
-     * This matters because the drilled taps do not push back as hard as real typing does. A tap
-     * made while a drill is watching is a careful tap; the ones that will actually collide with
-     * this threshold are the sloppy ones in the middle of a sentence, and no bank collected by
-     * asking gets those. The platform's number stands in for the evidence that is hard to
-     * collect, which is exactly what a principled bound is for.
+     * The floor mattered more when the lab asked for one gesture at a time: a tap made while an
+     * instruction is watching is a careful tap, and the ones that will actually collide with this
+     * threshold are the sloppy ones in the middle of a sentence. Passages collect those now, so
+     * the evidence is better than it was -- but the bound is still the right one to keep, because
+     * a keyboard that has decided you flicked while the OS still calls the finger stationary is
+     * not badly tuned, it is broken.
      */
     private val flickGrid = steps(0.20f, 0.85f, 0.05f)
     /**

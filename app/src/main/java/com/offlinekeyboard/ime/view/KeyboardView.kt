@@ -8,12 +8,14 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RectF
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
+import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
@@ -143,6 +145,17 @@ class KeyboardView @JvmOverloads constructor(
     private val uiHandler = Handler(Looper.getMainLooper())
 
     private val pointers = mutableMapOf<Int, TouchFsm>()
+
+    /**
+     * A glide whose finger has lifted but which is not finished yet.
+     *
+     * It sits outside [pointers] because it belongs to no pointer any more: the finger that made
+     * it is gone, and the one that may continue it has not arrived. Keeping the state machine
+     * itself alive rather than a copy of its path is what lets the finger simply carry on --
+     * there is nothing to restore, and the gesture the bank records is one gesture.
+     */
+    private var suspendedGlide: TouchFsm? = null
+    private var glideResumeRunnable: Runnable? = null
     private val longPressRunnables = mutableMapOf<Int, Runnable>()
 
     /**
@@ -170,10 +183,26 @@ class KeyboardView @JvmOverloads constructor(
     private val candidatePointers = mutableMapOf<Int, Int>()
 
     /**
-     * Height of the system navigation bar. From targetSdk 35 the IME window is laid out
-     * edge-to-edge, so without this the bottom row sits underneath the nav buttons.
+     * Space reserved below the keys for the system navigation bar.
+     *
+     * From targetSdk 35 the IME window is laid out edge to edge, so without this the bottom row
+     * sits underneath the nav buttons. The insets dispatched to this view are not a trustworthy
+     * source for the size of it: some hosts -- Firefox's address bar among them -- leave the
+     * window running to the bottom of the display while reporting a navigation-bar inset of
+     * zero, and the keyboard is then only as wrong as the host it happens to be typing into. So
+     * the overlap is measured instead: how far this view's own bottom edge reaches past the top
+     * of the navigation bar. The dispatched inset stays as the answer before the first layout,
+     * when there is no position to measure yet.
+     *
+     * Feeding a measurement back into layout is safe here only because the IME window is
+     * anchored to the bottom of the display: making it taller moves its top edge and never its
+     * bottom, so the overlap being read does not move in response to the reserve it produces,
+     * and the second pass agrees with the first.
      */
     private var navBarInset = 0
+
+    /** What the host last said the navigation-bar inset was. See [navBarInset]. */
+    private var dispatchedNavInset = 0
 
     private val theme: Theme
         get() = if (
@@ -197,18 +226,52 @@ class KeyboardView @JvmOverloads constructor(
     private fun geometry(): LayoutGeometry =
         geometry ?: LayoutGeometry(layout, width.toFloat()).also { geometry = it }
 
+    /** Where the keys are, for the service's glide decoding. */
+    val currentGeometry: LayoutGeometry get() = geometry()
+
     /** Bottom of the key area, above the reserved navigation-bar space. */
     private val keyAreaBottom: Float get() = (height - navBarInset).toFloat()
 
     override fun onApplyWindowInsets(insets: WindowInsets): WindowInsets {
-        val bottom = WindowInsetsCompat.toWindowInsetsCompat(insets)
+        dispatchedNavInset = WindowInsetsCompat.toWindowInsetsCompat(insets)
             .getInsets(WindowInsetsCompat.Type.navigationBars())
             .bottom
-        if (bottom != navBarInset) {
-            navBarInset = bottom
+        updateNavBarInset()
+        return super.onApplyWindowInsets(insets)
+    }
+
+    override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
+        super.onLayout(changed, left, top, right, bottom)
+        // The only moment the view's position on screen is real. A host that never dispatches a
+        // change of insets still gets checked here, because being shown over a new app is
+        // itself a layout.
+        updateNavBarInset()
+    }
+
+    private fun updateNavBarInset() {
+        val wanted = requiredNavBarInset()
+        if (wanted != navBarInset) {
+            navBarInset = wanted
             requestLayout()
         }
-        return super.onApplyWindowInsets(insets)
+    }
+
+    /** How much of this view the navigation bar covers, in pixels. See [navBarInset]. */
+    private fun requiredNavBarInset(): Int {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return dispatchedNavInset
+        if (!isAttachedToWindow || height == 0) return dispatchedNavInset
+        val display = context.getSystemService(WindowManager::class.java)
+            ?.maximumWindowMetrics ?: return dispatchedNavInset
+        val navBar = WindowInsetsCompat.toWindowInsetsCompat(display.windowInsets)
+            .getInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars())
+            .bottom
+        if (navBar == 0) return 0
+        val onScreen = IntArray(2)
+        getLocationOnScreen(onScreen)
+        // Clamped rather than trusted outright: while the window is still sliding into place its
+        // bottom edge is below the display's, which would otherwise ask for a reserve taller
+        // than the bar it is reserving for.
+        return (onScreen[1] + height - (display.bounds.bottom - navBar)).coerceIn(0, navBar)
     }
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
@@ -580,6 +643,8 @@ class KeyboardView @JvmOverloads constructor(
                     candidatePointers[id] = candidate
                     pressedCandidate = candidate
                     invalidate()
+                } else if (resumeGlide(id, event.getX(i), event.getY(i), event.eventTime)) {
+                    // The finger came back: it is still the same word.
                 } else {
                     val fsm = TouchFsm(g, config)
                     pointers[id] = fsm
@@ -628,11 +693,15 @@ class KeyboardView @JvmOverloads constructor(
                 if (consumedPointers.remove(id)) return
                 pointers.remove(id)?.let { fsm ->
                     emit(fsm.onUp(event.getX(i), event.getY(i), event.eventTime))
+                    if (fsm.isSuspended) suspendGlide(fsm)
                 }
             }
 
             MotionEvent.ACTION_CANCEL -> {
                 pointers.keys.toList().forEach { cancelLongPress(it) }
+                cancelGlideResume()
+                suspendedGlide?.let { emit(it.onCancel()) }
+                suspendedGlide = null
                 pointers.values.forEach { emit(it.onCancel()) }
                 pointers.clear()
                 consumedPointers.clear()
@@ -640,6 +709,60 @@ class KeyboardView @JvmOverloads constructor(
                 pressedCandidate = -1
             }
         }
+    }
+
+    /**
+     * Holds a lifted glide open for the resume window, and finishes it if nothing comes back.
+     *
+     * The timeout runs off the UI handler for the same reason the long press does: it is a
+     * decision made by the *absence* of a touch event, and nothing else in this class can notice
+     * that something did not happen.
+     */
+    private fun suspendGlide(fsm: TouchFsm) {
+        cancelGlideResume()
+        suspendedGlide = fsm
+        val runnable = Runnable {
+            glideResumeRunnable = null
+            suspendedGlide = null
+            emit(fsm.onGlideResumeTimeout())
+        }
+        glideResumeRunnable = runnable
+        uiHandler.postDelayed(runnable, config.glideResumeMs)
+    }
+
+    /**
+     * Whether this finger going down continues the suspended glide, and does so if it does.
+     *
+     * A press that does *not* qualify closes the suspended glide first, in order: the word the
+     * user finished is typed before the key they went on to press. Leaving it to the timeout
+     * would insert it after, which reorders what they wrote.
+     */
+    private fun resumeGlide(id: Int, x: Float, y: Float, t: Long): Boolean {
+        val fsm = suspendedGlide ?: return false
+        if (!fsm.canResume(x, y, t)) {
+            cancelGlideResume()
+            suspendedGlide = null
+            emit(fsm.onGlideResumeTimeout())
+            return false
+        }
+        cancelGlideResume()
+        suspendedGlide = null
+        pointers[id] = fsm
+        emit(fsm.onResume(x, y, t))
+        return true
+    }
+
+    private fun cancelGlideResume() {
+        glideResumeRunnable?.let { uiHandler.removeCallbacks(it) }
+        glideResumeRunnable = null
+    }
+
+    /** Types whatever a lifted glide had drawn, now, because the keyboard is going away. */
+    fun finishPendingGlide() {
+        val fsm = suspendedGlide ?: return
+        cancelGlideResume()
+        suspendedGlide = null
+        emit(fsm.onGlideResumeTimeout())
     }
 
     private fun scheduleLongPress(id: Int, fsm: TouchFsm) {
@@ -677,6 +800,9 @@ class KeyboardView @JvmOverloads constructor(
                 GestureOutput.HideAccents -> { accentPopup = null; repaint = true }
                 GestureOutput.GlideStarted -> { glidePath = emptyList(); repaint = true }
                 is GestureOutput.GlideUpdated -> { glidePath = out.path; repaint = true }
+                // Suspended deliberately leaves the trail on screen: the gesture is not over,
+                // and clearing it would tell the user their word had been taken when it has not.
+                GestureOutput.GlideSuspended -> Unit
                 is GestureOutput.GlideCompleted -> { glidePath = emptyList(); repaint = true }
                 GestureOutput.TrackpadStarted -> { trackpadActive = true; repaint = true }
                 GestureOutput.SelectionStarted -> { selecting = true; repaint = true }
@@ -703,6 +829,7 @@ class KeyboardView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
+        finishPendingGlide()
         uiHandler.removeCallbacksAndMessages(null)
     }
 }

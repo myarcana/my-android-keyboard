@@ -68,5 +68,13 @@ echo "sdk.dir=/opt/homebrew/share/android-commandlinetools" > local.properties
 
 - **Phase 0 — toolchain and skeleton: complete.** Builds, installs, offline guarantee
   enforced and negative-tested.
-- Phase 1 — iOS layout + gesture state machine: next.
-- Phases 2–5 — glide typing, Chinese input, dictation, suggestion bar: see `docs/PLAN.md`.
+- **Phase 1 — iOS layout and the gesture state machine: complete.** Flick-down symbols, the
+  spacebar trackpad with 2D cursor and selection, and hold-backspace-swipe-up. Thresholds fitted
+  to a bank of recorded gestures rather than by feel: `docs/GESTURE_BANK.md`.
+- **Phase 2 — glide typing: complete.** A Kotlin decoder over a committed 40,000-word lexicon,
+  with a lenient window for the mid-glide finger lifts that would otherwise type a word nobody
+  asked for. Not vendored from FUTO: see `docs/PLAN.md`.
+- **Phase 4 — dictation: complete.** SenseVoice via sherpa-onnx, chosen by measurement against
+  Apple: `docs/ASR_BENCHMARK.md`.
+- **Phase 5 — the suggestion bar: half.** Emoji done; Chinese candidates wait on Phase 3.
+- Phase 3 — Chinese input: not started, and the largest piece left. See `docs/PLAN.md`.

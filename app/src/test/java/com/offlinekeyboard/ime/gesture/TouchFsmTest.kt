@@ -3,6 +3,7 @@ package com.offlinekeyboard.ime.gesture
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.Metrics
 import com.offlinekeyboard.ime.layout.KeyRect
+import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -34,6 +35,16 @@ class TouchFsmTest {
         f.onDown(q.centerX, q.centerY, 0)
         val out = f.onUp(q.centerX, q.centerY, 80)
         assertEquals("q", out.only<GestureOutput.CommitPrimary>().text)
+    }
+
+    @Test
+    fun `tap on return asks the service what return means, rather than committing a newline`() {
+        val ret = key("return")
+        val f = fsm()
+        f.onDown(ret.centerX, ret.centerY, 0)
+        val out = f.onUp(ret.centerX, ret.centerY, 80)
+        assertEquals(KeyType.RETURN, out.only<GestureOutput.SpecialKey>().type)
+        assertTrue(!out.has<GestureOutput.CommitPrimary>())
     }
 
     @Test
@@ -249,9 +260,12 @@ class TouchFsmTest {
         assertTrue(promoted.has<GestureOutput.FlickPreviewCleared>())
         assertTrue(promoted.has<GestureOutput.GlideStarted>())
 
-        val out = f.onUp(q.centerX + far, q.centerY + drop, 120)
+        // The lift suspends rather than completes -- see GlideResumeTest -- so the word only
+        // arrives once the resume window has closed on it.
+        val lifted = f.onUp(q.centerX + far, q.centerY + drop, 120)
+        assertTrue("and must not type the flick symbol", !lifted.has<GestureOutput.CommitSecondary>())
+        val out = f.onGlideResumeTimeout()
         assertTrue("promoted gesture must end as a glide", out.has<GestureOutput.GlideCompleted>())
-        assertTrue("and must not type the flick symbol", !out.has<GestureOutput.CommitSecondary>())
     }
 
     @Test
@@ -273,7 +287,8 @@ class TouchFsmTest {
         f.onDown(q.centerX, q.centerY, 0)
         f.onMove(w.centerX, w.centerY, 30)
         f.onMove(e.centerX, e.centerY, 60)
-        val out = f.onUp(e.centerX, e.centerY, 90)
+        f.onUp(e.centerX, e.centerY, 90)
+        val out = f.onGlideResumeTimeout()
         val path = out.only<GestureOutput.GlideCompleted>().path
         assertEquals(listOf("q", "w", "e"), f.pathKeys(path))
     }
@@ -652,6 +667,7 @@ class TouchFsmTest {
         f.onDown(q.centerX, q.centerY, 0)
         f.onMove(q.centerX + 45f, q.centerY, 40)
         f.onUp(q.centerX + 45f, q.centerY, 80)
+        f.onGlideResumeTimeout()
         assertEquals(GestureState.IDLE, f.state)
         assertNull(f.longPressDeadline)
 

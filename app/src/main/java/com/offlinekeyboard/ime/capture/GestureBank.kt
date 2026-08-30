@@ -114,7 +114,7 @@ object GestureBank {
     ) {
         val accuracy: Float get() = if (decided == 0) 0f else agreed.toFloat() / decided
 
-        /** "12 symbol / 8 word / 6 tap", for the line under the drill. */
+        /** "12 symbol / 8 word / 6 tap", for the line under the passage. */
         val breakdown: String
             get() = GestureIntent.entries.joinToString(" / ") { intent ->
                 "${byIntent[intent] ?: 0} ${if (intent == GestureIntent.LETTER) "tap" else intent.name.lowercase()}"
