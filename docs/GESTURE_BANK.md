@@ -258,8 +258,8 @@ One JSON object per line. Written and read by `gesture/GestureRecord.kt`, which 
 the JVM tests use, so the two ends cannot disagree.
 
 ```json
-{"v":3,"id":"892f902b","at":1756000004000,
- "intent":"WORD","prompt":"glide:morning","expected":"morning","decoded":"morning",
+{"v":4,"id":"892f902b","at":1756000004000,
+ "intent":"WORD","prompt":"word:morning","expected":"morning","decoded":"morning",
  "startKey":"m","layout":"en_qwerty_lower",
  "widthPx":1080.0,"keyUnitPx":92.0,"keyHeightPx":120.0,
  "verdict":"GLIDE",
@@ -279,16 +279,27 @@ build had none — the number exists so a reader can tell which absences are rea
 can be refused. The bank is the one thing here that must never be invalidated by a change to the
 code that reads it.
 
+Version 4 added `word` and `letterIndex`, when prose passages began collecting tapped words as
+well as glided ones. Their absence on an older line is truthful rather than missing: before 4 the
+lab could not record a tapped word at all, so a `LETTER` record in a v3 bank really was a lone
+drill tap and not one letter of something longer.
+
 Version 3 is the one that matters in the other direction. A missing `void` means the same thing
 at every version — the sample is evidence — so reading an old line is never ambiguous. The number
 is there for a reader going the other way: anything that scores a v3 bank without honouring
 `void` will silently count samples whose labels were withdrawn, and the version is the only
 warning it gets.
 
-Four fields are worth defending:
+Five fields are worth defending:
 
 - **`intent`** is the label, and the only thing in the record that cannot be recomputed. It is
-  what makes the file worth keeping.
+  what makes the file worth keeping. It is what the thumb *did*, not what the passage suggested:
+  a prose word that was tapped out yields one `LETTER` line per tap, and one that was glided
+  yields a single `WORD` line.
+- **`word`** and **`letterIndex`**, on a letter that came from a tapped word, say which word and
+  where in it. Without them a run of taps is a heap of letters with no way to ask whether reading
+  them together would have got the word right, which is the whole question the tap decoder exists
+  to answer.
 - **`void`**, when present, withdraws that label: the path is real but it is not an example of
   what `intent` says, so `analyse` sets it aside. Present only on the rare line that needs it.
 - **`thresholds`** is what was live at the time. Without it, `verdict` would say what some

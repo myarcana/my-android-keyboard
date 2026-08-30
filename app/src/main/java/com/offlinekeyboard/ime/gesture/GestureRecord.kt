@@ -116,6 +116,18 @@ data class GestureRecord(
      * the path is kept and only the claim about it is withdrawn.
      */
     val voidReason: String? = null,
+    /**
+     * The word this gesture was one letter of, when a prose word was tapped out rather than
+     * glided. Null for a glide, for a drill gesture, and for a one-letter word.
+     *
+     * Stored because it is not recoverable afterwards and it is the whole point of collecting
+     * taps in prose. A run of [GestureIntent.LETTER] records is only a word if something says
+     * which word and in what order; without that the bank has a heap of letters and no way to
+     * ask whether reading them together would have got the word right.
+     */
+    val word: String? = null,
+    /** Where in [word] this letter sat, or -1. */
+    val letterIndex: Int = -1,
 ) {
     val path get() = trace.path
 
@@ -176,6 +188,10 @@ object GestureRecordCodec {
     /**
      * 2 added the two glide-resume thresholds and the stroke boundaries within a path.
      * 3 added [GestureRecord.voidReason].
+     * 4 added [GestureRecord.word] and [GestureRecord.letterIndex], when prose passages began
+     *   collecting tapped words as well as glided ones. Their absence on an older line is
+     *   truthful: before 4 the lab could not record a tapped word at all, so a LETTER record
+     *   from a v3 bank really was a lone drill tap and not one letter of something longer.
      *
      * Version 1 lines still read: they were recorded before a glide could be interrupted at all,
      * so a missing `strokes` genuinely means one stroke, and a missing resume threshold genuinely
@@ -189,7 +205,7 @@ object GestureRecordCodec {
      * a v3 bank without honouring `void` will quietly count samples that were withdrawn, and the
      * version is the only warning it gets.
      */
-    const val SCHEMA = 3
+    const val SCHEMA = 4
 
     fun encode(record: GestureRecord): String {
         val t0 = record.path.firstOrNull()?.t ?: 0L
@@ -202,6 +218,11 @@ object GestureRecordCodec {
         // Written only when there is one, and next to the label it withdraws. A sample that is
         // evidence should not have to say so on every line, and almost every line is evidence.
         record.voidReason?.let { fields["void"] = it }
+        // Written only for a letter that was part of a word, which most letters are not.
+        record.word?.let {
+            fields["word"] = it
+            fields["letterIndex"] = record.letterIndex
+        }
         return Json.write(
             fields + linkedMapOf(
                 "prompt" to record.promptId,
@@ -250,6 +271,8 @@ object GestureRecordCodec {
             expected = o["expected"] as String,
             decoded = o["decoded"] as? String,
             voidReason = o["void"] as? String,
+            word = o["word"] as? String,
+            letterIndex = (o["letterIndex"] as? Number)?.toInt() ?: -1,
             trace = GestureTrace(
                 startKeyId = o["startKey"] as String,
                 verdict = GestureVerdict.valueOf(o["verdict"] as String),

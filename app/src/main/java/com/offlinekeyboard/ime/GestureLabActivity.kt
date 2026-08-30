@@ -122,6 +122,28 @@ class GestureLabActivity : Activity() {
     private val goodHue = Color.parseColor("#0F8A4F")
     private val badHue = Color.parseColor("#C62828")
 
+    /** Letters of the current word already tapped: legible on the caret, plainly behind it. */
+    private val typedInWord = Color.parseColor("#B9F6CA")
+
+    /**
+     * How much of [display] the first [letters] letters cover.
+     *
+     * The two are not the same string. `letters` is a-z only and lowercased, because that is what
+     * a key can produce; `display` is the word as it is printed, apostrophes and capitals and all.
+     * Walking one to index the other is what keeps the caret in the right place inside "I'm".
+     */
+    private fun tappedPrefix(display: String, letters: Int): Int {
+        if (letters <= 0) return 0
+        var seen = 0
+        display.forEachIndexed { i, c ->
+            if (c.lowercaseChar() in 'a'..'z') {
+                seen++
+                if (seen == letters) return i + 1
+            }
+        }
+        return display.length
+    }
+
     private fun hueFor(intent: GestureIntent) = when (intent) {
         GestureIntent.SYMBOL -> symbolHue
         GestureIntent.WORD -> wordHue
@@ -241,6 +263,17 @@ class GestureLabActivity : Activity() {
                     builder.setSpan(
                         StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
                     )
+                    // A word being tapped out is one token spanning several gestures, and without
+                    // this the caret sits on the whole word through all of them and says nothing
+                    // about where in it the thumb has got to. The letters already down are dimmed
+                    // inside the highlight, so the next one to press is the first bright one.
+                    val done = start + tappedPrefix(target.display, GestureCapture.tappedInTarget)
+                    if (done > start) {
+                        builder.setSpan(
+                            ForegroundColorSpan(typedInWord),
+                            start, done, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                        )
+                    }
                 }
                 // Typed already: green or red says what the keyboard made of it, which is the
                 // only score that matters here. Whether the *letters* arrived is not the
@@ -260,6 +293,10 @@ class GestureLabActivity : Activity() {
         progress.text = buildString {
             append("$done of ${passage.targets.size}")
             append("   ·   passage ${deck.position}/${deck.total}")
+            val inWord = GestureCapture.tappedInTarget
+            if (inWord > 0) {
+                current?.let { append("   ·   $inWord/${it.letters.length} letters of ${it.display}") }
+            }
             current?.let { target ->
                 val why = Passages.why(target.startKeyId)
                 if (why.isNotEmpty()) append("   ·   $why")
@@ -293,12 +330,20 @@ class GestureLabActivity : Activity() {
         when (result.outcome) {
             GestureCapture.Outcome.WRONG_KEY -> {
                 feedback.setTextColor(muted)
+                // The key that was *due*, which is not the word's first letter once a word is
+                // part-way tapped. Saying "sorry begins on S" while four of its letters are
+                // already down is worse than saying nothing.
                 feedback.text = "That started on another key -- not recorded. " +
-                    "'${result.target.display}' begins on ${result.target.startKeyId.uppercase()}."
+                    "Next is ${result.expectedKeyId.uppercase()}."
             }
             GestureCapture.Outcome.TOO_SMALL -> {
                 feedback.setTextColor(muted)
                 feedback.text = "Barely moved -- not recorded."
+            }
+            GestureCapture.Outcome.MID_WORD_GLIDE -> {
+                feedback.setTextColor(muted)
+                feedback.text = "This word is being tapped -- a glide from here spells only the " +
+                    "rest of it. Tap ${result.expectedKeyId.uppercase()}, or undo and glide it whole."
             }
             GestureCapture.Outcome.RECORDED -> {
                 val record = result.record ?: return
@@ -310,16 +355,25 @@ class GestureLabActivity : Activity() {
                     if (read == record.intent) sessionAgreed++
                 }
                 val agreed = read == record.intent
-                outcomes[targetIndex] = agreed
+                // A tapped word is one token made of many gestures, so its colour is the *worst*
+                // of them: a word with one misread letter in it did not go well, and painting it
+                // green because the last letter happened to be fine would say the opposite.
+                outcomes[targetIndex] = (outcomes[targetIndex] ?: true) && agreed
                 if (record.intent == GestureIntent.WORD) {
                     wordsTyped++
                     if (sameWord(record.decoded, record.expected)) wordsRight++
                 }
                 feedback.setTextColor(if (agreed) goodHue else badHue)
                 feedback.text = describe(record, agreed)
-                targetIndex++
-                if (targetIndex >= passage.targets.size) finishPassage() else renderPassage()
-                armCurrent()
+                if (result.complete) {
+                    targetIndex++
+                    if (targetIndex >= passage.targets.size) finishPassage() else renderPassage()
+                    armCurrent()
+                } else {
+                    // Still inside a word being tapped out. The target stays armed, and only the
+                    // progress through it has moved.
+                    renderPassage()
+                }
                 refreshBankLine()
             }
         }
@@ -336,6 +390,12 @@ class GestureLabActivity : Activity() {
         if (record.intent == GestureIntent.WORD) {
             append("  ·  typed ")
             append(record.decoded ?: "nothing")
+        }
+        record.word?.let { word ->
+            append("  ·  ")
+            append(record.expected)
+            append(" (${record.letterIndex + 1} of ${word.length}) of ")
+            append(word)
         }
         append("  ·  ")
         append("%.0f".format(record.pathLength))
@@ -414,8 +474,14 @@ class GestureLabActivity : Activity() {
                 if (removed == null) {
                     toast("Nothing to undo")
                 } else {
-                    if (targetIndex > 0) targetIndex--
-                    outcomes.remove(targetIndex)
+                    // Inside a half-tapped word the token has not been left yet, so undo takes
+                    // back a letter rather than the whole word.
+                    if (GestureCapture.tappedInTarget > 0) {
+                        GestureCapture.stepBack()
+                    } else {
+                        if (targetIndex > 0) targetIndex--
+                        outcomes.remove(targetIndex)
+                    }
                     sessionRecorded = (sessionRecorded - 1).coerceAtLeast(0)
                     toast("Removed one ${removed.intent.name.lowercase()} sample")
                     renderPassage()

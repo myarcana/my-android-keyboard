@@ -11,6 +11,18 @@ data class Target(
     val expected: String,
     /** What is printed in the passage. Usually [expected]; the symbol targets differ. */
     val display: String = expected,
+    /**
+     * The letters this target may also be tapped out as, in order, or empty when it asks for one
+     * specific gesture and nothing else.
+     *
+     * This is what makes a prose word typeable either way. The passage says what the word is, so
+     * the intended letter is known at every point in it whatever the thumb does -- and a word
+     * tapped rather than glided is a run of labelled letters rather than a lost sample. Empty for
+     * the collision drill, which exists precisely to ask for one named gesture on one named key.
+     *
+     * See [TargetReader], which is where the choice is actually made.
+     */
+    val letters: String = "",
 )
 
 data class Passage(
@@ -199,11 +211,15 @@ object Passages {
         val letters = word.lowercase().filter { it in 'a'..'z' }
         val glidable = letters.length >= 2
         return Target(
-            id = if (glidable) "glide:${word.lowercase()}" else "tap:$letters",
+            id = if (glidable) "word:${word.lowercase()}" else "tap:$letters",
+            // What the passage suggests, and what colours it on screen. It is no longer what the
+            // gesture will be filed as: a word may be glided or tapped out, and [TargetReader]
+            // labels each gesture with what the thumb actually did.
             intent = if (glidable) GestureIntent.WORD else GestureIntent.LETTER,
             startKeyId = letters.take(1),
             expected = word,
             display = word,
+            letters = letters,
         )
     }
 
@@ -265,7 +281,10 @@ object Passages {
         return Passage(
             id = id,
             title = title,
-            note = "${words.count { it.length > 1 }} glides, typed straight through",
+            // Deliberately no longer "36 glides". A word may be glided or tapped out and both
+            // are recorded, so a note promising glides would be telling the thumb what to do --
+            // which is the one thing a passage exists not to do.
+            note = "${words.size} words, typed straight through, glided or tapped",
             targets = words.mapIndexed { i, word -> targetFor(word, i) },
         )
     }

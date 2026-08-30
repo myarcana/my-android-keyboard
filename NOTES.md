@@ -291,6 +291,39 @@ that might not be. Backspace, a glide, the trackpad, a mode change, a focus chan
 move the keyboard did not make itself all flush. So do passwords, addresses and any field asking
 for no suggestions, which never hold a word at all.
 
+### The passage knows the letters whatever the thumb does
+
+The lab assumed a target was a gesture: one word, one glide, one label. Every prose word of two
+letters or more was a `WORD` target, and only "a" and "i" were ever taps -- so a passage typed by
+*tapping* collected nothing usable. The first tap of "sorry" was filed as a glide of the whole
+word, carrying a single-tap path, and the remaining four were rejected for starting on the wrong
+key. That is worse than collecting nothing: a bank of confidently mislabelled lines is one that
+goes on to tune the real thing.
+
+The fix is a change of assumption rather than of mechanism. **The passage knows the intended
+letters at every point, whatever the thumb chooses to do.** So a prose word carries its letters
+and accepts either reading: a glide before any letter is down is the word, and a tap on the
+letter now due is that letter, recorded with the word it came from and where in it. A run of taps
+can then be reassembled afterwards, which is the only way anything can ask whether reading them
+together would have got the word right.
+
+The third case is the one that was silently costing the most. **A flick where a letter was wanted
+is recorded as that letter**, with its FLICK verdict intact. The passage asked for `i`, the
+heuristic produced `8`, and that disagreement is the most valuable line the bank can hold -- it
+is direct evidence that the flick threshold is too loose for ordinary typing, which is exactly
+the question the drill exists to answer and could only ever answer from drill gestures. Under the
+old rule it was thrown away for starting on the wrong key.
+
+The drill keeps the strict rule and must. It exists to ask for one named gesture on one named
+key, and a reader that accepted anything there would collect the ambiguity it was built to
+resolve. That split -- permissive for prose, strict for the drill -- is the whole design, and it
+lives in `TargetReader` rather than in the lab activity so it can be tested without a phone.
+
+One consequence worth stating: the key a gesture must start on now *moves through a word*. Telling
+someone "sorry begins on S" when four of its letters are already down is worse than saying
+nothing, so the lab names the letter that is actually due, and dims the letters already tapped
+inside the highlighted word so the next one to press is the first bright one.
+
 ### The frame is the three letter rows, and nothing checks it for you
 
 A layout-agnostic swipe decoder is handed the key centres and the finger's path in one [0,1]

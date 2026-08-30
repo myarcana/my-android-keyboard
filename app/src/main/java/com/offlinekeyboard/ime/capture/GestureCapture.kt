@@ -32,35 +32,49 @@ object GestureCapture {
 
         /** Barely moved. A stray tap while getting into position is not an attempt. */
         TOO_SMALL,
+
+        /** A glide part-way through a word already being tapped. See [TargetReader]. */
+        MID_WORD_GLIDE,
     }
 
-    data class Result(val outcome: Outcome, val target: Target, val record: GestureRecord?)
-
-    /**
-     * Movement below this fraction of a key width is not treated as an attempt at anything.
-     * Deliberately well under the flick threshold: an under-travelled flick that the keyboard
-     * read as a tap is a genuine failure and has to be recorded, not filtered out for being
-     * inconvenient.
-     */
-    private const val MIN_DISPLACEMENT_RATIO = 0.12f
+    data class Result(
+        val outcome: Outcome,
+        val target: Target,
+        val record: GestureRecord?,
+        /** Whether the target is finished, so the passage should move on. */
+        val complete: Boolean = false,
+        /** The key that was actually due, which moves through a word as it is tapped. */
+        val expectedKeyId: String = target.startKeyId,
+    )
 
     private val main = Handler(Looper.getMainLooper())
 
     @Volatile
-    private var armed: Target? = null
+    private var reader: TargetReader? = null
 
     /** Set by the lab while it is in the foreground. Always called on the main thread. */
     @Volatile
     var onResult: ((Result) -> Unit)? = null
 
-    val isArmed: Boolean get() = armed != null
+    val isArmed: Boolean get() = reader != null
+
+    /** Letters of the armed target already tapped, so the lab can show progress through a word. */
+    val tappedInTarget: Int get() = reader?.tapped ?: 0
+
+    /** The key a gesture must start on right now. Moves through a word being tapped out. */
+    val expectedKeyId: String? get() = reader?.expectedKeyId
 
     fun arm(target: Target) {
-        armed = target
+        reader = TargetReader(target)
     }
 
     fun disarm() {
-        armed = null
+        reader = null
+    }
+
+    /** Forgets the last accepted letter of the armed target, for Undo and Void. */
+    fun stepBack() {
+        reader?.stepBack()
     }
 
     /**
@@ -71,40 +85,48 @@ object GestureCapture {
      * second, separately-computed answer would eventually record one the user never saw.
      */
     fun onGesture(context: Context, trace: GestureTrace, decoded: String? = null) {
-        val target = armed ?: return
+        val reader = this.reader ?: return
+        val target = reader.target
 
-        if (trace.startKeyId != target.startKeyId) {
-            publish(Result(Outcome.WRONG_KEY, target, null))
-            return
+        when (val reading = reader.read(trace)) {
+            is TargetReader.Reading.WrongKey ->
+                publish(Result(Outcome.WRONG_KEY, target, null, expectedKeyId = reading.expectedKeyId))
+
+            TargetReader.Reading.TooSmall ->
+                publish(Result(Outcome.TOO_SMALL, target, null))
+
+            TargetReader.Reading.MidWordGlide ->
+                publish(
+                    Result(
+                        Outcome.MID_WORD_GLIDE, target, null,
+                        expectedKeyId = reader.expectedKeyId,
+                    ),
+                )
+
+            is TargetReader.Reading.Keep -> {
+                val record = GestureRecord(
+                    id = UUID.randomUUID().toString().substring(0, 8),
+                    at = System.currentTimeMillis(),
+                    intent = reading.intent,
+                    promptId = target.id,
+                    expected = reading.expected,
+                    trace = trace,
+                    // Only a glide has a decoded word. A letter's "decoded" would be the word the
+                    // glide engine made of a single tap, which is not an answer to any question.
+                    decoded = decoded.takeIf { reading.intent == GestureIntent.WORD },
+                    word = reading.word,
+                    letterIndex = reading.letterIndex,
+                )
+                GestureBank.append(context.applicationContext, record)
+                publish(
+                    Result(
+                        Outcome.RECORDED, target, record,
+                        complete = reading.complete,
+                        expectedKeyId = reader.expectedKeyId,
+                    ),
+                )
+            }
         }
-        // A tap target is *asking* for a gesture that barely moves, so the guard below would
-        // throw away every sample it collected.
-        if (target.intent != GestureIntent.LETTER && isNegligible(trace)) {
-            publish(Result(Outcome.TOO_SMALL, target, null))
-            return
-        }
-
-        val record = GestureRecord(
-            id = UUID.randomUUID().toString().substring(0, 8),
-            at = System.currentTimeMillis(),
-            intent = target.intent,
-            promptId = target.id,
-            expected = target.expected,
-            trace = trace,
-            decoded = decoded,
-        )
-        GestureBank.append(context.applicationContext, record)
-        publish(Result(Outcome.RECORDED, target, record))
-    }
-
-    private fun isNegligible(trace: GestureTrace): Boolean {
-        if (trace.verdict != GestureVerdict.TAP) return false
-        val first = trace.path.firstOrNull() ?: return true
-        val last = trace.path.lastOrNull() ?: return true
-        val dx = last.x - first.x
-        val dy = last.y - first.y
-        val limit = MIN_DISPLACEMENT_RATIO * trace.keyUnitPx
-        return dx * dx + dy * dy < limit * limit
     }
 
     private fun publish(result: Result) {
