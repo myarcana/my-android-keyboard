@@ -400,6 +400,42 @@ every 140ms after 18 repeats -- about a second in. A fixed character rate is eit
 clear a sentence or too fast to stop on the word you meant; both rates exist so neither has to
 compromise. Word deletion stops at a line break rather than running past it.
 
+### A mode key is a destination, not a step in a ring
+
+The plane switch used to advance a cycle -- letters, numbers, symbols, back to letters -- which
+gives the right answer from the letter plane and the wrong one everywhere else. The number and
+symbol planes each show *two* mode keys at once, "#+=" or "123" on the third row and "ABC" on the
+bottom, and a ring cannot tell them apart: pressing ABC from the numbers plane advanced to
+symbols, which looks exactly like the key having done nothing, and only a second press reached
+the letters. The key ids already said where each one goes; nothing was reading them.
+
+The fix is `IosLayouts.planeFor(keyId)`, and it lives beside the rows that spell those ids rather
+than in the service, because a mode key is only meaningful as a label paired with a destination
+and splitting the two across files is how they drifted apart in the first place. A test walks
+every mode key on every plane and asserts none of them leads nowhere.
+
+### The third row's shoulders must not move between planes
+
+The third row is the only row whose key *count* changes between planes: nine on the letters
+plane, seven on the number and symbol ones. Laying both out by the same centring rule put the
+mode key 126px inboard of where shift had been, so shift and backspace jumped sideways on every
+plane switch -- and backspace is exactly the key a thumb is most likely to be already travelling
+towards when it does.
+
+iOS does not do this, and measuring the screenshots says how it avoids it. At 3x on a 1170px
+screen the two shoulder keys occupy the identical rectangle in all three planes (x 9-141 and
+1029-1161), and the band between them spans the same 802px whether it holds seven letters of 99px
+or five punctuation keys of 145px. The slack goes into the middle keys, not into the margins.
+
+That is one equation rather than a table of widths. Setting the two rows equal,
+
+    2 shoulders + 5 punctuation + 6 gaps  ==  2 shoulders + 7 letters + 8 gaps
+
+the shoulders cancel and leave `5w == 7u + 2g`, so a punctuation key is 1.4 key units plus two
+fifths of a gap -- about 1.465 units at our metrics. It is derived in `IosLayouts` rather than
+written down as a literal, because a literal would quietly stop lining the shoulders up the next
+time `Metrics` is recalibrated, and nothing would fail loudly.
+
 ## Why the UI reads well
 
 - **The geometry is measured, not guessed.** Key sizes, gaps and the palette were taken from

@@ -135,6 +135,77 @@ class LayoutGeometryTest {
         assertEquals("", shift.primary)
     }
 
+    /**
+     * The one thing a plane switch must not do is move the key the thumb is already going for.
+     * Pressing "123" puts a mode key exactly where shift was and backspace exactly where
+     * backspace was, so a shift-then-backspace reflex survives the switch; iOS achieves it by
+     * widening the five punctuation keys between them rather than by centring a shorter row.
+     */
+    @Test
+    fun `shift and backspace hold their rectangles across every plane`() {
+        val letters = LayoutGeometry(IosLayouts.QWERTY_LOWER, Metrics.REFERENCE_WIDTH)
+        val shift = letters.keyRects.first { it.key.type == KeyType.SHIFT }
+        val backspace = letters.keyRects.first { it.key.type == KeyType.BACKSPACE }
+
+        for (plane in listOf(IosLayouts.NUMBERS, IosLayouts.SYMBOLS)) {
+            val g = LayoutGeometry(plane, Metrics.REFERENCE_WIDTH)
+            val mode = g.keyRects.first { it.key.type == KeyType.MODE_SWITCH }
+            val back = g.keyRects.first { it.key.type == KeyType.BACKSPACE }
+            assertEquals("${plane.id} mode key left", shift.left, mode.left, 0.01f)
+            assertEquals("${plane.id} mode key right", shift.right, mode.right, 0.01f)
+            assertEquals("${plane.id} mode key top", shift.top, mode.top, 0.01f)
+            assertEquals("${plane.id} backspace left", backspace.left, back.left, 0.01f)
+            assertEquals("${plane.id} backspace right", backspace.right, back.right, 0.01f)
+        }
+    }
+
+    /** The slack the shoulders no longer take goes into the punctuation keys, which get wider. */
+    @Test
+    fun `punctuation keys are wider than a letter key`() {
+        val letters = LayoutGeometry(IosLayouts.QWERTY_LOWER, Metrics.REFERENCE_WIDTH)
+        val z = letters.keyRects.first { it.key.id == "z" }
+        val g = LayoutGeometry(IosLayouts.NUMBERS, Metrics.REFERENCE_WIDTH)
+        val dot = g.keyRects.first { it.key.id == "." }
+        assertTrue("'.' (${dot.width}) must be wider than 'z' (${z.width})", dot.width > z.width)
+    }
+
+    /**
+     * ABC goes to the letters from wherever it is pressed. It used to advance a ring -- letters,
+     * numbers, symbols, letters -- which reads the same as this from the letter plane and is
+     * wrong everywhere else: ABC on the numbers plane landed on symbols, and the second press
+     * that finally reached the letters looked like the first one having done nothing.
+     */
+    @Test
+    fun `each mode key names the plane it leads to`() {
+        assertEquals(IosLayouts.NUMBERS, IosLayouts.planeFor("mode_123"))
+        assertEquals(IosLayouts.SYMBOLS, IosLayouts.planeFor("mode_symbols"))
+        assertEquals(IosLayouts.NUMBERS, IosLayouts.planeFor("mode_numbers"))
+        assertEquals(IosLayouts.QWERTY_LOWER, IosLayouts.planeFor("mode_abc"))
+        assertNull(IosLayouts.planeFor("backspace"))
+    }
+
+    /** Every mode key on every plane must actually go somewhere. */
+    @Test
+    fun `no mode key is a dead end`() {
+        IosLayouts.ALL.forEach { plane ->
+            plane.rows.flatMap { it.keys }
+                .filter { it.type == KeyType.MODE_SWITCH }
+                .forEach { key ->
+                    assertNotNull("${plane.id}/${key.id} leads nowhere", IosLayouts.planeFor(key.id))
+                }
+        }
+    }
+
+    @Test
+    fun `every plane offers a way back to the letters`() {
+        for (plane in listOf(IosLayouts.NUMBERS, IosLayouts.SYMBOLS)) {
+            assertTrue(
+                "${plane.id} must have an ABC key",
+                plane.rows.any { row -> row.keys.any { it.id == "mode_abc" } },
+            )
+        }
+    }
+
     @Test
     fun `bottom row has the mode, globe, mic, space and return keys`() {
         val bottom = IosLayouts.QWERTY_LOWER.rows[3].keys.map { it.type }

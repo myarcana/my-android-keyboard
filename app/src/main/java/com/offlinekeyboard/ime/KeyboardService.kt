@@ -445,7 +445,7 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BackspaceRepeatStarted -> startBackspaceRepeat()
                 GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
                 GestureOutput.BulkDelete -> bulkDelete()
-                is GestureOutput.SpecialKey -> handleSpecialKey(out.type)
+                is GestureOutput.SpecialKey -> handleSpecialKey(out.type, out.keyId)
                 is GestureOutput.GlideCompleted -> decoded = commitGlide(out)
                 // Kept only while the gesture lab is asking for something; a no-op otherwise.
                 is GestureOutput.GestureCaptured -> GestureCapture.onGesture(this, out.trace, decoded)
@@ -494,11 +494,11 @@ class KeyboardService : InputMethodService() {
         return cased
     }
 
-    private fun handleSpecialKey(type: KeyType) {
+    private fun handleSpecialKey(type: KeyType, keyId: String) {
         when (type) {
             KeyType.SHIFT -> toggleShift()
             KeyType.BACKSPACE -> backspace()
-            KeyType.MODE_SWITCH -> cycleplane()
+            KeyType.MODE_SWITCH -> switchPlane(keyId)
             KeyType.GLOBE -> switchToNextInputMethod(false)
             KeyType.MIC -> toggleDictation()
             KeyType.RETURN -> pressReturn()
@@ -535,12 +535,16 @@ class KeyboardService : InputMethodService() {
         applyLayout()
     }
 
-    private fun cycleplane() {
-        plane = when (plane.id) {
-            "numbers" -> IosLayouts.SYMBOLS
-            "symbols" -> IosLayouts.QWERTY_LOWER
-            else -> IosLayouts.NUMBERS
-        }
+    /**
+     * Goes to the plane the key that was pressed names, rather than to the next one in a ring.
+     *
+     * There are two mode keys visible at once on the number and symbol planes -- "#+=" or "123"
+     * on the third row and "ABC" on the bottom -- and a ring cannot tell them apart, so pressing
+     * ABC from the numbers plane used to land on symbols and pressing it again came back to
+     * letters. The key ids say where each one goes, and they are the only thing that does.
+     */
+    private fun switchPlane(keyId: String) {
+        plane = IosLayouts.planeFor(keyId) ?: return
         shift = ShiftState.OFF
         applyLayout()
     }
