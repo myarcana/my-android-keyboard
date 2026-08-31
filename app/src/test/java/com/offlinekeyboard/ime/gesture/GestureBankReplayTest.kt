@@ -188,7 +188,10 @@ class GestureBankReplayTest {
         // alignment job for whoever wants one rather than a number this report can honestly
         // print. What stays unconditional is the lift distribution underneath, which needs no
         // label at all.
-        val glides = records.filter { it.legacy?.intent == GestureIntent.WORD }
+        // Scorable, not every record with a WORD label: a v5 bank filed each tap of a tapped-out
+        // prose word under the whole word, so the unfiltered count says 2079 glides in a bank
+        // holding 82.
+        val glides = GestureReplay.scorable(records).filter { it.legacy?.intent == GestureIntent.WORD }
         val decoded = glides.filter { it.legacy?.decoded != null }
         println()
         if (glides.isNotEmpty()) {
@@ -217,6 +220,9 @@ class GestureBankReplayTest {
             }.take(12).forEach {
                 println("      wanted ${it.legacy!!.expected}, typed ${it.legacy.decoded}")
             }
+            println("      (pre-v6 labels: one uncorrected miss shifted `expected` a word behind")
+            println("       for the rest of its session, so some of these are the label, not the")
+            println("       decode. Nothing written since v6 can drift this way.)")
         }
 
         // Every record, not just the labelled ones: a finger lift is an observation.
