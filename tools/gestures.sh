@@ -21,15 +21,23 @@ BANK=data/gesture-bank.jsonl
 
 # Counts the bank by label. Defined once, in a variable, because it is wanted from inside a
 # command substitution where a heredoc would be more trouble than it is worth.
-# Session lines share the file with gesture lines and have no "intent"; every reader here wants
-# the gestures, so the filter lives next to the load in each of them.
+#
+# Only pre-v6 lines carry a label at all, and only the ones somebody was *told* to make are
+# evidence for flick-versus-glide -- a prose passage says which word is due, not whether the
+# thumb will glide it or tap it out. Counting every labelled line under one heading is what
+# made this line claim 2081 glides when the bank held 82. Everything else is ordinary typing,
+# kept because the spatial fit and the transcripts both want it.
 SUMMARISE='
 import json, sys, collections
 all_rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 rows = [r for r in all_rows if r.get("kind") != "session"]
 runs = len(all_rows) - len(rows)
-by = collections.Counter(r["intent"] for r in rows)
-print(f"{len(rows)} gestures in {runs} runs: " + ", ".join(f"{n} {k.lower()}" for k, n in sorted(by.items())))
+asked = [r for r in rows
+         if "intent" in r and not str(r.get("prompt", "")).startswith("word:")]
+by = collections.Counter(r["intent"] for r in asked)
+parts = ", ".join(f"{n} {k.lower()}" for k, n in sorted(by.items()))
+print(f"{len(rows)} gestures in {runs} runs: {len(asked)} asked for by name ({parts}), "
+      f"{len(rows) - len(asked)} typing")
 '
 
 cd "$(dirname "$0")/.."
@@ -211,64 +219,63 @@ stats)
         exit 1
     fi
     python3 - "$BANK" <<'PY'
-import json, sys, collections
+import json, sys, collections, math
 all_rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
 rows = [r for r in all_rows if r.get("kind") != "session"]
 runs = [r for r in all_rows if r.get("kind") == "session"]
+sessions = {r["id"]: r for r in runs}
 print(f"{len(rows)} samples in {len(runs)} runs")
 for run in runs[-5:]:
     typed, want = run.get("actual", ""), run.get("intended", "")
     same = sum(1 for a, b in zip(typed, want) if a == b)
-    print(f"  {run['passage']:<12} {len(typed):>4}/{len(want):<4} chars, {same} matching from the start")
-by_intent = collections.Counter(r["intent"] for r in rows)
-for intent, n in sorted(by_intent.items()):
-    print(f"  {intent:<7} {n}")
+    print(f"  {run['passage']:<14} {len(typed):>4}/{len(want):<4} chars, {same} matching from the start")
+
+# Only a pre-v6 line carries a label, and only one that was asked for by name is evidence for
+# flick-versus-glide. Everything else is typing: still wanted, but for the spatial fit and the
+# transcripts rather than for the sweep.
+asked = [r for r in rows if "intent" in r and not str(r.get("prompt", "")).startswith("word:")]
 print()
-print("  key  intent   n   verdict on the build that recorded it")
-grouped = collections.defaultdict(list)
-for r in rows:
-    grouped[(r["startKey"], r["intent"])].append(r)
-for (key, intent), group in sorted(grouped.items()):
-    verdicts = collections.Counter(r["verdict"] for r in group)
-    detail = " ".join(f"{v}={n}" for v, n in verdicts.most_common())
-    print(f"  {key:<4} {intent.lower():<8} {len(group):<3} {detail}")
-wrong = [r for r in rows
-         if (r["verdict"] == "FLICK") != (r["intent"] == "SYMBOL")
-         or r["verdict"] not in ("FLICK", "GLIDE")]
+print(f"  {len(asked)} were asked for by name and can be scored for flick-versus-glide")
+for intent, n in sorted(collections.Counter(r["intent"] for r in asked).items()):
+    print(f"    {intent.lower():<7} {n}")
+print(f"  {len(rows) - len(asked)} are typing, kept for the spatial fit and the transcripts")
+
+voided = [r for r in rows if r.get("void")]
+if voided:
+    print(f"  {len(voided)} withdrawn, kept in the file but not evidence")
+
+# What shape are these gestures? A stationary press and a stroke across the keyboard are the
+# two things this bank exists to tell apart, and the count of each is the first thing a reader
+# wants -- a collecting run that produced no strokes at all has told the decoder nothing, and
+# without this line it looks exactly like a good one. Measured, not labelled: a path either
+# moved or it did not.
+def travel(r):
+    p = r["path"]
+    return sum(math.hypot(p[i + 1][0] - p[i][0], p[i + 1][1] - p[i][1]) for i in range(len(p) - 1))
+
+moved = [r for r in rows if travel(r) > 0.5]
 print()
-print(f"  {len(wrong)} of {len(rows)} were read wrongly by the build that recorded them")
+print(f"  {len(moved)} paths moved; {len(rows) - len(moved)} were a stationary press")
+if moved:
+    units = sorted(travel(r) / r["keyUnitPx"] for r in moved)
+    print(f"    travel in key widths  median {units[len(units) // 2]:.1f}  max {units[-1]:.1f}")
 
-# The glide half. Decoding and the finger-lift window are only scorable once prose passages
-# have been typed, so this stays quiet until there is something to say.
-def letters(s):
-    return "".join(c for c in s.lower() if c.isalpha())
+# The same split per run, because that is where a barren session shows up.
+print()
+print("  per run:")
+for run in runs:
+    mine = [r for r in rows if r.get("session") == run["id"]]
+    if not mine:
+        continue
+    m = sum(1 for r in mine if travel(r) > 0.5)
+    flag = "   <- no strokes at all" if m == 0 and len(mine) > 20 else ""
+    print(f"    {run['passage']:<14} {len(mine):>4} gestures, {m:>3} moved{flag}")
 
-glides = [r for r in rows if r["intent"] == "WORD"]
-decoded = [r for r in glides if r.get("decoded")]
-if decoded:
-    right = sum(1 for r in decoded if letters(r["decoded"]) == letters(r["expected"]))
-    print()
-    print(f"  {right} of {len(decoded)} glides decoded to the word asked for "
-          f"({100 * right // len(decoded)}%)")
-    for r in decoded:
-        if letters(r["decoded"]) != letters(r["expected"]):
-            print(f"    wanted {r['expected']:<12} typed {r['decoded']}")
-
-gaps = []
-for r in glides:
-    path = r["path"]
-    for at in r.get("strokes", []):
-        if 0 < at < len(path):
-            before, after = path[at - 1], path[at]
-            dx, dy = after[0] - before[0], after[1] - before[1]
-            gaps.append((after[2] - before[2], (dx * dx + dy * dy) ** 0.5))
-if gaps:
-    ms = sorted(g[0] for g in gaps)
-    px = sorted(g[1] for g in gaps)
-    print()
-    print(f"  {len(gaps)} mid-glide finger lifts were rejoined")
-    print(f"    duration ms  min {ms[0]}  median {ms[len(ms) // 2]}  max {ms[-1]}")
-    print(f"    distance px  min {px[0]:.0f}  median {px[len(px) // 2]:.0f}  max {px[-1]:.0f}")
+print()
+print("  taps per key:")
+taps = collections.Counter(r["startKey"] for r in rows if travel(r) <= 0.5)
+line = " ".join(f"{k}={n}" for k, n in sorted(taps.items(), key=lambda kv: -kv[1]))
+print("    " + line)
 PY
     ;;
 
