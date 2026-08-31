@@ -360,8 +360,7 @@ class GestureLabActivity : Activity() {
                 bankLine.text = buildString {
                     append("today ${day.today}/${LabProgress.DAILY_GOAL}")
                     if (day.streak > 0) append("   ·   ${day.streak} day streak")
-                    append("   ·   bank ${summary.total}")
-                    append("  (${summary.breakdown})")
+                    append("   ·   bank ${summary.breakdown}")
                     if (sessionRecorded > 0) append("   ·   session $sessionRecorded")
                 }
             }
