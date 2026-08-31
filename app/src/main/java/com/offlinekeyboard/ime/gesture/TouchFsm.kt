@@ -154,8 +154,9 @@ data class GestureConfig(
      * deliberate second word starts with a reach and a reach takes time.
      *
      * The value is a starting point and is expected to move. It is recorded with every gesture
-     * so that a bank collected under one value still scores honestly under another, and the
-     * Gesture Lab's glide passages exist to collect the evidence that will set it.
+     * so that a bank collected under one value still scores honestly under another, and any
+     * Gesture Lab prose passage that gets glided collects the evidence that will set it -- no
+     * instruction needed, since a lift either happened mid-word or it did not.
      */
     val glideResumeMs: Long = 120L,
     /**

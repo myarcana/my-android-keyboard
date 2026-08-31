@@ -1,9 +1,10 @@
 # Implementation notes
 
 Why this keyboard works the way it does, and what every tuned number is. Deeper mechanics for
-the cursor system are in `docs/CURSOR_AND_SELECTION.md`, and the flick-versus-glide data
-collection in `docs/GESTURE_BANK.md`; this is the shorter account of the ideas that made it
-good, and the parameters worth defending.
+the cursor system are in `docs/CURSOR_AND_SELECTION.md`, and the Gesture Lab -- the rig that
+collects the evidence behind most of the numbers here, for tapping and gliding and flicking
+alike -- in `docs/GESTURE_BANK.md`; this is the shorter account of the ideas that made it good,
+and the parameters worth defending.
 
 Working-environment traps (adb quirks, device confirmation screens, coordinates) deliberately
 do **not** live here.
@@ -154,9 +155,10 @@ Four things were in the way, and none of them was the passage:
   the keyboard does not. A hundred and fifty ordinary sentences in an asset deal out about fifty
   passages, which is weeks before a word comes round again.
 - **The drill was a choice.** The collision stream is the least pleasant passage to type and the
-  only one that answers the question the bank exists for. Offered beside forty passages of
-  ordinary English it stops being chosen, and the bank goes on growing while the flick-versus-
-  glide boundary gains nothing. It is dealt in before every fifth passage instead.
+  only one that can answer flick-versus-glide at all -- every other question the bank answers is
+  fed by any passage whatever. Offered beside forty passages of ordinary English it stops being
+  chosen, and the bank goes on growing while that one boundary gains nothing. It is dealt in
+  before every fifth passage instead.
 - **A fumbled label could only be withdrawn a week later, on a laptop.** A gesture the keyboard
   reads wrongly is the most valuable line in the bank; a gesture whose *label* is untrue is worth
   less than nothing, and the only person who can tell them apart is the one who just made it, for
@@ -223,9 +225,12 @@ starting point and are expected to move.
 
 ### The thumb does not aim at the middle of the key
 
-The bank was built to settle flick-versus-glide thresholds, and it turns out to answer a question
-nobody had asked it: 94 of its records are plain taps, each carrying the point the finger landed
-on and the letter the passage had asked for. `tools/fit_spatial.py` reads them.
+Flick-versus-glide is what the bank was first built to settle, and the question it turned out to
+answer best is a different one nobody had thought to ask it: every plain tap in the file carries
+the point the finger landed on and the letter the passage was asking for. `tools/fit_spatial.py`
+reads them, needs no labels to do it, and so gets better with every session regardless of what
+was typed. It is now the largest reader the bank has, and the reason a sitting spent entirely on
+tapping is a good sitting.
 
 **The thumb lands a fifth of a key height low, on every key measured and in all three rows.** The
 mean offset is +0.204 key heights down and 0.063 key widths left; the per-key means run from

@@ -1,9 +1,14 @@
 #!/bin/zsh
 # The gesture bank: collect it, pull it, score it.
 #
+# The lab collects for the whole typing experience -- the tap decoder's spatial model, glide
+# decoding, the flick thresholds -- so a session is worth having whatever was typed and however.
+# `analyse` scores the part that needs a replay of the state machine; `tools/fit_spatial.py`
+# reads the taps, needs no labels, and grows with every session.
+#
 #   tools/gestures.sh lab       build, install, open the Gesture Lab with our IME selected
 #   tools/gestures.sh pull      copy the phone's bank into data/gesture-bank.jsonl
-#   tools/gestures.sh stats     what is in the local bank
+#   tools/gestures.sh stats     what is in the local bank, and how much of it moved
 #   tools/gestures.sh analyse   replay every sample and sweep the thresholds
 #
 # The pull merges rather than overwrites, keyed on each record's id. Sessions accumulate over

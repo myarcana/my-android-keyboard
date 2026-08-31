@@ -49,10 +49,18 @@ import java.util.concurrent.Executors
 /**
  * The Gesture Lab: a typing test that keeps the paper.
  *
- * It shows a passage, you type it, and every gesture is filed under the token it was aimed at.
- * The label is the whole point -- a recording of a swipe is worth very little on its own, because
- * the question it answers, did that person mean the symbol behind the key or the first letter of
- * a word, lives in their head and nowhere in the touch data.
+ * It shows a passage, you type it, and every gesture is recorded against it. The lab exists to
+ * improve the whole typing experience from evidence -- the tap decoder's spatial model, glide
+ * decoding, the flick thresholds, the resume window -- and it does that by recording what
+ * happened rather than by deciding what it meant. Any question can then be asked of the file
+ * afterwards, including questions nobody had thought of when the session was typed.
+ *
+ * Most of those questions need no label at all: what a tap was aiming at and whether a word came
+ * out right are both recoverable from the passage and the text that was produced. One question
+ * does need one. Whether a swipe down the side of a key meant the symbol behind it or the first
+ * letter of a glided word lives in the typist's head and nowhere in the touch data, so the only
+ * ground truth for it is an instruction given before the gesture -- which is what the collision
+ * drill is, and why it is the only part of the lab that asks for a gesture by name.
  *
  * Asking one gesture at a time was the obvious way to get that label and it was subtly the wrong
  * one. An instruction has to be read, the key has to be found, and the named movement has to be

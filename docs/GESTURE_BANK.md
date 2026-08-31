@@ -1,12 +1,29 @@
 # The gesture bank
 
-Telling a swipe-down-for-the-symbol from the start of a glided word is not a problem you can
-reason your way to a threshold for. The two gestures are the same gesture for the first two key
-heights, and which one it is depends on what the person meant, which is not in the touch data.
+The Gesture Lab exists to improve the keyboard's typing experience, all of it, from evidence
+rather than from argument. It shows a passage, records every gesture made against it, and writes
+down what each one put into the field. Once there are enough, any proposed change can be scored
+against the whole history in seconds — flick thresholds, glide decoding, the tap decoder's
+spatial model, and whatever the next question turns out to be.
 
-So it is settled with evidence instead. The Gesture Lab shows a passage, records every gesture
-made against it, and writes down what each one put into the field. Once there are enough, every
-proposed threshold can be scored against all of them in seconds.
+Three consumers so far, and the list is meant to grow:
+
+- **The tap decoder's spatial model.** Where a thumb actually lands relative to the drawn key
+  centre, and how far it scatters. `tools/fit_spatial.py` reads every tap in the bank and needs
+  no labels at all to do it, which makes it the one consumer that grows with ordinary typing.
+- **Flick versus glide.** The thresholds separating swipe-down-for-the-symbol from the first
+  stroke of a glided word. This one needs labels, and so is the only part of the lab that asks
+  for a gesture by name; see below for why it cannot be settled any other way.
+- **Glide decoding.** Whether a stroke produced the word that was wanted, scored against real
+  English rather than against random words.
+
+The flick-versus-glide problem is the one the bank was first built for, and it gets the most
+space here because it is the hardest: telling a swipe-down-for-the-symbol from the start of a
+glided word is not a problem you can reason your way to a threshold for. The two gestures are the
+same gesture for the first two key heights, and which one it is depends on what the person meant,
+which is not in the touch data. Being first is not the same as being the point, though — a
+session of nothing but tapping is a good session, and the spatial fit is the busiest reader in
+the repository.
 
 The lab records and does not judge. It used to do both, and every way it went wrong went wrong
 the same way: it decided at the moment of the gesture what the gesture had been *for*, which is
@@ -62,10 +79,11 @@ harmless word cannot drift back in.
 
 ### Why plain taps are drilled too
 
-The third label, `LETTER`, is not a distraction from the symbol-versus-word question — it is the
-other side of it. **The flick threshold trades off against taps, not against glides.** A bank with
-no taps in it gives the sweep no reason at all not to drive that threshold to zero, because every
-sample it can see is improved by doing so.
+Taps are worth collecting twice over. They are the raw material of the spatial model — the
+largest single use the bank has, and the one that reads every tap in the file — and they are also
+the other side of the symbol-versus-word question. **The flick threshold trades off against taps,
+not against glides.** A bank with no taps in it gives the sweep no reason at all not to drive that
+threshold to zero, because every sample it can see is improved by doing so.
 
 The first collected session had exactly this hole, and the sweep duly recommended more than
 halving the threshold — down to 12 pixels, below Android's own touch slop — on the strength of
@@ -115,7 +133,9 @@ Three kinds of passage, for three different questions:
 - **Prose** is real English, because glide decoding is only half geometry. The other half is
   which words exist and how often they are written, and a decoder is only as good as the word
   distribution it is scored against. Random words would measure the shape matching alone — and
-  would flatter it, because random words sit further apart than real ones do.
+  would flatter it, because random words sit further apart than real ones do. Prose is also where
+  the spatial model gets nearly all its taps, so a prose passage typed entirely by tapping —
+  no glide in it anywhere — is still a full session's worth of evidence.
 - **The corpus** — `app/src/main/assets/passages_en.txt` — is the same argument applied to
   quantity. Five hand-written prose passages are enough to prove the rig and not enough to live
   with: a thumb that types the same two hundred words every evening gets better at those two
@@ -135,9 +155,10 @@ in `SharedPreferences` so closing the app continues the corpus instead of restar
 Both halves of that are there for a reason that only shows up over weeks. Opening on passage
 zero every time meant collecting the first passage of a corpus several hundred times. And
 leaving the drill as something to be picked meant it stopped being picked: it is the least
-pleasant passage to type and the only one that answers the question the bank was built for, so
-beside forty passages of ordinary English it would quietly starve while the total at the bottom
-of the screen went up.
+pleasant passage to type and the only one that can answer the flick-versus-glide question at all,
+so beside forty passages of ordinary English it would quietly starve while the total at the
+bottom of the screen went up. The other questions are fed by any passage at all; this one is fed
+by the drill or by nothing.
 
 The deck advances when a passage is **finished**, not when Next is pressed — a passage typed to
 the end and then abandoned, because the bus came, is the ordinary way a session ends. The only
@@ -339,13 +360,19 @@ prose does not, because a passage says which word is due and not whether the thu
 or tap it out, and both are correct. So the sweep now scores only the gestures somebody was told
 to make, and says how many that is.
 
-Everything else a reader might want — which letter a tap was aiming at, whether a word decoded
-correctly — is recoverable from the session's `intended` and the text the gestures produced, by
-whoever wants it, at the time they want it, with the typist's own corrections already visible.
-The lab does not do it, and the harness does not do it either: it turns out the main consumer
+**That is the exception, not the rule, and it is worth being clear about which way round it
+goes.** Labels are expensive: they need an instruction, the instruction changes the gesture, and
+a label that turns out untrue is worse than no label at all. Every other question the bank
+answers is answered without them. Which letter a tap was aiming at, whether a word decoded
+correctly — both are recoverable from the session's `intended` and the text the gestures
+produced, by whoever wants it, at the time they want it, with the typist's own corrections
+already visible.
+
+The lab does not do it, and the harness does not do it either: it turns out the largest consumer
 never needed a label at all. `tools/fit_spatial.py` assigns each tap to the key it landed nearest
 and iterates, and agrees with the aligned fit to within a tenth of a sigma per key while reading
-1.5× as many taps.
+1.5× as many taps. A new question can be asked of the whole history the same way, which is the
+point of recording paths and text rather than verdicts.
 
 ## Scoring and tuning
 
@@ -353,7 +380,17 @@ and iterates, and agrees with the aligned fit to within a tenth of a sigma per k
 tools/gestures.sh stats           # what is in the bank
 tools/gestures.sh analyse         # replay everything, sweep the thresholds
 tools/gestures.sh analyse f.jsonl # score some other bank
+tools/fit_spatial.py              # refit the tap decoder's spatial model
 ```
+
+`stats` says what was collected, including **how far each path travelled, per run**. That last
+column is there because a session of pure tapping and a session full of glides are worth the same
+to the spatial fit and are worth very different amounts to the sweep, and from a gesture count
+alone the two look identical. Eleven consecutive prose runs were once collected without a single
+stroke in them; the totals went up the whole time.
+
+`fit_spatial.py` is the other half of scoring, and reads taps rather than strokes. It needs no
+labels, so it improves with every session regardless of what was typed or how.
 
 `analyse` runs `GestureBankReplayTest`, which feeds every recorded path back through the real
 `TouchFsm` — not a model of it — so a change to the state machine is scored by the state machine.
@@ -392,3 +429,12 @@ every path is intact, so a new discriminator (curvature after the first key heig
 the direction change, speed profile) can be tried against the whole history without collecting
 anything again. That is the reason for storing paths instead of the four numbers that happened to
 matter in 2026.
+
+The same applies when the sweep is simply *finished*. A saturated sweep — every axis pinned to a
+single value, the best candidate worth a fraction of a point — is not a dead end for the
+keyboard, only for those four numbers. It usually means the next improvement is somewhere else
+entirely: the spatial model, the lexicon, the glide decoder's scoring, the resume window. The
+bank feeds all of them, so the question to ask when the sweep stops helping is not "what other
+threshold is there" but "which part of typing is actually costing the most, and what does the
+bank already know about it". Reading the failures by hand — what the passage asked for, what came
+out, and what the typist did next — has answered that faster than the sweep has, more than once.

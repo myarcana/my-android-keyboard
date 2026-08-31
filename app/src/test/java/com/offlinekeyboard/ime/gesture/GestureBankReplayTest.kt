@@ -7,6 +7,13 @@ import org.junit.Test
  * Scores the collected gesture bank against the flick-versus-glide thresholds, and sweeps for
  * better ones.
  *
+ * This is one reader of the bank, not the reader. The lab collects for the whole typing
+ * experience -- the tap decoder's spatial model, glide decoding and the resume window are all
+ * fitted from the same file -- and these four thresholds are simply the part that needs a
+ * replay of the state machine to score. `tools/fit_spatial.py` is the other established
+ * consumer, and it reads the taps this test sets aside. A saturated sweep here says nothing
+ * about whether the bank still has something to give.
+ *
  * This is a report, not a gate: it prints and passes, because the bank is data about a person's
  * hand and a build should not fail because that hand changed. The one thing it does assert is
  * that replaying a gesture reproduces what the phone decided at the time -- if that ever stops

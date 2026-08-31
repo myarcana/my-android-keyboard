@@ -13,9 +13,12 @@ import java.util.UUID
  * The bridge between the keyboard and the lab.
  *
  * The keyboard hands it every completed gesture along with **what that gesture did to the text**,
- * and it writes both down. Nothing is collected while the lab is not running a passage: an
- * unlabelled gesture is not evidence, and silently recording what someone types would be a strange
- * thing for a keyboard that exists to be incapable of talking to the network.
+ * and it writes both down. Nothing is collected while the lab is not running a passage -- not
+ * because a gesture needs a label to be worth having (most of the bank's readers use no labels at
+ * all) but because a gesture needs a *passage* to be worth having: without one there is nothing
+ * saying what was being aimed at, so nothing can be asked of it afterwards. Silently recording
+ * what someone types outside the lab would also be a strange thing for a keyboard that exists to
+ * be incapable of talking to the network.
  *
  * It used to reject. A gesture that did not match the one target armed at that moment was thrown
  * away, and the passage waited for one that did -- so the bank filled with successes and nothing

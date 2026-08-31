@@ -16,11 +16,13 @@ import kotlin.random.Random
  * position in it is the only thing worth persisting: it is small, it is cheap to write on every
  * advance, and if it is ever lost the cost is one repeated passage.
  *
- * The collision drill is dealt into the pass rather than left to be chosen. It is the passage
- * that answers the question the bank exists for, and it is also the least pleasant to type --
- * left as a menu entry beside forty passages of ordinary English it would quietly stop being
- * typed at all, and the flick-versus-glide boundary would stop gaining evidence while the
- * bank went on growing.
+ * The collision drill is dealt into the pass rather than left to be chosen. Every other question
+ * the bank answers is fed by any passage at all -- the spatial fit reads whatever was tapped,
+ * decoding is scored against whatever was glided -- but flick-versus-glide is fed by the drill
+ * or by nothing, because it is the one question that needs an instruction given before the
+ * gesture. The drill is also the least pleasant passage to type, so left as a menu entry beside
+ * forty passages of ordinary English it would quietly stop being typed at all, and that one
+ * boundary would stop gaining evidence while the bank went on growing.
  */
 class LabDeck(
     private val prefs: SharedPreferences,

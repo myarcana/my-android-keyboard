@@ -60,16 +60,20 @@ data class Passage(
  * labels survive the change intact, because the passage still says what each gesture is meant to
  * be before it is made.
  *
- * Two kinds of passage, for two different questions:
+ * Two kinds of passage. One is narrow by design; the other is deliberately not:
  *
  * - **Collisions** are token streams -- `u u 7 um u 7 on 9 o` -- and they exist because the
  *   flick-versus-glide boundary lives on a handful of keys and nowhere else. Prose would spend
- *   a hundred gestures to collect three useful ones. Every token here is on the boundary.
- * - **Prose** is real English, because glide decoding is only half geometry: the other half is
- *   which words exist and how often they are written, and a decoder is only ever as good as the
- *   word distribution it is scored against. A passage of random words would measure the shape
- *   matching and nothing else, and would flatter it, because random words are further apart than
- *   real ones.
+ *   a hundred gestures to collect three useful ones. Every token here is on the boundary, and
+ *   this is the only passage that asks for a named gesture, because it is the only question
+ *   that cannot be answered without asking.
+ * - **Prose** is real English, and it feeds everything else. Glide decoding is only half
+ *   geometry: the other half is which words exist and how often they are written, and a decoder
+ *   is only ever as good as the word distribution it is scored against. A passage of random
+ *   words would measure the shape matching and nothing else, and would flatter it, because
+ *   random words are further apart than real ones. Prose is also where the spatial model gets
+ *   nearly all of its taps -- so a prose passage typed without a single glide in it is not a
+ *   wasted session, it is a full one for the largest reader the bank has.
  */
 object Passages {
 

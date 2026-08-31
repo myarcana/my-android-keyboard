@@ -164,7 +164,13 @@ object GestureReplay {
     }
 
     /**
-     * The gestures that can honestly be scored: the ones somebody was *told* to make.
+     * The gestures that can honestly be scored **for flick-versus-glide**: the ones somebody was
+     * *told* to make.
+     *
+     * This is not a filter on what is useful, only on what this one question can use. The taps it
+     * discards are the whole input to `tools/fit_spatial.py`, and the glides it discards are what
+     * decoding accuracy is measured on -- both read the bank without needing a label, which is
+     * why they can use sessions this function returns nothing from.
      *
      * Flick-versus-glide is the one question the touch data cannot answer about itself, so the
      * only ground truth that exists for it is an instruction given before the gesture. The
