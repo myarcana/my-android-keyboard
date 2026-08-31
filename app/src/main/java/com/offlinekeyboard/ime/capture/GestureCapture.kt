@@ -39,6 +39,18 @@ object GestureCapture {
     @Volatile
     private var run: PassageRun? = null
 
+    /**
+     * Whether gestures are being kept right now.
+     *
+     * Separate from having a run, because leaving the lab and coming back must not start a new
+     * one. It used to: every resume began a fresh [PassageRun] while the field kept the text
+     * already typed into it, so the transcript restarted at empty and disagreed with the screen
+     * from then on. Recording stops when the lab goes away and picks the same run back up when it
+     * returns.
+     */
+    @Volatile
+    private var recording = false
+
     @Volatile
     private var sessionId: String = ""
 
@@ -48,13 +60,37 @@ object GestureCapture {
     @Volatile
     var onRecorded: ((GestureRecord, PassageRun) -> Unit)? = null
 
-    val isArmed: Boolean get() = run != null
+    val isArmed: Boolean get() = recording && run != null
 
     /** The run in progress, for the lab to draw. */
     val current: PassageRun? get() = run
 
     /**
-     * Starts recording a passage.
+     * Continues the run for this passage, or starts one if there is none.
+     *
+     * Called when the lab comes back to the foreground, where the passage on screen and the text
+     * in the field have both survived. Beginning unconditionally here is what broke the
+     * transcript, and it broke it silently: the gestures went on being recorded, under a new
+     * session, against a run that thought nothing had been typed.
+     */
+    fun resume(context: Context, passage: Passage) {
+        val existing = run
+        if (existing != null && existing.passageId == passage.id) {
+            recording = true
+        } else {
+            begin(context, passage)
+        }
+    }
+
+    /** Stops recording and writes down what the run has produced so far. */
+    fun pause(context: Context) {
+        val paused = run ?: return
+        recording = false
+        writeSession(context, paused)
+    }
+
+    /**
+     * Starts recording a passage, from nothing.
      *
      * The session line goes in immediately, with an empty `actual`. Written at the start rather
      * than only at the end because the ordinary way a session ends is that it is abandoned, and a
@@ -71,17 +107,18 @@ object GestureCapture {
         sessionId = UUID.randomUUID().toString().substring(0, 8)
         sessionAt = System.currentTimeMillis()
         run = started
+        recording = true
         writeSession(context, started)
     }
 
-    /** Closes the run, writing what it finally produced. */
+    /** Closes the run for good, writing what it finally produced. */
     fun end(context: Context) {
-        val finished = run ?: return
-        writeSession(context, finished)
+        pause(context)
         run = null
     }
 
     fun disarm() {
+        recording = false
         run = null
     }
 
@@ -117,6 +154,7 @@ object GestureCapture {
         deleted: Int = 0,
         decoded: String? = null,
     ) {
+        if (!recording) return
         val run = this.run ?: return
 
         // Where the caret was *before* this gesture, so the hint names the token being aimed at

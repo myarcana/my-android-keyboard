@@ -155,7 +155,9 @@ class GestureLabActivity : Activity() {
     override fun onResume() {
         super.onResume()
         GestureCapture.onRecorded = ::onRecorded
-        armCurrent()
+        // Continue the run that was in progress, rather than starting one over the top of text
+        // that is still in the field.
+        GestureCapture.resume(applicationContext, passage)
         refreshBankLine()
         refreshImeWarning()
         field.requestFocus()
@@ -168,7 +170,7 @@ class GestureLabActivity : Activity() {
         // emitting gestures, and with no run in progress they are dropped on the floor. The
         // session line is written on the way out, so a run abandoned by leaving the app -- which
         // is the ordinary way one ends -- still says what it produced.
-        GestureCapture.end(applicationContext)
+        GestureCapture.pause(applicationContext)
         GestureCapture.onRecorded = null
     }
 
