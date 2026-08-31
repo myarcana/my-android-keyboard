@@ -195,8 +195,12 @@ class GestureLabActivity : Activity() {
         note.text = passage.note
         feedback.setTextColor(muted)
         feedback.text = "Type it straight through -- the ones read wrongly are the most useful."
-        renderPassage()
+        // Start the run *before* drawing it. The other order drew the passage that was already
+        // recording, so Next appeared to do nothing while every gesture went into a run for a
+        // passage that was not on screen -- which is exactly how a session gets recorded against
+        // the wrong text.
         armCurrent()
+        renderPassage()
     }
 
     /** The next passage in the deck, unless finishing this one already moved it on. */
@@ -222,8 +226,9 @@ class GestureLabActivity : Activity() {
     private fun renderPassage() {
         val run = GestureCapture.current
         val text = run?.intended ?: PassageRun.textOf(passage)
-        val correct = run?.correctPrefix ?: 0
-        val typed = run?.position ?: 0
+        val aligned = run?.alignment()
+        val marks = aligned?.marks ?: IntArray(text.length)
+        val caret = aligned?.caret ?: 0
         val builder = SpannableStringBuilder(text)
         spans = (run ?: PassageRun(passage.id, text, passage.targets)).tokenRanges()
 
@@ -244,18 +249,25 @@ class GestureLabActivity : Activity() {
             }
         }
 
-        paint(0, correct, goodHue)
-        // Typed, but no longer what the passage says. Not an error to be corrected before the lab
-        // will go on -- it goes on regardless -- just the point the two stopped matching.
-        paint(correct, typed, badHue, background = true)
-        paint(typed, text.length, ahead)
+        // One verdict per character, so a single mistyped letter is a single red letter rather
+        // than a red remainder of the passage.
+        marks.forEachIndexed { i, mark ->
+            when (mark) {
+                PassageRun.Mark.CORRECT -> paint(i, i + 1, goodHue)
+                PassageRun.Mark.WRONG -> paint(i, i + 1, badHue, background = true)
+                else -> paint(i, i + 1, ahead)
+            }
+        }
         // The next character to type, marked so the eye can find it without counting.
-        paint(typed, (typed + 1).coerceAtMost(text.length), hueFor(GestureIntent.LETTER), background = true)
+        paint(caret, (caret + 1).coerceAtMost(text.length), hueFor(GestureIntent.LETTER), background = true)
         passageView.text = builder
 
         progress.text = buildString {
-            append("$typed of ${text.length} characters")
-            if (typed > correct) append("   ·   ${typed - correct} adrift")
+            append("$caret of ${text.length} characters")
+            aligned?.let {
+                if (it.wrong > 0) append("   ·   ${it.wrong} wrong")
+                if (it.inserted > 0) append("   ·   ${it.inserted} extra")
+            }
             append("   ·   passage ${deck.position}/${deck.total}")
             append("   ·   ${run?.count ?: 0} gestures")
         }
@@ -270,7 +282,7 @@ class GestureLabActivity : Activity() {
      * number before it has been measured returns an answer about the previous passage.
      */
     private fun scrollToCurrent() {
-        val at = GestureCapture.current?.position ?: 0
+        val at = GestureCapture.current?.alignment()?.caret ?: 0
         passageView.post {
             val layout = passageView.layout ?: return@post
             val line = layout.getLineForOffset(at.coerceIn(0, passageView.text.length))
@@ -309,7 +321,7 @@ class GestureLabActivity : Activity() {
             wordsTyped++
             if (sameWord(record.decoded, record.expected)) wordsRight++
         }
-        val onTrack = run.correctPrefix == run.position
+        val onTrack = run.alignment().let { it.wrong == 0 && it.inserted == 0 }
         feedback.setTextColor(if (onTrack) goodHue else badHue)
         feedback.text = describe(record)
         renderPassage()
@@ -326,10 +338,10 @@ class GestureLabActivity : Activity() {
         append(record.trace.verdict.name)
         if (record.typed.isNotEmpty()) append("  ·  typed \"${record.typed}\"")
         if (record.deleted > 0) append("  ·  deleted ${record.deleted}")
-        if (record.intent == GestureIntent.WORD) {
-            append("  ·  typed ")
-            append(record.decoded ?: "nothing")
-        }
+        // Only when a glide actually decoded something. It used to fire on the *intent*, which
+        // since v5 is a positional hint -- so every tap inside a prose word reported "typed
+        // nothing" beside the letter it had just plainly typed.
+        record.decoded?.let { append("  ·  decoded $it") }
         append("  ·  ")
         append("%.0f".format(record.pathLength))
         append("px in ")
@@ -352,7 +364,9 @@ class GestureLabActivity : Activity() {
      */
     private fun finishPassage() {
         renderPassage()
-        GestureCapture.disarm()
+        // end, not disarm: disarm drops the run on the floor, and with it the closing line that
+        // says what the finished passage actually produced.
+        GestureCapture.end(applicationContext)
         if (!advanced) {
             deck.advance()
             advanced = true
@@ -388,7 +402,7 @@ class GestureLabActivity : Activity() {
                     if (sessionRecorded > 0) {
                         append("   ·   session $sessionRecorded")
                         if (sessionDecided > 0) {
-                            append(" · $sessionAgreed/$sessionDecided read correctly")
+                            append(" · $sessionAgreed/$sessionDecided drill gestures read correctly")
                         }
                         if (wordsTyped > 0) {
                             append(" · $wordsRight/$wordsTyped words decoded correctly")

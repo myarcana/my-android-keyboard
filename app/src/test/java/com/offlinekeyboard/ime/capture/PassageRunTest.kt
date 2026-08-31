@@ -58,9 +58,101 @@ class PassageRunTest {
         assertEquals(2, r.count)
     }
 
+    // --- how the passage is marked up against what was typed -------------------------------
+
+    private fun PassageRun.type(text: String) =
+        text.forEach { apply(PassageRun.Edit(it.toString(), 0)) }
+
+    private fun marksOf(r: PassageRun) = r.alignment().marks.joinToString("") {
+        when (it) {
+            PassageRun.Mark.CORRECT -> "."
+            PassageRun.Mark.WRONG -> "x"
+            else -> "_"
+        }
+    }
+
+    /**
+     * The bug this replaced: a common prefix turns one mistyped letter into a red remainder of
+     * the passage, because the two strings never agree again index for index. Reported from a
+     * real session as "all the letters get highlighted red after the first mistake", which is
+     * exactly what it did.
+     */
+    @Test
+    fun `one wrong letter marks one letter, not the rest of the passage`() {
+        val r = run("ok", "then")
+        r.type("ok thzn")
+        assertEquals("....." + "x" + ".", marksOf(r))
+        assertEquals(1, r.alignment().wrong)
+    }
+
+    /**
+     * The other half of the same bug. A dropped character shifts every later one, and by index
+     * alone the whole tail reads as wrong and the caret stops saying what to type next.
+     */
+    @Test
+    fun `a dropped character does not condemn everything after it`() {
+        val r = run("ok", "then")
+        r.type("ok thn")
+        val marks = marksOf(r)
+        assertEquals("the passage is 7 characters", 7, marks.length)
+        assertEquals("only the missing letter is unaccounted for", 0, r.alignment().wrong)
+        assertEquals(1, marks.count { it == '_' })
+    }
+
+    @Test
+    fun `an extra character is counted as extra rather than as a mistake`() {
+        val r = run("ok")
+        r.type("okk")
+        assertEquals(1, r.alignment().inserted)
+        assertEquals(0, r.alignment().wrong)
+    }
+
+    @Test
+    fun `the caret is where the typist has reached`() {
+        val r = run("ok", "then")
+        assertEquals(0, r.alignment().caret)
+        r.type("ok t")
+        assertEquals(4, r.alignment().caret)
+        r.type("hen")
+        assertEquals(7, r.alignment().caret)
+    }
+
+    /**
+     * A passage is typed a bit at a time, and the part not reached yet is not a mistake. Charging
+     * for it leaves the alignment table full of ties and the caret lands anywhere: nine
+     * characters into a long passage it was reported at the very end.
+     */
+    @Test
+    fun `a barely started passage puts the caret near the start`() {
+        val r = PassageRun("t", "the deadline is friday but i would rather be early")
+        r.type("the deadl")
+        val a = r.alignment()
+        assertEquals(9, a.caret)
+        assertEquals(0, a.wrong)
+        assertEquals("nothing past the caret is judged", 9, a.marks.count { it == PassageRun.Mark.CORRECT })
+    }
+
+    @Test
+    fun `nothing typed leaves the whole passage untyped`() {
+        val r = run("ok", "then")
+        assertEquals("_______", marksOf(r))
+        assertEquals(0, r.alignment().caret)
+    }
+
+    @Test
+    fun `a corrected mistake leaves no mark`() {
+        val r = run("ok")
+        r.type("oi")
+        assertEquals(1, r.alignment().wrong)
+        r.apply(PassageRun.Edit("", 1))
+        r.type("k")
+        assertEquals("..", marksOf(r))
+        assertEquals(0, r.alignment().wrong)
+    }
+
     /**
      * The correction is the ground truth, and it only exists because the mistake was kept. Under
-     * the old lab the `u` here was never recorded at all -- it started on the wrong key, so it
+     * the old lab the `i` here was never recorded at all -- it started on the wrong key, so it
      * was refused -- and the bank was left with a run of taps in which nothing ever went wrong.
      */
     @Test
@@ -69,13 +161,13 @@ class PassageRunTest {
         r.apply(PassageRun.Edit("o", 0))
         r.apply(PassageRun.Edit("i", 0))
         assertEquals("oi", r.actual)
-        assertEquals("the passage and the typing part company at the second character", 1, r.correctPrefix)
+        assertEquals("one letter wrong, and it is the second", 1, r.alignment().wrong)
 
         r.apply(PassageRun.Edit("", 1))
         assertEquals("o", r.actual)
         r.apply(PassageRun.Edit("k", 0))
         assertEquals("ok", r.actual)
-        assertEquals(2, r.correctPrefix)
+        assertEquals(0, r.alignment().wrong)
         assertEquals("every one of them is a gesture in the bank", 4, r.count)
     }
 
@@ -94,7 +186,6 @@ class PassageRunTest {
         val r = run("ok")
         r.apply(PassageRun.Edit("zzzz", 0))
         assertEquals("zzzz", r.actual)
-        assertEquals(0, r.correctPrefix)
         assertTrue("nothing refuses it and the run goes on", r.isComplete)
     }
 

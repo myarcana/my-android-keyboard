@@ -195,11 +195,27 @@ object GestureBank {
             }
     }
 
+    /**
+     * Counts the bank for the line under the passage.
+     *
+     * Both numbers changed meaning at schema 5 and had to be re-based on something still true.
+     *
+     * The breakdown is **by what the gesture was read as**, not by `intent`. Since v5 `intent` is
+     * a hint about where the caret stood, so a prose word being tapped out files every one of its
+     * taps under WORD -- and the bank line duly reported four hundred and eighty "word" gestures
+     * to someone who had not glided once.
+     *
+     * The agreement figure only counts gestures whose label was a genuine instruction: the
+     * collision drill, which asks for one named gesture on one named key. Measuring a positional
+     * hint against a verdict is not a measurement of anything, and it read as the heuristic
+     * collapsing from 92% to 61% the moment prose started collecting taps.
+     */
     fun summarise(records: List<GestureRecord>): Summary {
-        val decided = records.filter { it.verdictIntent != null }
+        val drill = records.filter { it.sessionId == null || it.word == null && it.seq < 0 }
+        val decided = drill.filter { it.verdictIntent != null }
         return Summary(
             total = records.size,
-            byIntent = records.groupingBy { it.intent }.eachCount(),
+            byIntent = records.mapNotNull { it.verdictIntent }.groupingBy { it }.eachCount(),
             agreed = decided.count { it.verdictIntent == it.intent },
             decided = decided.size,
         )

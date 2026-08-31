@@ -60,19 +60,117 @@ class PassageRun(
     /** How far through, in characters. The caret, in other words. */
     val position: Int get() = out.length
 
+    /** What became of one character of [intended]. */
+    object Mark {
+        const val UNTYPED = 0
+        const val CORRECT = 1
+        const val WRONG = 2
+    }
+
     /**
-     * Characters of [actual] that match [intended] from the start.
+     * How [actual] lines up against [intended], one verdict per intended character.
      *
-     * A prefix rather than an alignment on purpose. This is only for the live display, where the
-     * useful thing to show is "you and the passage agree up to here"; the real alignment costs an
-     * edit-distance table and belongs offline, where it can be redone and argued with.
+     * This was a common prefix to begin with, and a prefix is wrong in a way that shows on screen
+     * immediately: one mistyped letter turns **the entire rest of the passage red**, because the
+     * two strings never agree again from that point. It also puts the caret in the wrong place
+     * the moment a character is inserted or dropped, so the passage stops saying what to type
+     * next. Both were reported from a real session, and both are the same error -- treating two
+     * strings that have drifted as though they were still index for index.
+     *
+     * An edit-distance alignment costs a table the size of the passage squared, which for a
+     * couple of hundred characters is nothing, and it gets both right: a substituted letter is
+     * one red letter, a dropped one leaves a gap, and the caret sits where the typist actually
+     * is.
+     *
+     * It is deliberately the plain unweighted alignment. A better one -- charging less for
+     * confusing two keys that are neighbours than for two on opposite sides of the keyboard --
+     * belongs to whatever scores the bank offline, where it can be changed and the whole history
+     * re-read under it. What is wanted here is only that the screen tell the truth.
      */
-    val correctPrefix: Int
-        get() {
-            var i = 0
-            while (i < out.length && i < intended.length && out[i] == intended[i]) i++
-            return i
+    data class Alignment(
+        /** One [Mark] per character of [intended]. */
+        val marks: IntArray,
+        /** How far through [intended] the typing has reached. */
+        val caret: Int,
+        /** Characters typed that belong nowhere in the passage. */
+        val inserted: Int,
+    ) {
+        val wrong: Int get() = marks.count { it == Mark.WRONG }
+
+        // Arrays do not compare by value, and a data class with one in it will otherwise claim
+        // two identical alignments are different.
+        override fun equals(other: Any?): Boolean =
+            other is Alignment && marks.contentEquals(other.marks) &&
+                caret == other.caret && inserted == other.inserted
+
+        override fun hashCode(): Int =
+            (marks.contentHashCode() * 31 + caret) * 31 + inserted
+    }
+
+    fun alignment(): Alignment {
+        val want = intended
+        val got = out.toString()
+        val n = want.length
+        val m = got.length
+        val marks = IntArray(n) { Mark.UNTYPED }
+        if (m == 0) return Alignment(marks, 0, 0)
+
+        // Cost of turning the first i of the passage into the first j of what was typed.
+        val d = Array(n + 1) { IntArray(m + 1) }
+        for (i in 0..n) d[i][0] = i
+        for (j in 0..m) d[0][j] = j
+        for (i in 1..n) {
+            for (j in 1..m) {
+                val swap = d[i - 1][j - 1] + if (want[i - 1] == got[j - 1]) 0 else 1
+                val skip = d[i - 1][j] + 1
+                val extra = d[i][j - 1] + 1
+                d[i][j] = minOf(swap, skip, extra)
+            }
         }
+
+        // Align what was typed against a *prefix* of the passage, not against all of it. The
+        // passage carries on past where the typist has got to, and those characters are not
+        // mistakes, they are the future -- so the run of them at the end costs nothing and the
+        // alignment ends wherever it is cheapest to stop.
+        //
+        // Getting this wrong is not subtle. Charging for them makes every incomplete passage
+        // equally expensive to align anywhere, which leaves the table full of ties, and the
+        // backtrace then picks one at random: nine characters into a hundred-and-sixty-character
+        // passage the caret was reported at 161 of 161.
+        // Ties go to the reading that has got *further* through the passage. "ok thn" against
+        // "ok then" costs one either way -- a dropped `e`, or an `e` mistyped as `n` with the `n`
+        // still to come -- and the first is both the truer account and the one that leaves the
+        // caret where the thumb actually is.
+        var best = 0
+        for (i in 1..n) if (d[i][m] <= d[best][m]) best = i
+
+        var i = best
+        var j = m
+        val caret = best
+        var inserted = 0
+        while (i > 0 || j > 0) {
+            val swap = if (i > 0 && j > 0) {
+                d[i - 1][j - 1] + if (want[i - 1] == got[j - 1]) 0 else 1
+            } else {
+                Int.MAX_VALUE
+            }
+            when {
+                i > 0 && j > 0 && d[i][j] == swap -> {
+                    marks[i - 1] = if (want[i - 1] == got[j - 1]) Mark.CORRECT else Mark.WRONG
+                    i--
+                    j--
+                }
+                // A character of the passage that was never typed. Left UNTYPED rather than
+                // marked wrong: it is not a mistake yet, it is somewhere the thumb has not been.
+                i > 0 && d[i][j] == d[i - 1][j] + 1 -> i--
+                else -> {
+                    inserted++
+                    j--
+                }
+            }
+        }
+        return Alignment(marks, caret, inserted)
+    }
 
     val isComplete: Boolean get() = out.length >= intended.length
 
