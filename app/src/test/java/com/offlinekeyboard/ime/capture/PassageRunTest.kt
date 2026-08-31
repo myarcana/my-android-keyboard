@@ -99,6 +99,32 @@ class PassageRunTest {
         assertEquals(1, marks.count { it == '_' })
     }
 
+    /**
+     * The worst case for comparing by index: one stray character near the start, with the whole
+     * passage typed correctly after it.
+     *
+     * By index every character from the insertion onward is "wrong", because actual[i+1] is
+     * intended[i] from there to the end -- so a single fat-fingered 3 condemns twenty more
+     * characters that were typed perfectly, and the caret sits one place past where the thumb is.
+     * The alignment charges for the 3 alone.
+     *
+     * Worth being exact about what this ever affected: the *drawing*. The transcript is the fold
+     * of each gesture's recorded edit and never consulted either string, so a run typed like this
+     * was always stored correctly and could always be scored correctly afterwards. What was wrong
+     * was the passage on screen.
+     */
+    @Test
+    fun `one stray character early does not condemn the rest of the passage`() {
+        val r = PassageRun("t", "the sly fox dug back in")
+        r.type("th3e sly fox dug back in")
+        val a = r.alignment()
+        assertEquals("the stray 3 is the only thing charged for", 1, a.inserted)
+        assertEquals("nothing else is wrong", 0, a.wrong)
+        assertEquals("every character of the passage was reached", 23, a.caret)
+        assertEquals(23, a.marks.count { it == PassageRun.Mark.CORRECT })
+        assertEquals("the fold still rebuilds exactly what was typed", "th3e sly fox dug back in", r.actual)
+    }
+
     @Test
     fun `an extra character is counted as extra rather than as a mistake`() {
         val r = run("ok")
