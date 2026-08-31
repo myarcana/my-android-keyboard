@@ -99,13 +99,25 @@ def taps(path):
         key = record.get("startKey", "")
         if not (len(key) == 1 and key.isalpha()):
             continue
-        # Pre-v6 lines say what the build decided; v6 lines do not, and a tap is recognisable
-        # without being told -- it is a gesture that went nowhere.
+        # Pre-v6 lines say what the build decided. v6 lines do not, and a tap is recognisable
+        # without being told: it is a gesture that went nowhere.
+        #
+        # Deliberately not "typed one character equal to the key". That worked only while the
+        # tap decoder was switched off in the lab; with it on, a tap inside a held-open word
+        # rewrites the whole composing region, so `typed` is the word rather than the letter --
+        # which is the point of turning it on, and would silently drop almost every new tap here.
         verdict = record.get("verdict")
-        if verdict is not None and verdict != "TAP":
-            continue
-        if verdict is None and record.get("typed", "") not in (key, key.upper()):
-            continue
+        if verdict is not None:
+            if verdict != "TAP":
+                continue
+        else:
+            path = record["path"]
+            travel = sum(math.dist(path[i][:2], path[i + 1][:2]) for i in range(len(path) - 1))
+            # Every tap in the bank travels 0.0px across five to eleven samples -- the digitiser
+            # reports a resting thumb at one unchanging coordinate -- and the shortest flick ever
+            # recorded travelled 15.1px. Anything in that gap separates them; this sits low in it.
+            if travel > 0.05 * record["keyHeightPx"]:
+                continue
         x, y, _ = record["path"][0]
         out.append((x, y, record["widthPx"]))
     return out

@@ -546,7 +546,13 @@ class GestureLabActivity : Activity() {
             }
         }
         field = EditText(this).apply {
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+            // Plain text, and nothing suppressed. The field used to carry NO_SUGGESTIONS, which
+            // switched the tap decoder off for every gesture the bank has ever held. Collecting
+            // with it on is strictly better: the passage says which letter was meant, the path
+            // says where the thumb went, and `typed` now says what the keyboard made of it --
+            // so a re-reading that rescued a mis-hit is recorded as one, and the decoder becomes
+            // something the bank measures rather than something it cannot see.
+            inputType = InputType.TYPE_CLASS_TEXT
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
             setTextColor(ink)
             hint = "type here"

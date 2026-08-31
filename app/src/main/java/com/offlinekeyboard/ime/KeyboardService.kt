@@ -161,9 +161,7 @@ class KeyboardService : InputMethodService() {
     /**
      * Whether this field wants a word held open at all.
      *
-     * Off for passwords, URLs and anything asking for no suggestions. The keyboard has nothing
-     * useful to say about a password and composing text in one is a way to leak it into the
-     * field's own autofill; a URL is mostly not English and would be re-read as though it were.
+     * Off for passwords and nothing else.
      */
     private var tapDecodingAllowed = false
 
@@ -675,23 +673,36 @@ class KeyboardService : InputMethodService() {
     /**
      * Whether a field is one where holding a word open is appropriate.
      *
-     * The exclusions are all the same kind of mistake in different clothes: a field whose
-     * contents are not English words, where re-reading them as English words can only do harm.
-     * A password is not a word and must not linger in a composing region; an address or an email
-     * is not a word; and a field that has set NO_SUGGESTIONS has said so outright.
+     * **A password, and nothing else, ever.** A password is not a word, and a composing region
+     * holding one is a way to leak it into the field's own autofill. That is a real reason and
+     * it applies to exactly three variations.
+     *
+     * Everything else that used to be excluded was excluded on a guess about content, and every
+     * guess was wrong in the same direction -- it withheld the feature from ordinary English
+     * typing to protect against a harm that the design already prevents.
+     *
+     * `NO_SUGGESTIONS` was the worst of them. It means "the input method does not need to
+     * display any dictionary-based candidates": it is about a candidates UI, and this keyboard
+     * has no English candidates UI to suppress, since the suggestion bar shows emoji and Chinese
+     * on purpose. Honouring it answered a question nobody asked by switching off a feature the
+     * flag never mentioned -- and apps set it constantly and carelessly, on search boxes, chat
+     * fields and notes, every one of them prose where re-reading a mis-hit tap is the whole
+     * point. It also meant the gesture lab, whose field carried it, collected 2670 gestures with
+     * the decoder switched off, so nothing in the bank had ever exercised it.
+     *
+     * Filters and emails and URLs were the same mistake in quieter clothes. A filter field is
+     * ordinary text. An email's local part is usually a name, and a name typed accurately is
+     * *pinned* -- the touch evidence against every other letter exceeds anything the lexicon can
+     * say, so it cannot be revised. What the exclusion actually removed was the recovery of a
+     * sloppy tap, which in a URL is no more welcome than anywhere else.
      */
     private fun allowsTapDecoding(info: EditorInfo?): Boolean {
         val type = info?.inputType ?: return false
         if (type and InputType.TYPE_MASK_CLASS != InputType.TYPE_CLASS_TEXT) return false
-        if (type and InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS != 0) return false
         return when (type and InputType.TYPE_MASK_VARIATION) {
             InputType.TYPE_TEXT_VARIATION_PASSWORD,
             InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD,
             InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD,
-            InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS,
-            InputType.TYPE_TEXT_VARIATION_WEB_EMAIL_ADDRESS,
-            InputType.TYPE_TEXT_VARIATION_URI,
-            InputType.TYPE_TEXT_VARIATION_FILTER,
             -> false
             else -> true
         }
