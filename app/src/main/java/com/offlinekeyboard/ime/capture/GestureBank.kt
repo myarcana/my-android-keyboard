@@ -211,7 +211,12 @@ object GestureBank {
      * collapsing from 92% to 61% the moment prose started collecting taps.
      */
     fun summarise(records: List<GestureRecord>): Summary {
-        val drill = records.filter { it.word == null }
+        // `word` marks a prose token on records written from now on. Records already in the bank
+        // predate it, so the prompt id has to stand in for them: a prose word is filed under
+        // "word:", a drill gesture under "flick:", "glide:" or "tap:". Without this the bank's
+        // own history of prose taps counts as drill and drags the figure down -- 46% of 758,
+        // for a heuristic that had not changed.
+        val drill = records.filter { it.word == null && !it.promptId.startsWith("word:") }
         val decided = drill.filter { it.verdictIntent != null }
         return Summary(
             total = records.size,
