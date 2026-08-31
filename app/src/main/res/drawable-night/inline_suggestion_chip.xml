@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Dark-mode chip. See res/drawable/inline_suggestion_chip.xml. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FF303034" />
+    <corners android:radius="18dp" />
+</shape>

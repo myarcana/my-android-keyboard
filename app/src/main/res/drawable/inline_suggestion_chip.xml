@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The background of one password-manager chip.
+
+  A pill rather than the keys' 8dp radius: the chip is a control that arrived from another app
+  and sits where the emoji strip normally is, and the rounder shape is what says so. The colour
+  is the keyboard's own key colour, taken from KeyboardView's Theme — these two files and that
+  palette have to be edited together, because the chip is drawn by the password manager's
+  process and cannot read a Kotlin constant.
+
+  The -night variant is resolved by that remote process against the system's night mode, which
+  is the same signal KeyboardView reads for its own theme, so the two agree without being told.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <solid android:color="#FFFFFFFF" />
+    <corners android:radius="18dp" />
+</shape>

@@ -63,6 +63,22 @@ object Metrics {
     const val CORNER_RADIUS = 8f
     const val ROW_COUNT = 4
 
+    /**
+     * The strip's height for a given keyboard width.
+     *
+     * [LayoutGeometry] has this as a field already, but the autofill overlay needs the answer
+     * before there is a geometry to ask -- the system requests an InlineSuggestionsRequest
+     * before the input view has been measured, sometimes before it has been created. Both go
+     * through here so the overlay cannot drift from the strip it is covering.
+     */
+    fun stripHeightPx(widthPx: Float): Float = STRIP_HEIGHT / REFERENCE_WIDTH * widthPx
+
+    /** How tall the tappable part of the strip is -- what the autofill overlay may cover. */
+    fun stripTouchHeightPx(widthPx: Float): Float = stripHeightPx(widthPx) * STRIP_TOUCH_FRACTION
+
+    /** Side margin for a given keyboard width, so the overlay lines up with the emoji strip. */
+    fun sideMarginPx(widthPx: Float): Float = SIDE_MARGIN / REFERENCE_WIDTH * widthPx
+
     /** Key aspect ratio; preserved at every width so keys never look squashed. */
     const val KEY_ASPECT = KEY_HEIGHT / KEY_WIDTH
 
@@ -105,7 +121,7 @@ class LayoutGeometry(val layout: Layout, val widthPx: Float) {
     val rowGap = Metrics.ROW_GAP * scale
     val cornerRadius = Metrics.CORNER_RADIUS * scale
     /** Reserved above the keys for the suggestion bar. */
-    val stripHeight = Metrics.STRIP_HEIGHT * scale
+    val stripHeight = Metrics.stripHeightPx(widthPx)
     /** Where the strip stops taking taps; below this is the buffer above the top row. */
     val stripTouchBottom = stripHeight * Metrics.STRIP_TOUCH_FRACTION
     val heightPx = Metrics.HEIGHT_IN_KEY_WIDTHS * keyUnit

@@ -6,6 +6,7 @@ import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.View
 import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.core.view.ViewCompat
@@ -110,9 +111,30 @@ class TestPadActivity : Activity() {
             )
         }
 
+        // The only field here a password manager will offer to fill. An autofill service reads
+        // the view structure, not the keyboard, so it ignores the two fields above however they
+        // are typed into: without an autofill hint there is nothing for it to recognise, and the
+        // inline suggestion strip stays empty no matter how well the keyboard supports it.
+        //
+        // A username rather than a password on purpose. ColorOS binds its own secure keyboard to
+        // any field whose inputType carries a password variation, so a password field here would
+        // not be served by this keyboard at all and would prove nothing about its strip.
+        val login = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_TEXT
+            setAutofillHints(View.AUTOFILL_HINT_USERNAME)
+            hint = "username field -- password manager chips appear here"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+            setPadding(32, 32, 32, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+            )
+        }
+
         val root = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(words)
+            addView(login)
             addView(field)
         }
         setContentView(root)

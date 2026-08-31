@@ -80,6 +80,20 @@ tasks.withType<Test>().configureEach {
 
 dependencies {
     implementation(libs.androidx.core.ktx)
+
+    /**
+     * Inline autofill chip styling -- the one thing the platform API cannot do on its own.
+     *
+     * The style bundle handed to the password manager has to be built by this library on both
+     * sides: it carries a UI version that the remote renderer checks before it will draw
+     * anything, so a hand-rolled Bundle gets silently ignored rather than styled badly.
+     *
+     * This is an AAR, which the third_party runtimes deliberately are not -- see the sourceSets
+     * above. The reason that rule exists is manifest merging, and this is the case it was
+     * written to survive rather than forbid: checkHasNoInternet reads the *merged* manifest, so
+     * an AAR that tried to merge INTERNET in would fail the build instead of shipping.
+     */
+    implementation(libs.androidx.autofill)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
 }

@@ -3,6 +3,7 @@ package com.offlinekeyboard.ime.view
 import android.annotation.SuppressLint
 import android.content.Context
 import android.content.res.Configuration
+import android.content.res.Resources
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
@@ -39,7 +40,7 @@ import kotlin.math.exp
  *
  * The dark values are estimates -- resample them against Gboard in dark mode when tuning.
  */
-private data class Theme(
+internal data class Theme(
     val background: Int,
     val key: Int,
     val specialKey: Int,
@@ -75,6 +76,18 @@ private data class Theme(
         )
     }
 }
+
+/**
+ * Which palette is in force, from the system's night mode.
+ *
+ * Free of the view on purpose: the autofill chips are styled to match these colours, and the
+ * system asks for that styling before there is a KeyboardView to ask. See
+ * [com.offlinekeyboard.ime.autofill.InlineAutofill].
+ */
+internal fun keyboardTheme(resources: Resources): Theme = if (
+    resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
+    Configuration.UI_MODE_NIGHT_YES
+) Theme.DARK else Theme.LIGHT
 
 /**
  * Draws the keyboard and turns touches into [GestureOutput]s.
@@ -145,6 +158,23 @@ class KeyboardView @JvmOverloads constructor(
         set(value) {
             if (field == value) return
             field = value
+            invalidate()
+        }
+
+    /**
+     * Set while a password manager's chips are occupying the strip.
+     *
+     * The chips are real Views from another process, so they cannot be drawn on this canvas and
+     * live in an overlay above it instead. This flag is how the two stay out of each other's
+     * way: the emoji are neither drawn nor tappable underneath the thing covering them. It is
+     * the strip that is handed over, not the buffer below it -- see [Metrics.STRIP_TOUCH_FRACTION]
+     * -- so a press aimed high at the top letter row still snaps to the letter.
+     */
+    var stripHandedOver: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            pressedCandidate = -1
             invalidate()
         }
 
@@ -229,11 +259,7 @@ class KeyboardView @JvmOverloads constructor(
     /** What the host last said the navigation-bar inset was. See [navBarInset]. */
     private var dispatchedNavInset = 0
 
-    private val theme: Theme
-        get() = if (
-            resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
-            Configuration.UI_MODE_NIGHT_YES
-        ) Theme.DARK else Theme.LIGHT
+    private val theme: Theme get() = keyboardTheme(resources)
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
@@ -344,6 +370,7 @@ class KeyboardView @JvmOverloads constructor(
      * the list behind it grows or shrinks with each letter typed.
      */
     private fun drawCandidates(canvas: Canvas, g: LayoutGeometry, t: Theme, radius: Float) {
+        if (stripHandedOver) return
         status?.let { message ->
             label.color = t.secondaryText
             label.textSize = g.stripHeight * 0.34f
@@ -408,6 +435,7 @@ class KeyboardView @JvmOverloads constructor(
     /** Which suggestion a touch landed on, or -1 for none. */
     private fun candidateAt(x: Float, y: Float, g: LayoutGeometry): Int {
         if (y >= g.stripTouchBottom || candidates.isEmpty() || status != null) return -1
+        if (stripHandedOver) return -1
         val i = ((x - g.margin) / candidateCellWidth(g)).toInt()
         return if (i in 0 until minOf(candidates.size, visibleCandidateCount(g))) i else -1
     }

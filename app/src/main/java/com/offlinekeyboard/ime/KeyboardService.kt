@@ -6,6 +6,8 @@ import android.content.Intent
 import android.content.IntentFilter
 import android.inputmethodservice.InputMethodService
 import android.text.InputType
+import android.os.Build
+import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -17,12 +19,18 @@ import android.view.ViewGroup
 import android.view.inputmethod.CursorAnchorInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.ExtractedTextRequest
+import android.view.inputmethod.InlineSuggestionsRequest
+import android.view.inputmethod.InlineSuggestionsResponse
 import android.view.inputmethod.InputConnection
+import android.widget.FrameLayout
 import android.widget.PopupWindow
 import com.offlinekeyboard.ime.view.CursorIndicatorView
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import android.view.inputmethod.InputMethodManager
+import androidx.annotation.RequiresApi
+import com.offlinekeyboard.ime.autofill.InlineAutofill
+import com.offlinekeyboard.ime.autofill.InlineSuggestionStrip
 import com.offlinekeyboard.ime.asr.Dictation
 import com.offlinekeyboard.ime.asr.MicrophonePermissionActivity
 import com.offlinekeyboard.ime.asr.SpokenPunctuation
@@ -98,6 +106,12 @@ private val DEBUG_GESTURES = BuildConfig.DEBUG
 class KeyboardService : InputMethodService() {
 
     private var keyboardView: KeyboardView? = null
+
+    /**
+     * The password-manager chips, or null below API 30 where inline suggestions do not exist.
+     * Only ever non-null alongside [keyboardView]: the two are built together.
+     */
+    private var inlineStrip: InlineSuggestionStrip? = null
 
     // --- suggestion bar ---
     /**
@@ -320,19 +334,19 @@ class KeyboardService : InputMethodService() {
 
     private val dictationListener = object : Dictation.Listener {
         override fun onStateChanged(state: Dictation.State) {
-            keyboardView?.status = when (state) {
+            setStatus(when (state) {
                 Dictation.State.IDLE -> null
                 Dictation.State.LOADING -> getString(R.string.dictation_loading)
                 Dictation.State.LISTENING -> getString(R.string.dictation_listening)
                 Dictation.State.TRANSCRIBING -> getString(R.string.dictation_transcribing)
-            }
+            })
             if (state == Dictation.State.IDLE) refreshCandidates()
         }
 
         override fun onText(text: String) = commitDictated(text)
 
         override fun onUnavailable(reason: Dictation.Reason) {
-            keyboardView?.status = null
+            setStatus(null)
             when (reason) {
                 Dictation.Reason.NO_PERMISSION -> MicrophonePermissionActivity.launchFrom(this@KeyboardService)
                 Dictation.Reason.NO_MICROPHONE ->
@@ -392,25 +406,104 @@ class KeyboardService : InputMethodService() {
             tag.startsWith("zh-TW", ignoreCase = true)
     }
 
+    /**
+     * Puts a message in the strip -- and takes the strip back from any password-manager chips
+     * covering it, which are drawn by another process and would otherwise sit on top of it.
+     *
+     * The suggestion is not lost so much as declined: pressing the microphone is a deliberate
+     * act, and the manager re-offers on the next focus. A chip overlapping "Listening" would be
+     * the worse trade.
+     */
+    private fun setStatus(message: String?) {
+        if (message != null) clearInlineSuggestions()
+        keyboardView?.status = message
+    }
+
     /** A message in the suggestion strip that clears itself. There is nowhere else to put one. */
     private fun showBriefly(message: String) {
-        keyboardView?.status = message
+        setStatus(message)
         handler.postDelayed({
             if (dictation?.state == Dictation.State.IDLE) {
-                keyboardView?.status = null
+                setStatus(null)
                 refreshCandidates()
             }
         }, 2500)
     }
 
-    override fun onCreateInputView(): View =
-        KeyboardView(this).also { view ->
-            keyboardView = view
-            view.onOutput = ::handleOutputs
-            view.onCandidate = ::commitCandidate
-            applyLayout()
-            loadEmojiIndex()
+    override fun onCreateInputView(): View {
+        val view = KeyboardView(this)
+        keyboardView = view
+        view.onOutput = ::handleOutputs
+        view.onCandidate = ::commitCandidate
+        applyLayout()
+        loadEmojiIndex()
+        inlineStrip = null
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return view
+
+        // Inline autofill chips are Views rendered by the password manager's process, so they
+        // cannot be drawn on KeyboardView's canvas the way the emoji are. The input view becomes
+        // two layers instead: the keyboard, and an overlay lying on the strip that is empty and
+        // GONE until a manager fills it.
+        val strip = InlineSuggestionStrip(this)
+        inlineStrip = strip
+        return FrameLayout(this).apply {
+            addView(
+                view,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                ),
+            )
+            addView(
+                strip,
+                FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    Gravity.TOP,
+                ),
+            )
         }
+    }
+
+    /**
+     * The system asks this before showing the keyboard for a field; returning null -- which the
+     * default implementation does, and which this keyboard used to inherit -- is what tells it
+     * not to bother a password manager for suggestions at all.
+     *
+     * Called before the input view has been measured on the first show, hence the fallback to
+     * the display's width: the request has to name the size chips will be drawn at, and the
+     * keyboard is always the full width of the window.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    override fun onCreateInlineSuggestionsRequest(uiExtras: Bundle): InlineSuggestionsRequest? {
+        val width = keyboardView?.width?.takeIf { it > 0 }
+            ?: resources.displayMetrics.widthPixels
+        return InlineAutofill.request(this, width)
+    }
+
+    /**
+     * A password manager has answered. Returning true claims the suggestions; returning false
+     * lets the system fall back to the manager's own dropdown over the field, which is the right
+     * answer when there is nothing to show or nowhere to show it.
+     */
+    @RequiresApi(Build.VERSION_CODES.R)
+    override fun onInlineSuggestionsResponse(response: InlineSuggestionsResponse): Boolean {
+        val view = keyboardView ?: return false
+        val strip = inlineStrip ?: return false
+        val width = view.width.takeIf { it > 0 } ?: return false
+        val shown = strip.show(response.inlineSuggestions, width)
+        view.stripHandedOver = shown
+        // The emoji were never cleared, only covered; if the chips did not appear they need to
+        // be caught up with whatever was typed while the manager was thinking.
+        if (!shown) refreshCandidates()
+        return shown
+    }
+
+    /** Takes the strip back from the chips, if they had it. */
+    private fun clearInlineSuggestions() {
+        inlineStrip?.clear()
+        keyboardView?.stripHandedOver = false
+    }
 
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
@@ -422,6 +515,7 @@ class KeyboardService : InputMethodService() {
         stopTrackpad()
         stopBackspaceRepeat()
         clearCandidates()
+        clearInlineSuggestions()
         // The microphone must never outlive the keyboard being on screen.
         dictation?.stop()
     }
@@ -430,6 +524,10 @@ class KeyboardService : InputMethodService() {
         super.onStartInputView(info, restarting)
         // A word held over from the last field must not follow the focus into this one.
         flushPending()
+        // Nor may a login offered for the last one. `restarting` means the same field is still
+        // focused -- the app changed something about it -- and the chips on screen are still
+        // that field's, so only a genuinely new field clears them.
+        if (!restarting) clearInlineSuggestions()
         tapDecodingAllowed = allowsTapDecoding(info)
         shift = ShiftState.OFF
         applyLayout()

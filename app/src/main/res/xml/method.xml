@@ -4,8 +4,14 @@
   Traditional Chinese gets two, because Taiwan's standard input is Zhuyin but Pinyin is also
   wanted: the layout differs between them even though both produce Traditional characters.
 -->
+<!--
+  supportsInlineSuggestions is what makes password managers offer to fill from the suggestion
+  strip. Without it the system never even asks this IME for an InlineSuggestionsRequest, so the
+  manager falls back to its own dropdown over the field — which is why the strip stayed empty.
+-->
 <input-method xmlns:android="http://schemas.android.com/apk/res/android"
-    android:supportsSwitchingToNextInputMethod="true">
+    android:supportsSwitchingToNextInputMethod="true"
+    android:supportsInlineSuggestions="true">
 
     <subtype
         android:label="@string/subtype_en"

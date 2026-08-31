@@ -636,6 +636,38 @@ fifths of a gap -- about 1.465 units at our metrics. It is derived in `IosLayout
 written down as a literal, because a literal would quietly stop lining the shoulders up the next
 time `Metrics` is recalibrated, and nothing would fail loudly.
 
+### A chip from another process has no size of its own
+
+Password managers reach the suggestion strip through inline autofill, which the IME opts into
+with `supportsInlineSuggestions` in `method.xml` and two `InputMethodService` overrides. Absent
+either, the system never asks for an `InlineSuggestionsRequest` at all and the manager falls back
+to its own dropdown over the field -- which looks exactly like a keyboard that has no autofill
+support, because it is one.
+
+The chips themselves are `InlineContentView`s: surfaces rendered in the manager's process. Three
+things follow from that, and all three are silent when got wrong.
+
+They cannot be drawn on `KeyboardView`'s canvas the way the emoji are, so the input view is now
+a `FrameLayout` holding the keyboard and an overlay lying on the strip. The overlay covers the
+strip's *tappable* part and no more: the buffer below `stripTouchBottom` catches presses aimed
+high at `q`-`p` and snaps them into the row, and a chip swallowing those would turn a slightly
+high `p` into nothing at all.
+
+The surface composites *behind* its window unless told otherwise, and `KeyboardView` paints its
+whole canvas including the strip, so there is no hole for it to show through. `setZOrderedOnTop(true)`
+before attaching is what makes the chip visible rather than merely present.
+
+And a chip inflated at `WRAP_CONTENT` measures to zero. It has no intrinsic size to fall back on
+-- the width is decided in the other process and arrives on the view's own layout params -- so
+`addView(view)` is correct and `addView(view, LayoutParams(WRAP_CONTENT, ...))` throws the answer
+away. The failure is total and completely quiet: `dumpsys autofill` reports the response as
+`INLINE_SHOWN`, the inflate callback delivers a real view, and `dumpsys SurfaceFlinger --list`
+shows no surface at all, because a zero-width view never gets one.
+
+On this phone the payoff stops at username fields. ColorOS binds `com.oplus.securitykeyboard` to
+any field whose `inputType` carries a password variation, so the password half of a login is not
+served by this keyboard and cannot show its strip -- see the device notes, not this file.
+
 ## Why the UI reads well
 
 - **The geometry is measured, not guessed.** Key sizes, gaps and the palette were taken from
