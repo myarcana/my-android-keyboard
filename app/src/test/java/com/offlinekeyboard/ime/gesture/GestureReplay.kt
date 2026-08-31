@@ -107,10 +107,29 @@ object GestureReplay {
         return null
     }
 
-    fun load(file: File): List<GestureRecord> =
-        file.readLines().mapNotNull { line ->
-            if (line.isBlank()) null else GestureRecordCodec.decode(line)
+    /**
+     * Every gesture in the file, with its session's thresholds attached.
+     *
+     * Since v6 the thresholds live once on the session line rather than on all two hundred of
+     * its gestures, so reading a bank means joining the two back together. A gesture whose
+     * session line never landed -- a run whose opening write was lost -- keeps a null and is
+     * skipped by anything that needs to know what the build was doing.
+     */
+    fun load(file: File): List<GestureRecord> {
+        val lines = file.readLines().filter { it.isNotBlank() }
+        val sessions = lines.mapNotNull(GestureSessionCodec::decode).associateBy { it.id }
+        return lines.mapNotNull { GestureRecordCodec.decode(it) }.map { record ->
+            if (record.trace.thresholds != null) record
+            else {
+                val from = sessions[record.sessionId]?.thresholds ?: return@map record
+                record.copy(trace = record.trace.copy(thresholds = from))
+            }
         }
+    }
+
+    /** The sessions in the file, which is where the passage and the thresholds live. */
+    fun loadSessions(file: File): List<GestureSession> =
+        file.readLines().filter { it.isNotBlank() }.mapNotNull(GestureSessionCodec::decode)
 
     // --- scoring ----------------------------------------------------------------------------
 
@@ -144,13 +163,32 @@ object GestureReplay {
         val correctCount get() = correct.values.sum()
     }
 
+    /**
+     * The gestures that can honestly be scored: the ones somebody was *told* to make.
+     *
+     * Flick-versus-glide is the one question the touch data cannot answer about itself, so the
+     * only ground truth that exists for it is an instruction given before the gesture. The
+     * collision drill gives one -- "flick u for 7" -- and prose does not: a prose passage says
+     * which word is due, not whether the thumb will glide it or tap it out, and the two produce
+     * different gestures that are both correct.
+     *
+     * Recorded before v6, this label sits on the line. Recorded since, it does not exist and is
+     * not invented. Scoring prose against it is what produced a bank of 2666 samples reporting
+     * "word 103/2079 (5%)" -- 1972 of that class being prose words tapped out one letter at a
+     * time, read correctly as taps, and counted as failures. The sweep dutifully optimised
+     * against it and recommended quadrupling the flick threshold.
+     */
+    fun scorable(records: List<GestureRecord>): List<GestureRecord> =
+        records.filter { it.voidReason == null && it.legacy?.promptId?.startsWith("word:") == false }
+
     fun score(records: List<GestureRecord>, config: GestureConfig): Score {
         val correct = mutableMapOf<GestureIntent, Int>()
         val total = mutableMapOf<GestureIntent, Int>()
-        records.forEach { record ->
-            total[record.intent] = (total[record.intent] ?: 0) + 1
-            if (intentOf(replay(record, config)) == record.intent) {
-                correct[record.intent] = (correct[record.intent] ?: 0) + 1
+        scorable(records).forEach { record ->
+            val intent = record.legacy?.intent ?: return@forEach
+            total[intent] = (total[intent] ?: 0) + 1
+            if (intentOf(replay(record, config)) == intent) {
+                correct[intent] = (correct[intent] ?: 0) + 1
             }
         }
         return Score(correct, total)

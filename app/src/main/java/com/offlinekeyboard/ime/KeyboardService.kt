@@ -480,10 +480,6 @@ class KeyboardService : InputMethodService() {
 
     private fun handleOutputs(outputs: List<GestureOutput>) {
         if (DEBUG_GESTURES) outputs.forEach { android.util.Log.d(TAG, "gesture: $it") }
-        // What a glide in this batch decoded to, so the capture below can record the answer next
-        // to the path that produced it. A completed glide is always emitted before the capture
-        // of the gesture that made it, which is the only reason this can be a local.
-        var decoded: String? = null
         typedThisGesture.setLength(0)
         deletedThisGesture = 0
         outputs.forEach { out ->
@@ -505,14 +501,13 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
                 GestureOutput.BulkDelete -> bulkDelete()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type, out.keyId)
-                is GestureOutput.GlideCompleted -> decoded = commitGlide(out)
+                is GestureOutput.GlideCompleted -> commitGlide(out)
                 // Kept only while the gesture lab is asking for something; a no-op otherwise.
                 is GestureOutput.GestureCaptured -> GestureCapture.onGesture(
                     context = this,
                     trace = out.trace,
                     typed = typedThisGesture.toString(),
                     deleted = deletedThisGesture,
-                    decoded = decoded,
                 )
                 else -> Unit
             }

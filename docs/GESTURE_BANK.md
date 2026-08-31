@@ -4,9 +4,16 @@ Telling a swipe-down-for-the-symbol from the start of a glided word is not a pro
 reason your way to a threshold for. The two gestures are the same gesture for the first two key
 heights, and which one it is depends on what the person meant, which is not in the touch data.
 
-So it is settled with evidence instead. The Gesture Lab asks for one specific gesture, watches
-you make it, and files the raw path under what it asked for. Once there are enough, every
+So it is settled with evidence instead. The Gesture Lab shows a passage, records every gesture
+made against it, and writes down what each one put into the field. Once there are enough, every
 proposed threshold can be scored against all of them in seconds.
+
+The lab records and does not judge. It used to do both, and every way it went wrong went wrong
+the same way: it decided at the moment of the gesture what the gesture had been *for*, which is
+the one thing that is not knowable then. What was meant only becomes visible in what the typist
+does next — a backspace is the ground truth, and it arrives afterwards. So the file holds the
+passage, the paths and the text, and every question about them is asked later. See
+[What version 6 deleted](#what-version-6-deleted-and-why) for the four ways the old habit failed.
 
 ## Why "I'm" is the hard case
 
@@ -82,9 +89,10 @@ tools/gestures.sh lab      # build, install, open the lab with our keyboard sele
 
 is still how it gets onto the phone, and is not how it gets used afterwards.
 
-The lab shows a passage and you type it. Every gesture is filed under the token it was aimed at,
-so the label is still asked for before the gesture is made — which was always the point — but the
-gesture itself is now made the way gestures are actually made.
+The lab shows a passage and you type it. The passage says what you were trying to type and the
+recording says what you did, so what any gesture was aimed at is answerable afterwards from the
+two together — and answerable with the correction you went on to make already in view, which is
+the part the lab could never have had.
 
 **This replaced asking one at a time, and the reason is worth stating.** The first lab printed an
 instruction — *"Swipe down on O to type 9"* — waited, recorded, and moved on. The labels were
@@ -257,95 +265,87 @@ thousand samples is a couple of megabytes -- small enough to keep forever, which
 One JSON object per line. Written and read by `gesture/GestureRecord.kt`, which both the app and
 the JVM tests use, so the two ends cannot disagree.
 
-```json
-{"v":5,"kind":"session","id":"7c31aa02","at":1756000003000,
- "passage":"corpus:12","intended":"ok i am","actual":"oi i am"}
+The bank records three things: **what the typist was trying to type**, **what they did**, and
+**what that put into the field**. Nothing else, and in particular nothing about what any gesture
+was *for*.
 
-{"v":5,"id":"892f902b","at":1756000004000,"session":"7c31aa02","seq":3,"typed":"morning",
- "intent":"WORD","prompt":"word:morning","expected":"morning","decoded":"morning",
+```json
+{"v":6,"kind":"session","id":"7c31aa02","at":1756000003000,"passage":"corpus:12",
+ "intended":"ok i am","actual":"oi i am","layout":"en_qwerty_lower",
+ "thresholds":{"flickDistanceRatio":0.025,"verticalDominance":4.25,
+               "glideDistanceRatio":1.2,"flickToGlideRatio":2.5,
+               "glideResumeMs":120,"glideResumeRadiusRatio":1.25}}
+
+{"v":6,"id":"892f902b","at":1756000004000,"session":"7c31aa02","seq":3,"typed":"morning",
  "startKey":"m","layout":"en_qwerty_lower",
  "widthPx":1080.0,"keyUnitPx":92.0,"keyHeightPx":120.0,
- "verdict":"GLIDE",
- "thresholds":{"flickDistanceRatio":0.2,"verticalDominance":4.25,
-               "glideDistanceRatio":1.2,"flickToGlideRatio":2.5,
-               "glideResumeMs":120,"glideResumeRadiusRatio":1.25},
- "path":[[807.2,210.0,0],[806.1,241.3,18],[808.4,299.7,44]],
- "strokes":[17]}
+ "path":[[807.2,210.0,0],[806.1,241.3,18],[808.4,299.7,44]]}
 ```
 
 `path` is `[x, y, milliseconds since the finger went down]`, in the keyboard's own pixels, at the
 width in `widthPx` — which is all the geometry needed to rebuild the exact layout it was made on.
+`typed` and `deleted` are what the gesture did to the field, taken from the keyboard at the moment
+it did it; applied in sequence they rebuild `actual` exactly, so every character traces to the
+gesture that produced it. That mapping is **recorded, never inferred** — rebuilding it afterwards
+by aligning strings would be guessing at something that was certain at the time, and it would
+guess wrong on exactly the interesting cases: a glide that types a word and a space in front of
+it, an emoji that replaces a run of characters, a backspace.
 
-Version 1 lines still read. They were recorded before a glide could be interrupted at all, so a
-missing `strokes` genuinely means one stroke and a missing resume threshold genuinely means the
-build had none — the number exists so a reader can tell which absences are real, not so old data
-can be refused. The bank is the one thing here that must never be invalidated by a change to the
-code that reads it.
+`strokes`, when present, are the indices at which the finger came back down. It reads like
+something a reader could derive from a gap in the timestamps and it is not: a mid-glide lift can
+be 40ms, which is two or three sampling intervals and indistinguishable from a slow frame.
+Deriving it would need a threshold, and a threshold there would quietly reclassify the very
+gestures the resume window exists to handle. How long each lift lasted and how far the finger
+moved across it *are* derived, from the samples either side — which is what lets a bank collected
+under one resume window be rescored under any other.
 
-Version 5 is where the lab stopped judging. Up to 4 it armed one target at a time and **threw
-away any gesture it could not label** -- so the bank held the gestures that went well and nothing
-else. Its first prose session recorded 276 taps and zero mistakes, which is not a keyboard that
-never misses, it is a recorder that deletes the misses. From 5 every gesture is kept, and the file
-holds a transcript instead of a verdict:
+### What version 6 deleted, and why
 
-- a **session line** per run, carrying the `intended` passage and the `actual` text it produced;
-- `session`, `seq`, `typed` and `deleted` on every gesture.
+Every version up to 5 wrote down what the lab believed, at the moment of the gesture, about what
+the gesture was for: `intent`, `prompt`, `expected`, `word`, `letterIndex`. Version 5 had already
+established that this could not be known then — it added the transcript for exactly that reason,
+and its own source said so — but it kept writing them anyway, and everything downstream kept
+reading them as ground truth. Four separate failures came out of that one habit:
 
-`typed` and `deleted` are the mapping from gesture to output, and they are **recorded at the
-moment the gesture is made, never inferred**. Applied in sequence they rebuild `actual` exactly,
-so every character can be traced to the gesture that produced it. Reconstructing that afterwards
-by lining strings up would be guessing at something that was certain at the time, and it would
-guess wrong on the interesting cases -- a glide that types a word and a space in front of it, an
-emoji that replaces a run of characters, a backspace.
+- **Space presses filed under a letter.** 23 records claimed to be taps on `a` or `i` — the
+  one-letter words — and were the space bar, 6.5 key widths away. They alone moved the fitted
+  scatter from 0.23 to 0.80 key widths.
+- **A label that drifted a word behind.** One uncorrected glide miss desynchronised `expected`
+  for the rest of the session, so `sorry for the late reply it has been` decoded correctly and
+  was recorded as seven consecutive failures.
+- **A phantom class.** Every tap inside a prose word was filed under the whole word with no
+  letter index — 1972 of 2670 records — so the spatial fit could not see them and the threshold
+  sweep counted them as failed glides.
+- **A degenerate objective.** With a third of its balanced accuracy pinned near 5% by that
+  phantom class, the sweep recommended quadrupling `flickDistanceRatio`, undoing a threshold
+  this document argues for at length.
 
-Whether a character was a *mistake* is the other question, and that one genuinely is post-hoc:
-it depends on what the typist does next. A backspace is the ground truth, and it only exists in
-hindsight. `intent` and `expected` survive on a v5 line as a hint written down at the time -- what
-the passage was asking for where the caret stood -- and are not evidence that the gesture was a
-correct attempt at anything.
+Also gone: `decoded`, which repeated `typed` exactly on every line that had both; and `verdict`
+with its per-gesture `thresholds`, which are a classification and its inputs — recomputable by
+replaying the path, with the inputs now written once on the session line instead of once per
+gesture.
 
-A session line is written twice, at the start of a run and at its end, under the same `id`. The
-opening one exists because the ordinary way a session ends is that it is abandoned, and a run
-whose intended text was never written down is a heap of gestures nobody can score. When merging,
-the longer `actual` wins; the gesture rule of "the archived copy wins" would keep the empty one.
+**Every one of them still reads.** 803 records predate transcripts entirely and 144 of the
+bank's 146 symbol samples are among them, so `intent` is the only thing that says what those
+were aimed at. `LegacyLabels` holds them, nothing writes them, and the version number is how a
+reader tells a real absence from a missing one. The bank is the one thing here that must never
+be invalidated by a change to the code that reads it.
 
-Version 4 added `word` and `letterIndex`, when prose passages began collecting tapped words as
-well as glided ones. Their absence on an older line is truthful rather than missing: before 4 the
-lab could not record a tapped word at all, so a `LETTER` record in a v3 bank really was a lone
-drill tap and not one letter of something longer.
+### What a label is for, and who makes it
 
-Version 3 is the one that matters in the other direction. A missing `void` means the same thing
-at every version — the sample is evidence — so reading an old line is never ambiguous. The number
-is there for a reader going the other way: anything that scores a v3 bank without honouring
-`void` will silently count samples whose labels were withdrawn, and the version is the only
-warning it gets.
+Flick-versus-glide is the one question the touch data cannot answer about itself, so the only
+ground truth for it is an instruction given *before* the gesture. The collision drill gives one;
+prose does not, because a passage says which word is due and not whether the thumb will glide it
+or tap it out, and both are correct. So the sweep now scores only the gestures somebody was told
+to make, and says how many that is.
 
-Five fields are worth defending:
-
-- **`intent`** is the label, and the only thing in the record that cannot be recomputed. It is
-  what makes the file worth keeping. It is what the thumb *did*, not what the passage suggested:
-  a prose word that was tapped out yields one `LETTER` line per tap, and one that was glided
-  yields a single `WORD` line.
-- **`word`** and **`letterIndex`**, on a letter that came from a tapped word, say which word and
-  where in it. Without them a run of taps is a heap of letters with no way to ask whether reading
-  them together would have got the word right, which is the whole question the tap decoder exists
-  to answer.
-- **`void`**, when present, withdraws that label: the path is real but it is not an example of
-  what `intent` says, so `analyse` sets it aside. Present only on the rare line that needs it.
-- **`thresholds`** is what was live at the time. Without it, `verdict` would say what some
-  unknown build once thought, which is worse than saying nothing. With it, a record made under
-  one set of thresholds is still honest evidence after they move.
-- **`decoded`** is the word the glide decoder produced, and it is not recoverable later: it
-  depends on the lexicon and the weights that were live at the time, and both will change.
-  Keeping it beside the path turns "the decoder got this one wrong" from an impression into a
-  line in a file that can be counted.
-- **`strokes`** are the indices at which the finger came back down. How long each lift lasted and
-  how far the finger moved across it are both derived from the samples either side, which is why
-  they are not stored: two ways to say the same thing is one way to be wrong. This is what makes
-  a bank collected under one resume window scorable under any other.
-
-Raw paths are stored rather than features, because a feature is a guess about what matters, and
-the point of the exercise is that nobody knows yet.
+Everything else a reader might want — which letter a tap was aiming at, whether a word decoded
+correctly — is recoverable from the session's `intended` and the text the gestures produced, by
+whoever wants it, at the time they want it, with the typist's own corrections already visible.
+The lab does not do it, and the harness does not do it either: it turns out the main consumer
+never needed a label at all. `tools/fit_spatial.py` assigns each tap to the key it landed nearest
+and iterates, and agrees with the aligned fit to within a tenth of a sigma per key while reading
+1.5× as many taps.
 
 ## Scoring and tuning
 

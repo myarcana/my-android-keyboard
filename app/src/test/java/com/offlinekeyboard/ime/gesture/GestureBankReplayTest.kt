@@ -46,17 +46,24 @@ class GestureBankReplayTest {
             return
         }
 
+        val scorable = GestureReplay.scorable(records)
         println("\n" + "=".repeat(78))
         println("Gesture bank: ${records.size} samples from $file")
+        // Only gestures somebody was *told* to make can be scored for flick-versus-glide, and
+        // saying so out loud is the point: the previous report scored all of them, so 1972 prose
+        // words tapped out one letter at a time counted as failed glides and the sweep spent two
+        // thirds of its objective on a class that could not be got right.
+        println("  ${scorable.size} were asked for by name and can be scored; " +
+            "${records.size - scorable.size} are typing, kept for everything else")
         println("  " + GestureIntent.entries.joinToString("    ") { intent ->
-            "$intent ${records.count { it.intent == intent }}"
+            "$intent ${scorable.count { it.legacy?.intent == intent }}"
         })
         println("  keys: " + records.groupingBy { it.trace.startKeyId }.eachCount()
             .toList().sortedByDescending { it.second }
             .joinToString(" ") { "${it.first}=${it.second}" })
         if (withdrawn.isNotEmpty()) {
             println("  ${withdrawn.size} withdrawn, kept in the file but not scored:")
-            withdrawn.forEach { println("    ${it.id}  ${it.promptId}  ${it.voidReason}") }
+            withdrawn.forEach { println("    ${it.id}  ${it.label()}  ${it.voidReason}") }
         }
 
         // Checked here but asserted at the very end: if the harness has drifted, the report
@@ -94,27 +101,42 @@ class GestureBankReplayTest {
      * a replay under those same thresholds must land on the same verdict the phone reached.
      */
     private fun checkReplayMatchesTheDevice(records: List<GestureRecord>): Harness {
-        val mismatches = records.mapNotNull { record ->
-            val config = defaults.copy(
-                flickDistanceRatio = record.trace.thresholds.flickDistanceRatio,
-                verticalDominance = record.trace.thresholds.verticalDominance,
-                glideDistanceRatio = record.trace.thresholds.glideDistanceRatio,
-                flickToGlideRatio = record.trace.thresholds.flickToGlideRatio,
+        // A pre-v6 line wrote down the verdict the phone reached, so replay can be held to it
+        // exactly. A v6 line does not, and is checked against the thing it does carry: the text
+        // that actually reached the field. That is the weaker test and the more honest one --
+        // it asks whether the whole path from touch to characters still behaves, rather than
+        // whether an intermediate label matches an intermediate label.
+        val checkable = records.filter { it.trace.thresholds != null }
+        fun configFor(record: GestureRecord) = record.trace.thresholds!!.let {
+            defaults.copy(
+                flickDistanceRatio = it.flickDistanceRatio,
+                verticalDominance = it.verticalDominance,
+                glideDistanceRatio = it.glideDistanceRatio,
+                flickToGlideRatio = it.flickToGlideRatio,
             )
-            val replayed = GestureReplay.replay(record, config)
-            if (replayed == record.trace.verdict) null else Triple(record, record.trace.verdict, replayed)
+        }
+        val exact = checkable.filter { it.trace.verdict != null }
+        val mismatches = exact.mapNotNull { record ->
+            val replayed = GestureReplay.replay(record, configFor(record))
+            if (replayed == record.trace.verdict) null
+            else Triple(record, record.trace.verdict, replayed)
+        }
+        val unchecked = records.size - exact.size
+        if (unchecked > 0) {
+            println("  $unchecked samples carry no recorded verdict (v6 and later); " +
+                "they are checked against what they typed instead")
         }
         if (mismatches.isEmpty()) {
-            println("  replay agrees with the device on all ${records.size} samples")
+            println("  replay agrees with the device on all ${exact.size} samples that say")
             return Harness(true, "")
         }
-        println("  REPLAY DISAGREES with the device on ${mismatches.size} samples:")
+        println("  REPLAY DISAGREES with the device on ${mismatches.size} of ${exact.size}:")
         println("    (a gesture sitting exactly on a threshold can disagree through the 0.1px")
         println("     coordinate rounding alone -- check the numbers before assuming drift)")
         mismatches.take(10).forEach { (record, onDevice, replayed) ->
-            println("    ${record.id}  ${record.promptId}  device=$onDevice replay=$replayed")
+            println("    ${record.id}  ${record.label()}  device=$onDevice replay=$replayed")
         }
-        val rate = mismatches.size.toFloat() / records.size
+        val rate = mismatches.size.toFloat() / exact.size.coerceAtLeast(1)
         return Harness(
             ok = rate <= 0.02f,
             message = "Replay reproduced only ${"%.0f".format((1 - rate) * 100)}% of the " +
@@ -123,16 +145,26 @@ class GestureBankReplayTest {
         )
     }
 
+    /** What a record can be called in a report: its old prompt, or the text it produced. */
+    private fun GestureRecord.label(): String =
+        legacy?.promptId ?: sessionId?.let { "$it#$seq" } ?: id
+
     /** Where the collisions actually are, which is the part worth reading before tuning. */
     private fun reportPerKey(records: List<GestureRecord>) {
         println()
         println("  key  intent  n   read as (current build)")
-        records.groupBy { it.trace.startKeyId to it.intent }
+        GestureReplay.scorable(records)
+            .mapNotNull { r -> r.legacy?.intent?.let { r to it } }
+            .groupBy { (r, intent) -> r.trace.startKeyId to intent }
+            .mapValues { (_, pairs) -> pairs.map { it.first } }
             .toList()
             .sortedBy { it.first.first }
             .forEach { (group, rows) ->
                 val (key, intent) = group
-                val reads = rows.groupingBy { it.trace.verdict.name }.eachCount()
+                // What this build makes of them now, not what some earlier one did. The stored
+                // verdict is gone from new lines and was only ever a snapshot of a build anyway.
+                val reads = rows.mapNotNull { GestureReplay.replay(it, defaults)?.name }
+                    .groupingBy { it }.eachCount()
                     .toList().sortedByDescending { it.second }
                     .joinToString(" ") { "${it.first}=${it.second}" }
                 println("  %-4s %-7s %-3d %s".format(key, intent.name.lowercase(), rows.size, reads))
@@ -151,15 +183,21 @@ class GestureBankReplayTest {
      * glided in succession, because it must not.
      */
     private fun reportGlides(records: List<GestureRecord>) {
-        val glides = records.filter { it.intent == GestureIntent.WORD }
-        if (glides.isEmpty()) return
-        val decoded = glides.filter { it.decoded != null }
+        // Decoding can only be scored where something said which word was wanted, which since v6
+        // is nothing: the passage says it, on the session line, and reading it back is an
+        // alignment job for whoever wants one rather than a number this report can honestly
+        // print. What stays unconditional is the lift distribution underneath, which needs no
+        // label at all.
+        val glides = records.filter { it.legacy?.intent == GestureIntent.WORD }
+        val decoded = glides.filter { it.legacy?.decoded != null }
         println()
-        println("  glides: ${glides.size}, ${decoded.size} with a decoded word")
+        if (glides.isNotEmpty()) {
+            println("  glides: ${glides.size}, ${decoded.size} with a decoded word")
+        }
         if (decoded.isNotEmpty()) {
             fun right(rows: List<GestureRecord>) = rows.count { r ->
-                r.decoded!!.lowercase().filter(Char::isLetter) ==
-                    r.expected.lowercase().filter(Char::isLetter)
+                r.legacy!!.decoded!!.lowercase().filter(Char::isLetter) ==
+                    r.legacy.expected.lowercase().filter(Char::isLetter)
             }
             val whole = right(decoded)
             println("    decoded correctly: $whole of ${decoded.size} " +
@@ -174,12 +212,15 @@ class GestureBankReplayTest {
                     "   ·   rejoined after a lift ${right(interrupted)}/${interrupted.size}")
             }
             decoded.filterNot { r ->
-                r.decoded!!.lowercase().filter(Char::isLetter) ==
-                    r.expected.lowercase().filter(Char::isLetter)
-            }.take(12).forEach { println("      wanted ${it.expected}, typed ${it.decoded}") }
+                r.legacy!!.decoded!!.lowercase().filter(Char::isLetter) ==
+                    r.legacy.expected.lowercase().filter(Char::isLetter)
+            }.take(12).forEach {
+                println("      wanted ${it.legacy!!.expected}, typed ${it.legacy.decoded}")
+            }
         }
 
-        val gaps = glides.flatMap { it.gaps }
+        // Every record, not just the labelled ones: a finger lift is an observation.
+        val gaps = records.flatMap { it.gaps }
         if (gaps.isEmpty()) {
             println("    no finger lifts recorded mid-glide yet")
             return
@@ -393,9 +434,10 @@ class GestureBankReplayTest {
 
     /** The gestures the best thresholds still get wrong: the next thing to think about. */
     private fun listFailures(records: List<GestureRecord>, config: GestureConfig) {
-        val failures = records.mapNotNull { record ->
+        val failures = GestureReplay.scorable(records).mapNotNull { record ->
+            val intent = record.legacy?.intent ?: return@mapNotNull null
             val read = GestureReplay.replay(record, config)
-            if (GestureReplay.intentOf(read) == record.intent) null else record to read
+            if (GestureReplay.intentOf(read) == intent) null else record to read
         }
         println()
         if (failures.isEmpty()) {
@@ -412,8 +454,8 @@ class GestureBankReplayTest {
             println(
                 "  %-9s %-19s %-7s %-7s %-6.0f %-7s %d".format(
                     record.id,
-                    record.promptId,
-                    record.intent.name.lowercase(),
+                    record.label(),
+                    record.legacy!!.intent.name.lowercase(),
                     (read?.name ?: "none").lowercase(),
                     record.pathLength,
                     if (dx == 0f) "inf" else "%.1f".format(dy / kotlin.math.abs(dx)),

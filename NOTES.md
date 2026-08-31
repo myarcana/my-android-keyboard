@@ -59,9 +59,11 @@ Which one it is depends on what the person meant, and that is not in the touch d
 thinking about the paths produces the threshold, because the information needed to pick it is not
 in the paths -- it is in the head of whoever made them.
 
-So it is asked for instead. The Gesture Lab names one gesture, watches it happen, and files the
-raw path under what it asked for; `tools/gestures.sh analyse` then replays every sample through
-the real state machine and sweeps the four thresholds against them. Raw paths, not extracted
+So it is asked for instead -- but only where asking is honest, which is the drill. The Gesture Lab
+shows a collision stream, records the paths and what they typed, and `tools/gestures.sh analyse`
+replays every sample through the real state machine and sweeps the four thresholds against them.
+Prose gets no such label and is not given one: a passage says which word is due, not whether the
+thumb will glide it or tap it out, and both are correct. Raw paths, not extracted
 features: a feature is a guess about what matters, and the whole premise is that nobody knows yet.
 The bank is the durable part -- thresholds will be replaced, and the recordings will still score
 whatever replaces them.

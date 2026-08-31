@@ -54,7 +54,7 @@ class GestureCaptureTest {
         assertEquals(Metrics.REFERENCE_WIDTH, trace.widthPx, 0.01f)
         assertEquals(geometry.keyUnit, trace.keyUnitPx, 0.01f)
         assertEquals(geometry.keyHeight, trace.keyHeightPx, 0.01f)
-        assertEquals(config.flickDistanceRatio, trace.thresholds.flickDistanceRatio, 0.001f)
+        assertEquals(config.flickDistanceRatio, trace.thresholds!!.flickDistanceRatio, 0.001f)
     }
 
     /**
@@ -117,12 +117,12 @@ class GestureCaptureTest {
 
     // --- the file format --------------------------------------------------------------------
 
-    private fun record(expected: String, path: List<PathPoint>) = GestureRecord(
+    private fun record(typed: String, path: List<PathPoint>) = GestureRecord(
         id = "abc12345",
         at = 1_756_000_000_000L,
-        intent = GestureIntent.WORD,
-        promptId = "i:word:I'm",
-        expected = expected,
+        typed = typed,
+        sessionId = "sess1234",
+        seq = 0,
         trace = GestureTrace(
             startKeyId = "i",
             verdict = GestureVerdict.GLIDE,
@@ -141,8 +141,15 @@ class GestureCaptureTest {
             "I'm",
             listOf(PathPoint(100f, 200f, 0), PathPoint(103.4f, 260.9f, 33), PathPoint(105f, 330f, 71)),
         )
-        val decoded = GestureRecordCodec.decode(GestureRecordCodec.encode(original))
-        assertEquals(original, decoded)
+        val decoded = GestureRecordCodec.decode(GestureRecordCodec.encode(original))!!
+        // Everything the line carries comes back unchanged. The verdict and the thresholds are
+        // deliberately not among them: a classification is a function of the path and the
+        // numbers that were live, both of which are still here, and the numbers moved to the
+        // session line where they are written once instead of once per gesture.
+        assertEquals(original.copy(trace = original.trace.copy(verdict = null, thresholds = null)),
+            decoded)
+        assertNull("a verdict is recomputed, not stored", decoded.trace.verdict)
+        assertNull("thresholds live on the session line", decoded.trace.thresholds)
     }
 
     /**
@@ -160,7 +167,10 @@ class GestureCaptureTest {
 
         val withdrawn = evidence.copy(voidReason = "an abandoned flick, not the tap it claims")
         val decoded = GestureRecordCodec.decode(GestureRecordCodec.encode(withdrawn))
-        assertEquals(withdrawn, decoded)
+        assertEquals(
+            withdrawn.copy(trace = withdrawn.trace.copy(verdict = null, thresholds = null)),
+            decoded,
+        )
     }
 
     /**
@@ -174,7 +184,7 @@ class GestureCaptureTest {
             val decoded = GestureRecordCodec.decode(
                 GestureRecordCodec.encode(record(text, listOf(PathPoint(1f, 2f, 0), PathPoint(3f, 4f, 9)))),
             )
-            assertEquals(text, decoded?.expected)
+            assertEquals(text, decoded?.typed)
         }
     }
 
@@ -206,6 +216,5 @@ class GestureCaptureTest {
         assertEquals(90f, r.pathLength, 0.01f)
         assertEquals(90f, r.displacement, 0.01f)
         assertEquals(120L, r.durationMs)
-        assertEquals(GestureIntent.WORD, r.verdictIntent)
     }
 }

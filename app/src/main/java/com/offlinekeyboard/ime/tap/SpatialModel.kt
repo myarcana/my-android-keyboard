@@ -96,6 +96,26 @@ class SpatialModel(
         /**
          * Mean landing point relative to the drawn key centre, over the bank's 94 plain taps.
          * Left is negative, down is positive.
+         *
+         * **These four numbers are known to be wrong and are still here on purpose.** Refitted
+         * on 2031 taps rather than 94, and with the space presses that had been filed under the
+         * one-letter words `a` and `i` removed, the bank says (+0.000, +0.099) and sigma
+         * (0.227, 0.208) -- the offset is half what was measured and the scatter is nearly
+         * double. `tools/fit_spatial.py` prints them.
+         *
+         * Shipping them is not a data change, which is why it has not been done here. Sigma
+         * decides the pinning band, and the band is what guarantees that accurately typed text
+         * is never revised. At sigma 0.122 a tap is pinned until it lands 0.41 key widths from
+         * where it was aimed; at 0.227 the band is 0.003, which is to say there is none, and a
+         * perfectly centred tap gives at most 10.0 nats against its sideways neighbour against
+         * a lexicon range of 13.0. Under the honest sigma the language model would get a say in
+         * every letter typed, which is the autocorrect this keyboard exists not to do.
+         *
+         * So the measurement and the rule have to move together: either the band stops being
+         * derived from the corpus-wide worst case and starts being derived from the gap between
+         * the two readings actually in contention, or horizontal pinning is given up and said
+         * so out loud. That is a design decision, and it is not one to make as a side effect of
+         * a refit.
          */
         const val MEASURED_OFFSET_X = -0.063f
         const val MEASURED_OFFSET_Y = 0.204f

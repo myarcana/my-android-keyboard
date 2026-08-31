@@ -4,8 +4,19 @@ import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /**
- * What the user was *asked* to do. This is the ground truth the bank exists to capture, and the
- * only thing in a record that cannot be recomputed later.
+ * What a pre-v6 lab wrote down, at the moment of the gesture, about what it thought was meant.
+ *
+ * Kept only to read old lines. Nothing writes it any more, and the reason is that it was never
+ * knowable at the time: whether a downward stroke on `i` was a flick for `8` or the first leg of
+ * a glide for `I'm` depends on what the person meant, and the lab asking itself that question in
+ * the moment is what produced four separate ways of being confidently wrong -- space presses
+ * filed under the letter that happened to be due, a label that drifted one word behind for the
+ * rest of a session after a single uncorrected miss, a whole class of prose taps recorded as the
+ * word they sat inside, and a threshold sweep scoring against all of it.
+ *
+ * What the bank records now is what was observed: the passage, the path, and the text that went
+ * into the field. Anything anyone wants to conclude from those is concluded afterwards, by
+ * whoever is asking, from data that cannot have drifted.
  */
 enum class GestureIntent {
     /** A swipe down for the symbol behind the key. */
@@ -14,16 +25,7 @@ enum class GestureIntent {
     /** A glide that spells a word. */
     WORD,
 
-    /**
-     * A plain tap for the letter on the key.
-     *
-     * Not a distraction from the symbol-versus-word question: it is the other side of it. The
-     * flick threshold trades off against taps, not against glides, so a bank with no taps in it
-     * gives a sweep no reason at all not to drive that threshold to zero -- and it will, because
-     * every sample it can see is improved by doing so. The first session had exactly this hole,
-     * and the sweep duly recommended halving the threshold with no evidence about what that
-     * would do to ordinary typing.
-     */
+    /** A plain tap for the letter on the key. */
     LETTER,
 }
 
@@ -31,11 +33,13 @@ enum class GestureIntent {
 enum class GestureVerdict { TAP, FLICK, GLIDE, ACCENT, TRACKPAD, NONE }
 
 /**
- * The four numbers that decide flick-versus-glide, stored with every record.
+ * The numbers that decided flick-versus-glide while a run was being recorded.
  *
- * Without them a recorded [GestureVerdict] is uninterpretable a month later: it would say what
- * some unknown build thought, which is worse than saying nothing. With them, a record made
- * under one set of thresholds is still honest evidence after the thresholds move.
+ * Written once on the [GestureSession] rather than on every gesture. They are a property of the
+ * build, not of the finger, and they do not change inside a run -- 2670 records in the first
+ * bank carried four distinct sets between them, one of which accounted for 2382. Recovering
+ * them from git by timestamp instead would break in the one case that matters, which is someone
+ * tuning against a locally edited [GestureConfig].
  */
 data class GestureThresholds(
     val flickDistanceRatio: Float,
@@ -60,90 +64,113 @@ data class GestureThresholds(
 }
 
 /**
- * One finger-down to finger-up, exactly as the state machine saw it, with no interpretation
- * applied beyond the verdict it reached.
+ * One finger-down to finger-up, exactly as the state machine saw it.
+ *
+ * The path is the observation and the rest is the frame needed to read it: which layout was on
+ * screen, and how wide, since the coordinates are in that layout's own pixels. Without the
+ * frame the path is a list of numbers with no units.
  */
 data class GestureTrace(
     val startKeyId: String,
-    val verdict: GestureVerdict,
     val layoutId: String,
     val widthPx: Float,
     val keyUnitPx: Float,
     val keyHeightPx: Float,
-    val thresholds: GestureThresholds,
     val path: List<PathPoint>,
     /**
-     * Indices into [path] at which a new stroke begins, so a glide that was interrupted by a
-     * lifted finger can be told from one that was not.
+     * Indices into [path] at which the finger came back down.
      *
-     * This is the whole reason the leniency is recordable rather than only tunable by feel. The
-     * gap's length and how far the finger moved across it are both derivable from the samples on
-     * either side of each index, which means a bank collected under one resume window can be
-     * rescored under any other.
+     * An observation, not a conclusion: the digitiser reported the finger up, and the recorder
+     * wrote down where in the path that happened. It reads like something derivable from a gap
+     * in the timestamps and it is not -- a mid-glide lift can be shorter than the resume window
+     * allows, 40ms say, which is only two or three sampling intervals and indistinguishable from
+     * a slow frame. Deriving it would need a threshold, and a threshold here would quietly
+     * reclassify the very gestures the resume window exists to handle.
+     *
+     * How long each lift lasted and how far the finger moved across it are read from the samples
+     * either side, which is why *those* are not stored. That is what lets a bank collected under
+     * one resume window be rescored under any other.
      */
     val strokeStarts: List<Int> = emptyList(),
+    /**
+     * What the shipped heuristic made of this path, when the record came from a build that
+     * wrote it down. Null on every line written since v6, where it is recomputed by replaying
+     * the path -- the classification is a function of the path and the thresholds, and storing
+     * a function of two stored things is a third thing to fall out of step.
+     */
+    val verdict: GestureVerdict? = null,
+    /** The thresholds live at the time. Carried on the session line since v6. */
+    val thresholds: GestureThresholds? = null,
 )
 
-/** A trace plus the label it was collected under. One line of the bank. */
-data class GestureRecord(
-    val id: String,
-    val at: Long,
+/**
+ * The labels a pre-v6 lab wrote at the moment of the gesture.
+ *
+ * Present on old lines and on no new ones. See [GestureIntent] for why they stopped being
+ * written; the short version is that every one of them is a claim about what was *meant*, made
+ * by a machine that could not know, and each was wrong in its own way. A reader that wants a
+ * label derives one from the session transcript instead, where a mistake shows up as a mistake
+ * rather than as a confident mislabel.
+ */
+data class LegacyLabels(
     val intent: GestureIntent,
     val promptId: String,
     val expected: String,
-    val trace: GestureTrace,
+    val word: String? = null,
+    val letterIndex: Int = -1,
     /**
-     * The word the glide decoder produced for this path, or null when nothing decoded it.
+     * The word the glide decoder produced.
      *
-     * Stored because it is the answer, and the answer is not recoverable later: it depends on
-     * the lexicon and the weights that were live at the time, and both will change. Keeping it
-     * next to the path turns "the decoder got this wrong" from an impression into a line in a
-     * file that can be counted.
+     * Kept for old lines and not written any more, because it was never a second fact: of the
+     * 59 v5 records that carried it, every one that also had a [GestureRecord.typed] repeated
+     * it exactly. What the decoder produced is what went into the field.
      */
     val decoded: String? = null,
+)
+
+/**
+ * One gesture: what the finger did, and what that put into the field.
+ *
+ * Three things and no more, because three things are what a recorder can honestly know. The
+ * passage on the [GestureSession] says what the typist was trying to type; [trace] says what
+ * they did; [typed] and [deleted] say what came out. Every question the lab used to answer in
+ * the moment -- was that a mis-hit, was that word right, was this a flick or a glide -- is a
+ * question about the relationship between those three, and belongs to whoever is asking, later,
+ * with the correction the typist went on to make already visible.
+ */
+data class GestureRecord(
+    val id: String,
+    val at: Long,
+    val trace: GestureTrace,
     /**
-     * Why this sample is not evidence of the label it carries, or null when it is.
+     * Why this sample is not evidence of anything, or null when it is.
      *
-     * Not the same thing as a gesture the keyboard read *wrongly*. Those are the most valuable
-     * lines in the bank and they stay in the scoring. This is for a sample whose **label** is
-     * untrue: a flick the hand abandoned halfway and turned back from, a swipe made while the
-     * passage was asking for a plain tap. Left in a sweep such a line does active harm, because
-     * the only way to score it correctly is to move a threshold somewhere it should not go.
+     * The one judgement still made at record time, and the only one that can be: it is made by
+     * the person who made the gesture, about the gesture they just made, within a second or two
+     * of making it. A hand that starts a flick, thinks better of it and comes back has produced
+     * a path that means nothing, and nobody but that hand will ever know.
      *
      * The line itself stays. Deleting it would throw away a real recording of a real thing a
-     * hand did -- the abandoned flick is the only evidence in the bank of what abandoning one
-     * looks like -- and a file that quietly loses its awkward lines is one nobody can audit. So
-     * the path is kept and only the claim about it is withdrawn.
+     * hand did, and a file that quietly loses its awkward lines is one nobody can audit.
      */
     val voidReason: String? = null,
     /**
-     * The word this gesture was one letter of, when a prose word was tapped out rather than
-     * glided. Null for a glide, for a drill gesture, and for a one-letter word.
-     *
-     * Stored because it is not recoverable afterwards and it is the whole point of collecting
-     * taps in prose. A run of [GestureIntent.LETTER] records is only a word if something says
-     * which word and in what order; without that the bank has a heap of letters and no way to
-     * ask whether reading them together would have got the word right.
-     */
-    val word: String? = null,
-    /** Where in [word] this letter sat, or -1. */
-    val letterIndex: Int = -1,
-    /**
      * The run of typing this gesture belongs to, and its place in that run.
      *
-     * Together with [GestureSession] these are what turn a heap of gestures into a transcript.
      * The session says what was asked for and what came out; the sequence number says which
-     * gesture is which; and [typed] and [deleted] say what this one did to the text. From those
-     * three the mapping between every character produced and the gesture that produced it is
-     * exact, and everything the lab used to decide in the moment -- was this a mis-hit, was that
-     * word right -- becomes a question an offline reader can answer, and re-answer.
+     * gesture is which; [typed] and [deleted] say what this one did to the text. Applied in
+     * order they rebuild the run's `actual` exactly, so every character traces to the gesture
+     * that produced it -- which is the mapping that cannot be reconstructed afterwards by
+     * lining strings up, and the reason it is recorded rather than inferred.
      */
     val sessionId: String? = null,
     val seq: Int = -1,
-    /** The text this gesture put into the field. Empty for a backspace or a gesture that typed nothing. */
+    /** The text this gesture put into the field. Empty for a backspace or for nothing at all. */
     val typed: String = "",
     /** Characters this gesture removed from the end of the field. */
     val deleted: Int = 0,
+    /** Labels from a pre-v6 line. Null on everything written since. */
+    val legacy: LegacyLabels? = null,
 ) {
     val path get() = trace.path
 
@@ -167,27 +194,17 @@ data class GestureRecord(
     data class Gap(val ms: Long, val px: Float)
 
     /**
-     * Every lift in the middle of this gesture.
+     * Every lift in the middle of this gesture: how long it lasted, and how far the finger moved.
      *
-     * Derived rather than stored, because both numbers come from the samples either side of a
-     * stroke boundary and storing them as well would be two ways to be wrong. This is what the
-     * resume window is scored against: a bank of these says how long a real skip lasts, and how
-     * far the thumb really travels while it is off the glass.
+     * Derived from [GestureTrace.strokeStarts] and the samples either side, rather than stored,
+     * because storing them as well would be two ways to say one thing and so one way to be
+     * wrong. This is what the resume window is scored against.
      */
     val gaps: List<Gap>
         get() = trace.strokeStarts.mapNotNull { at ->
             val before = path.getOrNull(at - 1) ?: return@mapNotNull null
             val after = path.getOrNull(at) ?: return@mapNotNull null
             Gap(after.t - before.t, hypot(after.x - before.x, after.y - before.y))
-        }
-
-    /** The verdict the shipped heuristic reached, reduced to the question the bank asks. */
-    val verdictIntent: GestureIntent?
-        get() = when (trace.verdict) {
-            GestureVerdict.FLICK -> GestureIntent.SYMBOL
-            GestureVerdict.GLIDE -> GestureIntent.WORD
-            GestureVerdict.TAP -> GestureIntent.LETTER
-            else -> null
         }
 }
 
@@ -204,31 +221,32 @@ object GestureRecordCodec {
     /**
      * 2 added the two glide-resume thresholds and the stroke boundaries within a path.
      * 3 added [GestureRecord.voidReason].
-     * 4 added [GestureRecord.word] and [GestureRecord.letterIndex], when prose passages began
-     *   collecting tapped words as well as glided ones. Their absence on an older line is
-     *   truthful: before 4 the lab could not record a tapped word at all, so a LETTER record
-     *   from a v3 bank really was a lone drill tap and not one letter of something longer.
-     * 5 added the transcript: a [GestureSession] line per run, and `session`, `seq`, `typed` and
-     *   `deleted` on every gesture. This is the version at which the lab stopped rejecting
-     *   gestures it could not label. Up to 4 a bank contained only the gestures that went well,
-     *   because a mis-hit was rejected and left no line at all -- so `intent` and `expected` on a
-     *   v4 line are trustworthy *and* the absence of mistakes around them means nothing. From 5
-     *   they are a hint recorded at the time, and the labels that matter are derived by aligning
-     *   the session's `intended` against its `actual`.
+     * 4 added `word` and `letterIndex`, when prose passages began collecting tapped words.
+     * 5 added the transcript: a [GestureSession] line per run, and `session`, `seq`, `typed`
+     *   and `deleted` on every gesture. This is the version at which the lab stopped rejecting
+     *   gestures it could not label -- up to 4 a bank held only the gestures that went well,
+     *   because a mis-hit was refused and left no line at all.
+     * 6 removed everything v5 had made redundant and had not deleted. Gone from the written
+     *   line: `intent`, `prompt`, `expected`, `word`, `letterIndex` -- guesses at what was
+     *   meant, made when it could not be known; `decoded` -- a copy of `typed`; `verdict` and
+     *   `thresholds` -- a classification and its inputs, recomputable by replay, with the
+     *   inputs now on the session line. `strokes` stays, written only when there are any: a
+     *   finger lift is something the digitiser reported, not something a reader can infer, and
+     *   a 40ms lift is indistinguishable from a slow frame. What is left is the passage, the
+     *   path, and the text that reached the field.
      *
-     * Version 1 lines still read: they were recorded before a glide could be interrupted at all,
-     * so a missing `strokes` genuinely means one stroke, and a missing resume threshold genuinely
-     * means the build had none. Bumping the number is not about refusing old data -- the bank is
-     * the one thing here that must never be invalidated by a change to the code that reads it --
-     * it is so that a reader can tell which absences are real.
+     * Every one of those still *reads*. Version 1 lines were recorded before a glide could be
+     * interrupted at all, so a missing `strokes` genuinely means one stroke and a missing resume
+     * threshold genuinely means the build had none. Bumping the number is not about refusing old
+     * data -- the bank is the one thing here that must never be invalidated by a change to the
+     * code that reads it -- it is so a reader can tell which absences are real.
      *
-     * 3 is the one version that matters in the other direction. A missing `void` means the same
-     * thing at every version -- the sample is evidence -- so nothing is ambiguous about reading
-     * an old line. What the number is for is a reader going the other way: something that scores
-     * a v3 bank without honouring `void` will quietly count samples that were withdrawn, and the
-     * version is the only warning it gets.
+     * 3 is the version that matters in the other direction. A missing `void` means the same
+     * thing at every version, so reading an old line is never ambiguous; what the number is for
+     * is a reader going the other way, since anything that scores a v3 bank without honouring
+     * `void` quietly counts samples whose labels were withdrawn.
      */
-    const val SCHEMA = 5
+    const val SCHEMA = 6
 
     fun encode(record: GestureRecord): String {
         val t0 = record.path.firstOrNull()?.t ?: 0L
@@ -236,16 +254,10 @@ object GestureRecordCodec {
             "v" to SCHEMA,
             "id" to record.id,
             "at" to record.at,
-            "intent" to record.intent,
         )
-        // Written only when there is one, and next to the label it withdraws. A sample that is
-        // evidence should not have to say so on every line, and almost every line is evidence.
+        // Written only when there is one. A sample that is evidence should not have to say so on
+        // every line, and almost every line is evidence.
         record.voidReason?.let { fields["void"] = it }
-        // Written only for a letter that was part of a word, which most letters are not.
-        record.word?.let {
-            fields["word"] = it
-            fields["letterIndex"] = record.letterIndex
-        }
         record.sessionId?.let {
             fields["session"] = it
             fields["seq"] = record.seq
@@ -254,29 +266,17 @@ object GestureRecordCodec {
         }
         return Json.write(
             fields + linkedMapOf(
-                "prompt" to record.promptId,
-                "expected" to record.expected,
-                "decoded" to record.decoded,
                 "startKey" to record.trace.startKeyId,
                 "layout" to record.trace.layoutId,
                 "widthPx" to round1(record.trace.widthPx),
                 "keyUnitPx" to round1(record.trace.keyUnitPx),
                 "keyHeightPx" to round1(record.trace.keyHeightPx),
-                "verdict" to record.trace.verdict,
-                "thresholds" to linkedMapOf(
-                    "flickDistanceRatio" to record.trace.thresholds.flickDistanceRatio,
-                    "verticalDominance" to record.trace.thresholds.verticalDominance,
-                    "glideDistanceRatio" to record.trace.thresholds.glideDistanceRatio,
-                    "flickToGlideRatio" to record.trace.thresholds.flickToGlideRatio,
-                    "glideResumeMs" to record.trace.thresholds.glideResumeMs,
-                    "glideResumeRadiusRatio" to record.trace.thresholds.glideResumeRadiusRatio,
-                ),
                 // [x, y, ms since the finger went down]
                 "path" to record.path.map {
                     listOf(round1(it.x), round1(it.y), (it.t - t0).toInt())
                 },
-                "strokes" to record.trace.strokeStarts,
-            ),
+            ) + if (record.trace.strokeStarts.isEmpty()) emptyMap()
+            else linkedMapOf("strokes" to record.trace.strokeStarts),
         )
     }
 
@@ -285,46 +285,56 @@ object GestureRecordCodec {
         @Suppress("UNCHECKED_CAST")
         val o = Json.parse(line) as Map<String, Any?>
         @Suppress("UNCHECKED_CAST")
-        val thresholds = o["thresholds"] as Map<String, Any?>
-        @Suppress("UNCHECKED_CAST")
         val path = (o["path"] as List<List<Any?>>).map {
             PathPoint(num(it[0]), num(it[1]), num(it[2]).toLong())
         }
         @Suppress("UNCHECKED_CAST")
         val strokes = (o["strokes"] as? List<Any?>)?.map { num(it).toInt() } ?: emptyList()
+        @Suppress("UNCHECKED_CAST")
+        val thresholds = (o["thresholds"] as? Map<String, Any?>)?.let {
+            GestureThresholds(
+                flickDistanceRatio = num(it["flickDistanceRatio"]),
+                verticalDominance = num(it["verticalDominance"]),
+                glideDistanceRatio = num(it["glideDistanceRatio"]),
+                flickToGlideRatio = num(it["flickToGlideRatio"]),
+                glideResumeMs = it["glideResumeMs"]?.let { v -> num(v).toLong() }
+                    ?: GestureConfig().glideResumeMs,
+                glideResumeRadiusRatio = it["glideResumeRadiusRatio"]?.let { v -> num(v) }
+                    ?: GestureConfig().glideResumeRadiusRatio,
+            )
+        }
+        // Pre-v6 lines carry a label written at the moment of the gesture. It is read so the
+        // old records stay scorable -- 144 of the bank's 146 symbol samples are among them, and
+        // nothing else says what they were aimed at -- and it is never written again.
+        val legacy = (o["intent"] as? String)?.let {
+            LegacyLabels(
+                intent = GestureIntent.valueOf(it),
+                promptId = o["prompt"] as? String ?: "",
+                expected = o["expected"] as? String ?: "",
+                word = o["word"] as? String,
+                letterIndex = (o["letterIndex"] as? Number)?.toInt() ?: -1,
+                decoded = o["decoded"] as? String,
+            )
+        }
         GestureRecord(
             id = o["id"] as String,
             at = (o["at"] as Number).toLong(),
-            intent = GestureIntent.valueOf(o["intent"] as String),
-            promptId = o["prompt"] as String,
-            expected = o["expected"] as String,
-            decoded = o["decoded"] as? String,
             voidReason = o["void"] as? String,
-            word = o["word"] as? String,
-            letterIndex = (o["letterIndex"] as? Number)?.toInt() ?: -1,
             sessionId = o["session"] as? String,
             seq = (o["seq"] as? Number)?.toInt() ?: -1,
             typed = o["typed"] as? String ?: "",
             deleted = (o["deleted"] as? Number)?.toInt() ?: 0,
+            legacy = legacy,
             trace = GestureTrace(
                 startKeyId = o["startKey"] as String,
-                verdict = GestureVerdict.valueOf(o["verdict"] as String),
                 layoutId = o["layout"] as String,
                 widthPx = num(o["widthPx"]),
                 keyUnitPx = num(o["keyUnitPx"]),
                 keyHeightPx = num(o["keyHeightPx"]),
-                thresholds = GestureThresholds(
-                    flickDistanceRatio = num(thresholds["flickDistanceRatio"]),
-                    verticalDominance = num(thresholds["verticalDominance"]),
-                    glideDistanceRatio = num(thresholds["glideDistanceRatio"]),
-                    flickToGlideRatio = num(thresholds["flickToGlideRatio"]),
-                    glideResumeMs = thresholds["glideResumeMs"]?.let { num(it).toLong() }
-                        ?: GestureConfig().glideResumeMs,
-                    glideResumeRadiusRatio = thresholds["glideResumeRadiusRatio"]?.let { num(it) }
-                        ?: GestureConfig().glideResumeRadiusRatio,
-                ),
                 path = path,
                 strokeStarts = strokes,
+                verdict = (o["verdict"] as? String)?.let { GestureVerdict.valueOf(it) },
+                thresholds = thresholds,
             ),
         )
     }.getOrNull()
@@ -335,15 +345,16 @@ object GestureRecordCodec {
 }
 
 /**
- * One run at one passage: what was asked for, and what the typing actually produced.
+ * One run at one passage: what the typist was trying to type, and what the typing produced.
  *
- * Written as its own line in the bank, keyed by [id], which every gesture of that run carries.
- * Separate rather than repeated on each gesture because a passage is a couple of hundred
- * characters and a run is a couple of hundred gestures, and storing the one inside the other
- * three hundred times would triple the file to say the same thing.
+ * Written as its own line, keyed by [id], which every gesture of that run carries. Separate
+ * rather than repeated on each gesture because a passage is a couple of hundred characters and
+ * a run is a couple of hundred gestures, and storing one inside the other would triple the file
+ * to say the same thing three hundred times.
  *
- * It is rewritten as the run proceeds rather than only at the end. A session abandoned halfway --
- * which is the ordinary way a session ends -- must still say what was typed before it stopped.
+ * It is rewritten as the run proceeds rather than only at the end. A session abandoned halfway
+ * -- which is the ordinary way a session ends -- must still say what was typed before it
+ * stopped.
  */
 data class GestureSession(
     val id: String,
@@ -353,6 +364,9 @@ data class GestureSession(
     val intended: String,
     /** What the typing produced, folded from every gesture's edit in order. */
     val actual: String,
+    /** The layout that was on screen, and the thresholds the build was running. */
+    val layoutId: String = "",
+    val thresholds: GestureThresholds? = null,
 )
 
 /** Reads and writes a session line. Distinguished from a gesture line by its `kind`. */
@@ -369,7 +383,19 @@ object GestureSessionCodec {
             "passage" to session.passageId,
             "intended" to session.intended,
             "actual" to session.actual,
-        ),
+            "layout" to session.layoutId,
+        ).also { fields ->
+            session.thresholds?.let {
+                fields["thresholds"] = linkedMapOf(
+                    "flickDistanceRatio" to it.flickDistanceRatio,
+                    "verticalDominance" to it.verticalDominance,
+                    "glideDistanceRatio" to it.glideDistanceRatio,
+                    "flickToGlideRatio" to it.flickToGlideRatio,
+                    "glideResumeMs" to it.glideResumeMs,
+                    "glideResumeRadiusRatio" to it.glideResumeRadiusRatio,
+                )
+            }
+        },
     )
 
     /** Null for any line that is not a session, which includes every line written before v5. */
@@ -377,12 +403,27 @@ object GestureSessionCodec {
         @Suppress("UNCHECKED_CAST")
         val o = Json.parse(line) as Map<String, Any?>
         if (o["kind"] != KIND) return null
+        @Suppress("UNCHECKED_CAST")
+        val thresholds = (o["thresholds"] as? Map<String, Any?>)?.let {
+            GestureThresholds(
+                flickDistanceRatio = (it["flickDistanceRatio"] as Number).toFloat(),
+                verticalDominance = (it["verticalDominance"] as Number).toFloat(),
+                glideDistanceRatio = (it["glideDistanceRatio"] as Number).toFloat(),
+                flickToGlideRatio = (it["flickToGlideRatio"] as Number).toFloat(),
+                glideResumeMs = (it["glideResumeMs"] as? Number)?.toLong()
+                    ?: GestureConfig().glideResumeMs,
+                glideResumeRadiusRatio = (it["glideResumeRadiusRatio"] as? Number)?.toFloat()
+                    ?: GestureConfig().glideResumeRadiusRatio,
+            )
+        }
         GestureSession(
             id = o["id"] as String,
             at = (o["at"] as Number).toLong(),
             passageId = o["passage"] as String,
             intended = o["intended"] as String,
             actual = o["actual"] as String,
+            layoutId = o["layout"] as? String ?: "",
+            thresholds = thresholds,
         )
     }.getOrNull()
 }

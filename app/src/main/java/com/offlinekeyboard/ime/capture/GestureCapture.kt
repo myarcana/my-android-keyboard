@@ -3,9 +3,9 @@ package com.offlinekeyboard.ime.capture
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
-import com.offlinekeyboard.ime.gesture.GestureIntent
 import com.offlinekeyboard.ime.gesture.GestureRecord
 import com.offlinekeyboard.ime.gesture.GestureSession
+import com.offlinekeyboard.ime.gesture.GestureThresholds
 import com.offlinekeyboard.ime.gesture.GestureTrace
 import java.util.UUID
 
@@ -55,6 +55,20 @@ object GestureCapture {
     private var sessionId: String = ""
 
     private var sessionAt: Long = 0
+
+    /**
+     * The frame the run was typed in, taken from the gestures as they arrive.
+     *
+     * On the session rather than on every gesture because neither changes inside a run, and
+     * repeating six numbers across two hundred lines to say one thing is how the file got to
+     * 650 bytes a gesture. Not known when the run opens -- nothing has been touched yet -- so
+     * the opening line goes without them and the closing one carries them.
+     */
+    @Volatile
+    private var layoutId: String = ""
+
+    @Volatile
+    private var thresholds: GestureThresholds? = null
 
     /** Set by the lab while it is in the foreground. Always called on the main thread. */
     @Volatile
@@ -106,6 +120,8 @@ object GestureCapture {
         )
         sessionId = UUID.randomUUID().toString().substring(0, 8)
         sessionAt = System.currentTimeMillis()
+        layoutId = ""
+        thresholds = null
         run = started
         recording = true
         writeSession(context, started)
@@ -131,6 +147,8 @@ object GestureCapture {
                 passageId = of.passageId,
                 intended = of.intended,
                 actual = of.actual,
+                layoutId = layoutId,
+                thresholds = thresholds,
             ),
         )
     }
@@ -143,41 +161,28 @@ object GestureCapture {
      * exactly, so every character can be traced to the gesture that made it without any string
      * being lined up against any other.
      *
-     * [decoded] is what the glide decoder made of the path, when anything did. It is passed in
-     * rather than computed here because the keyboard has already done it, and recording a second,
-     * separately-computed answer would eventually record one the user never saw.
+     * Nothing here says what the gesture was *for*. The passage is on the session line and the
+     * path is on this one; what the gesture meant is a question about the two together, and one
+     * that cannot be answered until the typist has had the chance to correct it.
      */
     fun onGesture(
         context: Context,
         trace: GestureTrace,
         typed: String = "",
         deleted: Int = 0,
-        decoded: String? = null,
     ) {
         if (!recording) return
         val run = this.run ?: return
 
-        // Where the caret was *before* this gesture, so the hint names the token being aimed at
-        // rather than the one the gesture landed in.
-        val aimedAt = run.targetAt()
+        layoutId = trace.layoutId
+        trace.thresholds?.let { thresholds = it }
+
         val seq = run.apply(PassageRun.Edit(typed, deleted))
 
         val record = GestureRecord(
             id = UUID.randomUUID().toString().substring(0, 8),
             at = System.currentTimeMillis(),
-            // A hint written down at the time, not a verdict. What the passage was asking for
-            // where the caret stood; whether the gesture was a correct attempt at it is settled
-            // later, against the transcript.
-            intent = aimedAt?.intent ?: GestureIntent.LETTER,
-            promptId = aimedAt?.id ?: run.passageId,
-            expected = aimedAt?.expected ?: "",
             trace = trace,
-            decoded = decoded,
-            // Set only for a token that could have been typed more than one way -- a prose word,
-            // glided or tapped. Its absence is what marks a gesture the drill genuinely asked
-            // for, which is the only kind whose `intent` is an instruction rather than a hint,
-            // and so the only kind worth scoring the heuristic against.
-            word = aimedAt?.expected?.takeIf { aimedAt.letters.isNotEmpty() },
             sessionId = sessionId,
             seq = seq,
             typed = typed,

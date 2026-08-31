@@ -85,10 +85,7 @@ class GlideResumeTest {
         assertEquals(GestureVerdict.GLIDE, trace.verdict)
         assertEquals(completed.strokeStarts, trace.strokeStarts)
 
-        val record = GestureRecord(
-            id = "x", at = 0, intent = GestureIntent.WORD, promptId = "glide:qer",
-            expected = "qer", trace = trace,
-        )
+        val record = GestureRecord(id = "x", at = 0, typed = "qer", trace = trace)
         val gap = record.gaps.single()
         assertEquals(40L, gap.ms)
         assertTrue("the gap distance should be the pixels skipped", gap.px in 1f..40f)

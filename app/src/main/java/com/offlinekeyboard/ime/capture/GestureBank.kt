@@ -179,50 +179,30 @@ object GestureBank {
         return added
     }
 
-    /** Counts by label, and how often the shipped heuristic agreed with the label. */
-    data class Summary(
-        val total: Int,
-        val byIntent: Map<GestureIntent, Int>,
-        val agreed: Int,
-        val decided: Int,
-    ) {
-        val accuracy: Float get() = if (decided == 0) 0f else agreed.toFloat() / decided
+    /** What is in the file, for the line under the passage. */
+    data class Summary(val total: Int, val runs: Int) {
 
-        /** "12 symbol / 8 word / 6 tap", for the line under the passage. */
-        val breakdown: String
-            get() = GestureIntent.entries.joinToString(" / ") { intent ->
-                "${byIntent[intent] ?: 0} ${if (intent == GestureIntent.LETTER) "tap" else intent.name.lowercase()}"
-            }
+        /** "2670 gestures in 43 runs", which is all a collector needs to see. */
+        val breakdown: String get() = "$total in $runs runs"
     }
 
     /**
      * Counts the bank for the line under the passage.
      *
-     * Both numbers changed meaning at schema 5 and had to be re-based on something still true.
+     * It used to break the count down by label and report how often the shipped heuristic had
+     * agreed with one. Both were removed rather than repaired: the labels they read were written
+     * at the moment of the gesture, when what the gesture meant was not yet knowable, and a
+     * figure computed from them moved for reasons that had nothing to do with the keyboard --
+     * it fell from 92% to 61% the day prose passages started collecting taps, on a heuristic
+     * that had not changed a line.
      *
-     * The breakdown is **by what the gesture was read as**, not by `intent`. Since v5 `intent` is
-     * a hint about where the caret stood, so a prose word being tapped out files every one of its
-     * taps under WORD -- and the bank line duly reported four hundred and eighty "word" gestures
-     * to someone who had not glided once.
-     *
-     * The agreement figure only counts gestures whose label was a genuine instruction: the
-     * collision drill, which asks for one named gesture on one named key. Measuring a positional
-     * hint against a verdict is not a measurement of anything, and it read as the heuristic
-     * collapsing from 92% to 61% the moment prose started collecting taps.
+     * What is left is a count, which is the number a collector actually acts on. Whether the
+     * heuristic is any good is a question for the bank as a whole, asked on a laptop, against
+     * every path at once -- not a running total on a phone that has to be recomputed after
+     * every tap.
      */
-    fun summarise(records: List<GestureRecord>): Summary {
-        // `word` marks a prose token on records written from now on. Records already in the bank
-        // predate it, so the prompt id has to stand in for them: a prose word is filed under
-        // "word:", a drill gesture under "flick:", "glide:" or "tap:". Without this the bank's
-        // own history of prose taps counts as drill and drags the figure down -- 46% of 758,
-        // for a heuristic that had not changed.
-        val drill = records.filter { it.word == null && !it.promptId.startsWith("word:") }
-        val decided = drill.filter { it.verdictIntent != null }
-        return Summary(
-            total = records.size,
-            byIntent = records.mapNotNull { it.verdictIntent }.groupingBy { it }.eachCount(),
-            agreed = decided.count { it.verdictIntent == it.intent },
-            decided = decided.size,
-        )
-    }
+    fun summarise(records: List<GestureRecord>): Summary = Summary(
+        total = records.size,
+        runs = records.mapNotNull { it.sessionId }.distinct().size,
+    )
 }

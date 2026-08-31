@@ -42,7 +42,6 @@ import com.offlinekeyboard.ime.gesture.GestureIntent
 import com.offlinekeyboard.ime.gesture.GestureRecord
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
-import com.offlinekeyboard.ime.glide.GlideScoreboard
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
 import java.util.concurrent.Executors
@@ -80,10 +79,6 @@ class GestureLabActivity : Activity() {
     private var advanced = false
 
     private var sessionRecorded = 0
-    private var sessionAgreed = 0
-    private var sessionDecided = 0
-    private var wordsTyped = 0
-    private var wordsRight = 0
 
     private lateinit var title: TextView
     private lateinit var note: TextView
@@ -199,7 +194,7 @@ class GestureLabActivity : Activity() {
         // recording, so Next appeared to do nothing while every gesture went into a run for a
         // passage that was not on screen -- which is exactly how a session gets recorded against
         // the wrong text.
-        armCurrent()
+        GestureCapture.begin(applicationContext, passage)
         renderPassage()
     }
 
@@ -292,17 +287,6 @@ class GestureLabActivity : Activity() {
     }
 
     /**
-     * Starts recording this passage.
-     *
-     * There is nothing to "arm" any more. The lab does not decide whether a gesture counts, so
-     * there is no target to hold it against -- it records the passage, and every gesture made
-     * while that passage is on screen goes into the bank with what it typed.
-     */
-    private fun armCurrent() {
-        GestureCapture.begin(applicationContext, passage)
-    }
-
-    /**
      * A gesture has been recorded. Every gesture is; there is no other case.
      *
      * What is shown is what it *did* -- the verdict the heuristic reached, and the text that went
@@ -313,19 +297,6 @@ class GestureLabActivity : Activity() {
     private fun onRecorded(record: GestureRecord, run: PassageRun) {
         sessionRecorded++
         LabProgress.record(LabDeck.prefs(this))
-        // Only the drill. A prose token carries a positional hint rather than an instruction, so
-        // measuring a verdict against it counts nothing -- and read as the heuristic collapsing
-        // the moment prose started collecting taps.
-        if (record.word == null) {
-            record.verdictIntent?.let {
-                sessionDecided++
-                if (it == record.intent) sessionAgreed++
-            }
-        }
-        if (record.intent == GestureIntent.WORD && record.decoded != null) {
-            wordsTyped++
-            if (sameWord(record.decoded, record.expected)) wordsRight++
-        }
         val onTrack = run.alignment().let { it.wrong == 0 && it.inserted == 0 }
         feedback.setTextColor(if (onTrack) goodHue else badHue)
         feedback.text = describe(record)
@@ -334,19 +305,11 @@ class GestureLabActivity : Activity() {
         refreshBankLine()
     }
 
-    /** Case and apostrophes are the keyboard's business, not the decoder's. */
-    private fun sameWord(a: String?, b: String): Boolean =
-        a != null && a.lowercase().filter(Char::isLetter) == b.lowercase().filter(Char::isLetter)
-
     private fun describe(record: GestureRecord): String = buildString {
         append("read as ")
-        append(record.trace.verdict.name)
+        append(record.trace.verdict?.name ?: "?")
         if (record.typed.isNotEmpty()) append("  ·  typed \"${record.typed}\"")
         if (record.deleted > 0) append("  ·  deleted ${record.deleted}")
-        // Only when a glide actually decoded something. It used to fire on the *intent*, which
-        // since v5 is a positional hint -- so every tap inside a prose word reported "typed
-        // nothing" beside the letter it had just plainly typed.
-        record.decoded?.let { append("  ·  decoded $it") }
         append("  ·  ")
         append("%.0f".format(record.pathLength))
         append("px in ")
@@ -399,20 +362,7 @@ class GestureLabActivity : Activity() {
                     if (day.streak > 0) append("   ·   ${day.streak} day streak")
                     append("   ·   bank ${summary.total}")
                     append("  (${summary.breakdown})")
-                    if (summary.decided > 0) {
-                        append("   ·   current heuristic ")
-                        append("%.0f%%".format(summary.accuracy * 100))
-                        append(" of ${summary.decided}")
-                    }
-                    if (sessionRecorded > 0) {
-                        append("   ·   session $sessionRecorded")
-                        if (sessionDecided > 0) {
-                            append(" · $sessionAgreed/$sessionDecided drill gestures read correctly")
-                        }
-                        if (wordsTyped > 0) {
-                            append(" · $wordsRight/$wordsTyped words decoded correctly")
-                        }
-                    }
+                    if (sessionRecorded > 0) append("   ·   session $sessionRecorded")
                 }
             }
         }
@@ -430,75 +380,10 @@ class GestureLabActivity : Activity() {
                     // not worth recording", which is a different act from correcting what it
                     // typed -- backspace does that, and is itself a gesture worth recording.
                     sessionRecorded = (sessionRecorded - 1).coerceAtLeast(0)
-                    toast("Removed one ${removed.intent.name.lowercase()} sample")
+                    toast("Removed the last sample")
                     renderPassage()
-                    armCurrent()
                     refreshBankLine()
                 }
-            }
-        }
-    }
-
-    /**
-     * Runs every recorded glide through both decoders and says which read this thumb better.
-     *
-     * It has to happen here rather than in a unit test, and that is not a compromise: the engine
-     * is a native library that exists only on Android, so scoring it anywhere else would be
-     * scoring it by proxy.
-     *
-     * With one engine this is a measurement rather than a comparison, and it is still the thing
-     * worth having. A decoder reading this thumb at 95% and one reading it at 40% look identical
-     * from the outside until something asks -- and the most likely cause of the second is not the
-     * model at all, it is the coordinate frame it was handed.
-     */
-    private fun scoreEngines() {
-        val context = applicationContext
-        toast("Scoring the bank…")
-        io.execute {
-            val lexicon = runCatching { assets.open(LEXICON_ASSET).use(Lexicon::load) }.getOrNull()
-            if (lexicon == null) {
-                runOnUiThread { toast("No lexicon to score against") }
-                return@execute
-            }
-            val futo = FutoSwipe.open(context, lexicon)
-            val engines = listOfNotNull<GlideEngine>(futo)
-            val records = GestureBank.readAll(context)
-            val report = GlideScoreboard.score(records, engines)
-            futo?.close()
-
-            val text = buildString {
-                if (futo == null) {
-                    append("No glide engine in this build. Run tools/fetch_swipe_runtime.sh ")
-                    append("and reinstall.")
-                } else if (report.rows.all { it.scored == 0 }) {
-                    append("No glides recorded yet. Type one of the prose passages first.")
-                } else {
-                    report.rows.forEach { row ->
-                        append(row.engine)
-                        append(":  first choice ${row.percent(row.top1)}%")
-                        append("   offered ${row.percent(row.offered)}%")
-                        append("   (${row.top1}/${row.scored})")
-                        if (row.rejoined > 0) {
-                            append("\n   after a finger lift: ")
-                            append("${row.rejoinedTop1}/${row.rejoined}")
-                        }
-                        append("\n\n")
-                    }
-
-                    val worst = report.misses.groupBy { it.engine }
-                    worst.forEach { (engine, misses) ->
-                        append("$engine missed: ")
-                        append(misses.take(8).joinToString(", ") { "${it.expected}->${it.got}" })
-                        append("\n")
-                    }
-                }
-            }
-            runOnUiThread {
-                android.app.AlertDialog.Builder(this@GestureLabActivity)
-                    .setTitle("Glide decoders on ${report.rows.firstOrNull()?.scored ?: 0} glides")
-                    .setMessage(text)
-                    .setPositiveButton("ok", null)
-                    .show()
             }
         }
     }
@@ -567,14 +452,12 @@ class GestureLabActivity : Activity() {
         val items = arrayOf(
             "Export a copy for adb",
             "Import a bank file",
-            "Score the glide decoders",
         )
         android.app.AlertDialog.Builder(this)
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> export()
-                    1 -> importBank()
-                    else -> scoreEngines()
+                    else -> importBank()
                 }
             }
             .show()

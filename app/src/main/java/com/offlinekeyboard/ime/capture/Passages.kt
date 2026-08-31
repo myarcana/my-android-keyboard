@@ -2,7 +2,15 @@ package com.offlinekeyboard.ime.capture
 
 import com.offlinekeyboard.ime.gesture.GestureIntent
 
-/** One thing a passage asks for, once, in the order it is read. */
+/**
+ * One thing a passage asks for, once, in the order it is read.
+ *
+ * Presentation only, since v6. These fields decide what is drawn and where the highlight sits;
+ * none of them reaches the bank. A target used to be the label a gesture was filed under, and
+ * the lab used to refuse any gesture that did not match the one currently armed -- which is how
+ * a recorder ends up holding only the gestures that went well. What the passage asks for is now
+ * said once, on the session line, as the text the typist was trying to type.
+ */
 data class Target(
     val id: String,
     val intent: GestureIntent,
