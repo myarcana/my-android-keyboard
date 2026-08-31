@@ -128,6 +128,22 @@ data class GestureRecord(
     val word: String? = null,
     /** Where in [word] this letter sat, or -1. */
     val letterIndex: Int = -1,
+    /**
+     * The run of typing this gesture belongs to, and its place in that run.
+     *
+     * Together with [GestureSession] these are what turn a heap of gestures into a transcript.
+     * The session says what was asked for and what came out; the sequence number says which
+     * gesture is which; and [typed] and [deleted] say what this one did to the text. From those
+     * three the mapping between every character produced and the gesture that produced it is
+     * exact, and everything the lab used to decide in the moment -- was this a mis-hit, was that
+     * word right -- becomes a question an offline reader can answer, and re-answer.
+     */
+    val sessionId: String? = null,
+    val seq: Int = -1,
+    /** The text this gesture put into the field. Empty for a backspace or a gesture that typed nothing. */
+    val typed: String = "",
+    /** Characters this gesture removed from the end of the field. */
+    val deleted: Int = 0,
 ) {
     val path get() = trace.path
 
@@ -192,6 +208,13 @@ object GestureRecordCodec {
      *   collecting tapped words as well as glided ones. Their absence on an older line is
      *   truthful: before 4 the lab could not record a tapped word at all, so a LETTER record
      *   from a v3 bank really was a lone drill tap and not one letter of something longer.
+     * 5 added the transcript: a [GestureSession] line per run, and `session`, `seq`, `typed` and
+     *   `deleted` on every gesture. This is the version at which the lab stopped rejecting
+     *   gestures it could not label. Up to 4 a bank contained only the gestures that went well,
+     *   because a mis-hit was rejected and left no line at all -- so `intent` and `expected` on a
+     *   v4 line are trustworthy *and* the absence of mistakes around them means nothing. From 5
+     *   they are a hint recorded at the time, and the labels that matter are derived by aligning
+     *   the session's `intended` against its `actual`.
      *
      * Version 1 lines still read: they were recorded before a glide could be interrupted at all,
      * so a missing `strokes` genuinely means one stroke, and a missing resume threshold genuinely
@@ -205,7 +228,7 @@ object GestureRecordCodec {
      * a v3 bank without honouring `void` will quietly count samples that were withdrawn, and the
      * version is the only warning it gets.
      */
-    const val SCHEMA = 4
+    const val SCHEMA = 5
 
     fun encode(record: GestureRecord): String {
         val t0 = record.path.firstOrNull()?.t ?: 0L
@@ -222,6 +245,12 @@ object GestureRecordCodec {
         record.word?.let {
             fields["word"] = it
             fields["letterIndex"] = record.letterIndex
+        }
+        record.sessionId?.let {
+            fields["session"] = it
+            fields["seq"] = record.seq
+            fields["typed"] = record.typed
+            if (record.deleted > 0) fields["deleted"] = record.deleted
         }
         return Json.write(
             fields + linkedMapOf(
@@ -273,6 +302,10 @@ object GestureRecordCodec {
             voidReason = o["void"] as? String,
             word = o["word"] as? String,
             letterIndex = (o["letterIndex"] as? Number)?.toInt() ?: -1,
+            sessionId = o["session"] as? String,
+            seq = (o["seq"] as? Number)?.toInt() ?: -1,
+            typed = o["typed"] as? String ?: "",
+            deleted = (o["deleted"] as? Number)?.toInt() ?: 0,
             trace = GestureTrace(
                 startKeyId = o["startKey"] as String,
                 verdict = GestureVerdict.valueOf(o["verdict"] as String),
@@ -299,4 +332,57 @@ object GestureRecordCodec {
     private fun num(value: Any?): Float = (value as Number).toFloat()
 
     private fun round1(value: Float): Float = (value * 10f).roundToInt() / 10f
+}
+
+/**
+ * One run at one passage: what was asked for, and what the typing actually produced.
+ *
+ * Written as its own line in the bank, keyed by [id], which every gesture of that run carries.
+ * Separate rather than repeated on each gesture because a passage is a couple of hundred
+ * characters and a run is a couple of hundred gestures, and storing the one inside the other
+ * three hundred times would triple the file to say the same thing.
+ *
+ * It is rewritten as the run proceeds rather than only at the end. A session abandoned halfway --
+ * which is the ordinary way a session ends -- must still say what was typed before it stopped.
+ */
+data class GestureSession(
+    val id: String,
+    val at: Long,
+    val passageId: String,
+    /** What the passage asked to be typed. */
+    val intended: String,
+    /** What the typing produced, folded from every gesture's edit in order. */
+    val actual: String,
+)
+
+/** Reads and writes a session line. Distinguished from a gesture line by its `kind`. */
+object GestureSessionCodec {
+
+    const val KIND = "session"
+
+    fun encode(session: GestureSession): String = Json.write(
+        linkedMapOf<String, Any?>(
+            "v" to GestureRecordCodec.SCHEMA,
+            "kind" to KIND,
+            "id" to session.id,
+            "at" to session.at,
+            "passage" to session.passageId,
+            "intended" to session.intended,
+            "actual" to session.actual,
+        ),
+    )
+
+    /** Null for any line that is not a session, which includes every line written before v5. */
+    fun decode(line: String): GestureSession? = runCatching {
+        @Suppress("UNCHECKED_CAST")
+        val o = Json.parse(line) as Map<String, Any?>
+        if (o["kind"] != KIND) return null
+        GestureSession(
+            id = o["id"] as String,
+            at = (o["at"] as Number).toLong(),
+            passageId = o["passage"] as String,
+            intended = o["intended"] as String,
+            actual = o["actual"] as String,
+        )
+    }.getOrNull()
 }

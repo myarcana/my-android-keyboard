@@ -4,6 +4,8 @@ import android.content.Context
 import com.offlinekeyboard.ime.gesture.GestureIntent
 import com.offlinekeyboard.ime.gesture.GestureRecord
 import com.offlinekeyboard.ime.gesture.GestureRecordCodec
+import com.offlinekeyboard.ime.gesture.GestureSession
+import com.offlinekeyboard.ime.gesture.GestureSessionCodec
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.Executors
@@ -46,8 +48,14 @@ object GestureBank {
      * screen goes off, the app is swiped away, the battery dies -- and a page-cached line that
      * never landed is a gesture the user performed and will not perform again.
      */
-    fun append(context: Context, record: GestureRecord) {
-        val line = GestureRecordCodec.encode(record) + "\n"
+    fun append(context: Context, record: GestureRecord) = appendLine(context, GestureRecordCodec.encode(record))
+
+    /** The transcript header for a run: what was asked for, and what came out. */
+    fun appendSession(context: Context, session: GestureSession) =
+        appendLine(context, GestureSessionCodec.encode(session))
+
+    private fun appendLine(context: Context, encoded: String) {
+        val line = encoded + "\n"
         val target = file(context)
         writer.execute {
             runCatching {

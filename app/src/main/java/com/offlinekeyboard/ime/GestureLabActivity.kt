@@ -35,6 +35,7 @@ import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.capture.LabDeck
 import com.offlinekeyboard.ime.capture.LabProgress
 import com.offlinekeyboard.ime.capture.Passage
+import com.offlinekeyboard.ime.capture.PassageRun
 import com.offlinekeyboard.ime.capture.Passages
 import com.offlinekeyboard.ime.capture.Target
 import com.offlinekeyboard.ime.gesture.GestureIntent
@@ -77,7 +78,6 @@ class GestureLabActivity : Activity() {
     private lateinit var passage: Passage
     /** Set when finishing a passage already moved the deck on, so Next does not skip one. */
     private var advanced = false
-    private var targetIndex = 0
 
     private var sessionRecorded = 0
     private var sessionAgreed = 0
@@ -98,7 +98,6 @@ class GestureLabActivity : Activity() {
     /** Where each target's text sits in [passageView], so the current one can be highlighted. */
     private var spans: List<IntRange> = emptyList()
     /** What the keyboard made of each target already typed: null while untyped. */
-    private val outcomes = mutableMapOf<Int, Boolean>()
 
     private val io = Executors.newSingleThreadExecutor { r ->
         Thread(r, "gesture-lab-io").apply { isDaemon = true }
@@ -121,28 +120,6 @@ class GestureLabActivity : Activity() {
     private val letterHue = Color.parseColor("#6B4FBB")
     private val goodHue = Color.parseColor("#0F8A4F")
     private val badHue = Color.parseColor("#C62828")
-
-    /** Letters of the current word already tapped: legible on the caret, plainly behind it. */
-    private val typedInWord = Color.parseColor("#B9F6CA")
-
-    /**
-     * How much of [display] the first [letters] letters cover.
-     *
-     * The two are not the same string. `letters` is a-z only and lowercased, because that is what
-     * a key can produce; `display` is the word as it is printed, apostrophes and capitals and all.
-     * Walking one to index the other is what keeps the caret in the right place inside "I'm".
-     */
-    private fun tappedPrefix(display: String, letters: Int): Int {
-        if (letters <= 0) return 0
-        var seen = 0
-        display.forEachIndexed { i, c ->
-            if (c.lowercaseChar() in 'a'..'z') {
-                seen++
-                if (seen == letters) return i + 1
-            }
-        }
-        return display.length
-    }
 
     private fun hueFor(intent: GestureIntent) = when (intent) {
         GestureIntent.SYMBOL -> symbolHue
@@ -177,7 +154,7 @@ class GestureLabActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
-        GestureCapture.onResult = ::onCaptureResult
+        GestureCapture.onRecorded = ::onRecorded
         armCurrent()
         refreshBankLine()
         refreshImeWarning()
@@ -188,9 +165,11 @@ class GestureLabActivity : Activity() {
     override fun onPause() {
         super.onPause()
         // Disarming here is what keeps ordinary typing out of the bank: the keyboard goes on
-        // emitting gestures, and with no target armed they are dropped on the floor.
-        GestureCapture.disarm()
-        GestureCapture.onResult = null
+        // emitting gestures, and with no run in progress they are dropped on the floor. The
+        // session line is written on the way out, so a run abandoned by leaving the app -- which
+        // is the ordinary way one ends -- still says what it produced.
+        GestureCapture.end(applicationContext)
+        GestureCapture.onRecorded = null
     }
 
     // --- the passage -------------------------------------------------------------------------
@@ -209,8 +188,6 @@ class GestureLabActivity : Activity() {
      */
     private fun replay(next: Passage) {
         passage = next
-        targetIndex = 0
-        outcomes.clear()
         field.setText("")
         title.text = passage.title
         note.text = passage.note
@@ -220,8 +197,6 @@ class GestureLabActivity : Activity() {
         armCurrent()
     }
 
-    private val current: Target? get() = passage.targets.getOrNull(targetIndex)
-
     /** The next passage in the deck, unless finishing this one already moved it on. */
     private fun nextPassage() {
         if (!advanced) deck.advance()
@@ -229,173 +204,129 @@ class GestureLabActivity : Activity() {
     }
 
     /**
-     * Draws the passage with the caret on the current token.
+     * Draws the passage against what has actually been typed.
      *
-     * Rebuilt whole on every advance rather than patched. It is a hundred short spans on a
+     * Per character rather than per token, which is the change of model made visible. The lab no
+     * longer has an opinion about which token you are "on" -- it has a transcript, and the honest
+     * thing to show is how far that transcript still agrees with the passage. Green is agreement,
+     * red is what was typed after it stopped agreeing, and the caret sits at the end of what
+     * exists. Nothing here waits for anything, and nothing is refused.
+     *
+     * Rebuilt whole on every gesture rather than patched. It is a few hundred characters on a
      * screen that changes once per gesture, so the cost is invisible, and the alternative --
-     * tracking which spans need removing as the caret moves over them -- is the kind of
-     * bookkeeping that goes wrong quietly and leaves the passage lying about what was typed.
+     * tracking which spans need removing as the caret moves -- is the kind of bookkeeping that
+     * goes wrong quietly and leaves the passage lying about what was typed.
      */
     private fun renderPassage() {
-        val builder = SpannableStringBuilder()
-        val ranges = mutableListOf<IntRange>()
-        passage.targets.forEachIndexed { i, target ->
-            if (i > 0) builder.append(' ')
-            val from = builder.length
-            builder.append(target.display)
-            ranges += from until builder.length
-        }
-        spans = ranges
+        val run = GestureCapture.current
+        val text = run?.intended ?: PassageRun.textOf(passage)
+        val correct = run?.correctPrefix ?: 0
+        val typed = run?.position ?: 0
+        val builder = SpannableStringBuilder(text)
+        spans = (run ?: PassageRun(passage.id, text, passage.targets)).tokenRanges()
 
-        ranges.forEachIndexed { i, range ->
-            val start = range.first
-            val end = range.last + 1
-            val target = passage.targets[i]
-            when {
-                i == targetIndex -> {
-                    builder.setSpan(
-                        BackgroundColorSpan(hueFor(target.intent)),
-                        start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                    builder.setSpan(
-                        ForegroundColorSpan(Color.WHITE), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                    builder.setSpan(
-                        StyleSpan(Typeface.BOLD), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                    )
-                    // A word being tapped out is one token spanning several gestures, and without
-                    // this the caret sits on the whole word through all of them and says nothing
-                    // about where in it the thumb has got to. The letters already down are dimmed
-                    // inside the highlight, so the next one to press is the first bright one.
-                    val done = start + tappedPrefix(target.display, GestureCapture.tappedInTarget)
-                    if (done > start) {
-                        builder.setSpan(
-                            ForegroundColorSpan(typedInWord),
-                            start, done, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
-                        )
-                    }
-                }
-                // Typed already: green or red says what the keyboard made of it, which is the
-                // only score that matters here. Whether the *letters* arrived is not the
-                // question -- a glide that typed the wrong word still recorded a real glide.
-                outcomes.containsKey(i) -> builder.setSpan(
-                    ForegroundColorSpan(if (outcomes[i] == true) goodHue else badHue),
-                    start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+        fun paint(from: Int, to: Int, colour: Int, background: Boolean = false) {
+            if (to <= from) return
+            val a = from.coerceIn(0, text.length)
+            val b = to.coerceIn(0, text.length)
+            if (b <= a) return
+            builder.setSpan(ForegroundColorSpan(colour), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (background) {
+                builder.setSpan(
+                    BackgroundColorSpan(colour), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
                 )
-                else -> builder.setSpan(
-                    ForegroundColorSpan(ahead), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
+                builder.setSpan(
+                    ForegroundColorSpan(Color.WHITE), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE,
                 )
+                builder.setSpan(StyleSpan(Typeface.BOLD), a, b, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
+
+        paint(0, correct, goodHue)
+        // Typed, but no longer what the passage says. Not an error to be corrected before the lab
+        // will go on -- it goes on regardless -- just the point the two stopped matching.
+        paint(correct, typed, badHue, background = true)
+        paint(typed, text.length, ahead)
+        // The next character to type, marked so the eye can find it without counting.
+        paint(typed, (typed + 1).coerceAtMost(text.length), hueFor(GestureIntent.LETTER), background = true)
         passageView.text = builder
 
-        val done = targetIndex.coerceAtMost(passage.targets.size)
         progress.text = buildString {
-            append("$done of ${passage.targets.size}")
+            append("$typed of ${text.length} characters")
+            if (typed > correct) append("   ·   ${typed - correct} adrift")
             append("   ·   passage ${deck.position}/${deck.total}")
-            val inWord = GestureCapture.tappedInTarget
-            if (inWord > 0) {
-                current?.let { append("   ·   $inWord/${it.letters.length} letters of ${it.display}") }
-            }
-            current?.let { target ->
-                val why = Passages.why(target.startKeyId)
-                if (why.isNotEmpty()) append("   ·   $why")
-            }
+            append("   ·   ${run?.count ?: 0} gestures")
         }
         scrollToCurrent()
     }
 
     /**
-     * Keeps the token being typed on screen.
+     * Keeps the place being typed on screen.
      *
-     * Posted rather than done inline because the layout that decides which line a token is on
+     * Posted rather than done inline because the layout that decides which line an offset is on
      * has not happened yet at the moment the text is set, and asking a TextView for a line
      * number before it has been measured returns an answer about the previous passage.
      */
     private fun scrollToCurrent() {
-        val range = spans.getOrNull(targetIndex) ?: return
+        val at = GestureCapture.current?.position ?: 0
         passageView.post {
             val layout = passageView.layout ?: return@post
-            val line = layout.getLineForOffset(range.first)
+            val line = layout.getLineForOffset(at.coerceIn(0, passageView.text.length))
             val y = layout.getLineTop(line) - passageScroller.height / 3
             passageScroller.smoothScrollTo(0, y.coerceAtLeast(0))
         }
     }
 
+    /**
+     * Starts recording this passage.
+     *
+     * There is nothing to "arm" any more. The lab does not decide whether a gesture counts, so
+     * there is no target to hold it against -- it records the passage, and every gesture made
+     * while that passage is on screen goes into the bank with what it typed.
+     */
     private fun armCurrent() {
-        current?.let { GestureCapture.arm(it) } ?: GestureCapture.disarm()
+        GestureCapture.begin(applicationContext, passage)
     }
 
-    private fun onCaptureResult(result: GestureCapture.Result) {
-        when (result.outcome) {
-            GestureCapture.Outcome.WRONG_KEY -> {
-                feedback.setTextColor(muted)
-                // The key that was *due*, which is not the word's first letter once a word is
-                // part-way tapped. Saying "sorry begins on S" while four of its letters are
-                // already down is worse than saying nothing.
-                feedback.text = "That started on another key -- not recorded. " +
-                    "Next is ${result.expectedKeyId.uppercase()}."
-            }
-            GestureCapture.Outcome.TOO_SMALL -> {
-                feedback.setTextColor(muted)
-                feedback.text = "Barely moved -- not recorded."
-            }
-            GestureCapture.Outcome.MID_WORD_GLIDE -> {
-                feedback.setTextColor(muted)
-                feedback.text = "This word is being tapped -- a glide from here spells only the " +
-                    "rest of it. Tap ${result.expectedKeyId.uppercase()}, or undo and glide it whole."
-            }
-            GestureCapture.Outcome.RECORDED -> {
-                val record = result.record ?: return
-                sessionRecorded++
-                LabProgress.record(LabDeck.prefs(this))
-                val read = record.verdictIntent
-                if (read != null) {
-                    sessionDecided++
-                    if (read == record.intent) sessionAgreed++
-                }
-                val agreed = read == record.intent
-                // A tapped word is one token made of many gestures, so its colour is the *worst*
-                // of them: a word with one misread letter in it did not go well, and painting it
-                // green because the last letter happened to be fine would say the opposite.
-                outcomes[targetIndex] = (outcomes[targetIndex] ?: true) && agreed
-                if (record.intent == GestureIntent.WORD) {
-                    wordsTyped++
-                    if (sameWord(record.decoded, record.expected)) wordsRight++
-                }
-                feedback.setTextColor(if (agreed) goodHue else badHue)
-                feedback.text = describe(record, agreed)
-                if (result.complete) {
-                    targetIndex++
-                    if (targetIndex >= passage.targets.size) finishPassage() else renderPassage()
-                    armCurrent()
-                } else {
-                    // Still inside a word being tapped out. The target stays armed, and only the
-                    // progress through it has moved.
-                    renderPassage()
-                }
-                refreshBankLine()
-            }
+    /**
+     * A gesture has been recorded. Every gesture is; there is no other case.
+     *
+     * What is shown is what it *did* -- the verdict the heuristic reached, and the text that went
+     * into the field because of it. Deliberately not a verdict on whether it was right: that
+     * depends on what gets typed next, and the lab guessing at it in the moment is the habit that
+     * cost the bank its mistakes.
+     */
+    private fun onRecorded(record: GestureRecord, run: PassageRun) {
+        sessionRecorded++
+        LabProgress.record(LabDeck.prefs(this))
+        record.verdictIntent?.let {
+            sessionDecided++
+            if (it == record.intent) sessionAgreed++
         }
+        if (record.intent == GestureIntent.WORD && record.decoded != null) {
+            wordsTyped++
+            if (sameWord(record.decoded, record.expected)) wordsRight++
+        }
+        val onTrack = run.correctPrefix == run.position
+        feedback.setTextColor(if (onTrack) goodHue else badHue)
+        feedback.text = describe(record)
+        renderPassage()
+        if (run.isComplete) finishPassage()
+        refreshBankLine()
     }
 
     /** Case and apostrophes are the keyboard's business, not the decoder's. */
     private fun sameWord(a: String?, b: String): Boolean =
         a != null && a.lowercase().filter(Char::isLetter) == b.lowercase().filter(Char::isLetter)
 
-    private fun describe(record: GestureRecord, agreed: Boolean): String = buildString {
-        append(if (agreed) "correct" else "WRONG")
-        append("  ·  read as ")
+    private fun describe(record: GestureRecord): String = buildString {
+        append("read as ")
         append(record.trace.verdict.name)
+        if (record.typed.isNotEmpty()) append("  ·  typed \"${record.typed}\"")
+        if (record.deleted > 0) append("  ·  deleted ${record.deleted}")
         if (record.intent == GestureIntent.WORD) {
             append("  ·  typed ")
             append(record.decoded ?: "nothing")
-        }
-        record.word?.let { word ->
-            append("  ·  ")
-            append(record.expected)
-            append(" (${record.letterIndex + 1} of ${word.length}) of ")
-            append(word)
         }
         append("  ·  ")
         append("%.0f".format(record.pathLength))
@@ -474,14 +405,9 @@ class GestureLabActivity : Activity() {
                 if (removed == null) {
                     toast("Nothing to undo")
                 } else {
-                    // Inside a half-tapped word the token has not been left yet, so undo takes
-                    // back a letter rather than the whole word.
-                    if (GestureCapture.tappedInTarget > 0) {
-                        GestureCapture.stepBack()
-                    } else {
-                        if (targetIndex > 0) targetIndex--
-                        outcomes.remove(targetIndex)
-                    }
+                    // The bank line goes; the text does not. Undo here means "that gesture was
+                    // not worth recording", which is a different act from correcting what it
+                    // typed -- backspace does that, and is itself a gesture worth recording.
                     sessionRecorded = (sessionRecorded - 1).coerceAtLeast(0)
                     toast("Removed one ${removed.intent.name.lowercase()} sample")
                     renderPassage()
@@ -648,9 +574,7 @@ class GestureLabActivity : Activity() {
                 if (record == null) {
                     toast("Nothing to withdraw")
                 } else {
-                    // The recording stays and so does the passage's place: only the claim about
-                    // that one gesture is withdrawn.
-                    outcomes.remove(targetIndex - 1)
+                    // The recording stays: only the claim about that one gesture is withdrawn.
                     toast("Label withdrawn -- the path is still in the bank")
                     renderPassage()
                     refreshBankLine()
@@ -819,11 +743,17 @@ class GestureLabActivity : Activity() {
         return root
     }
 
+    /**
+     * Gives up on this passage and takes the next.
+     *
+     * It used to skip one *token*, which was a thing to do only because a token could refuse to
+     * be typed. Nothing refuses now -- a gesture the lab cannot make sense of is recorded anyway
+     * and sorted out later -- so the only reason left to press this is that the passage itself is
+     * not worth finishing.
+     */
     private fun skip() {
-        if (targetIndex >= passage.targets.size) return
-        targetIndex++
-        if (targetIndex >= passage.targets.size) finishPassage() else renderPassage()
-        armCurrent()
+        finishPassage()
+        nextPassage()
     }
 
     private fun refreshImeWarning() {

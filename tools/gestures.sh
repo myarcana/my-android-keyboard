@@ -21,11 +21,15 @@ BANK=data/gesture-bank.jsonl
 
 # Counts the bank by label. Defined once, in a variable, because it is wanted from inside a
 # command substitution where a heredoc would be more trouble than it is worth.
+# Session lines share the file with gesture lines and have no "intent"; every reader here wants
+# the gestures, so the filter lives next to the load in each of them.
 SUMMARISE='
 import json, sys, collections
-rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+all_rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+rows = [r for r in all_rows if r.get("kind") != "session"]
+runs = len(all_rows) - len(rows)
 by = collections.Counter(r["intent"] for r in rows)
-print(f"{len(rows)} gestures: " + ", ".join(f"{n} {k.lower()}" for k, n in sorted(by.items())))
+print(f"{len(rows)} gestures in {runs} runs: " + ", ".join(f"{n} {k.lower()}" for k, n in sorted(by.items())))
 '
 
 cd "$(dirname "$0")/.."
@@ -119,32 +123,52 @@ def read(path):
             pass
     return out
 
+# Two kinds of line share this file and they do not merge the same way, so the key has to say
+# which kind it is. Keying on the id alone let a session and a gesture collide in principle, and
+# in practice did something worse -- see the session rule below.
+def key(r):
+    return (r.get("kind", "gesture"), r["id"])
+
 before = read(bank)
-merged = {r["id"]: r for r in before}
+merged = {key(r): r for r in before}
 added = 0
 kept = 0
+grew = 0
 for r in read(incoming):
-    old = merged.get(r["id"])
+    k = key(r)
+    old = merged.get(k)
     if old is None:
-        merged[r["id"]] = r
+        merged[k] = r
         added += 1
         continue
-    # A record never legitimately changes after it is written, with one exception: a label can
+    if k[0] == "session":
+        # A session line is the one thing here that is legitimately rewritten: it is written when
+        # a run starts, with nothing typed yet, and again when it ends. Both carry the same id, so
+        # under the gesture rule the *empty* one won and every finished run was archived as though
+        # nothing had been typed in it. A run only ever grows, so the longer transcript wins.
+        if len(r.get("actual", "")) > len(old.get("actual", "")):
+            merged[k] = r
+            grew += 1
+        continue
+    # A gesture never legitimately changes after it is written, with one exception: a label can
     # be withdrawn afterwards, in the lab or by hand in this file. So the copy already here
     # wins, and the only thing an incoming copy can add is a void the local one is missing.
     # Letting incoming win outright silently reverted every withdrawal the moment the phone --
     # which has never seen them -- was read again.
     if old.get("void") is None and r.get("void") is not None:
-        merged[r["id"]] = r
+        merged[k] = r
     elif old != r:
         kept += 1
 
-rows = sorted(merged.values(), key=lambda r: r["at"])
+rows = sorted(merged.values(), key=lambda r: (r["at"], r.get("kind", "gesture") != "session"))
 with open(bank, "w") as f:
     for r in rows:
         f.write(json.dumps(r, separators=(",", ":"), ensure_ascii=False) + "\n")
 
-print(f"{bank}: {len(rows)} samples (+{added} new)")
+sessions = sum(1 for r in rows if r.get("kind") == "session")
+print(f"{bank}: {len(rows) - sessions} gestures in {sessions} runs (+{added} new)")
+if grew:
+    print(f"  {grew} runs had more typing in them than the archived copy")
 if kept:
     print(f"  {kept} incoming copies differed from the archived ones and were ignored")
 PY
@@ -188,8 +212,14 @@ stats)
     fi
     python3 - "$BANK" <<'PY'
 import json, sys, collections
-rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
-print(f"{len(rows)} samples")
+all_rows = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+rows = [r for r in all_rows if r.get("kind") != "session"]
+runs = [r for r in all_rows if r.get("kind") == "session"]
+print(f"{len(rows)} samples in {len(runs)} runs")
+for run in runs[-5:]:
+    typed, want = run.get("actual", ""), run.get("intended", "")
+    same = sum(1 for a, b in zip(typed, want) if a == b)
+    print(f"  {run['passage']:<12} {len(typed):>4}/{len(want):<4} chars, {same} matching from the start")
 by_intent = collections.Counter(r["intent"] for r in rows)
 for intent, n in sorted(by_intent.items()):
     print(f"  {intent:<7} {n}")

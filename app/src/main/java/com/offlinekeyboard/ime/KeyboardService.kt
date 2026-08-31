@@ -125,6 +125,26 @@ class KeyboardService : InputMethodService() {
     private val pending = PendingWord()
 
     /**
+     * What the gesture currently being processed did to the field.
+     *
+     * The lab needs the mapping from gesture to output, and this is the only place it exists.
+     * Nothing downstream can recover it: a glide types a word and sometimes a space in front of
+     * it, an emoji replaces a run of characters, a flick produces a digit, and by the time the
+     * text has landed there is no way to tell which gesture put which part of it there. So it is
+     * counted here, as it happens, and handed over with the trace.
+     */
+    private val typedThisGesture = StringBuilder()
+    private var deletedThisGesture = 0
+
+    private fun typed(text: String) {
+        typedThisGesture.append(text)
+    }
+
+    private fun deleted(count: Int) {
+        deletedThisGesture += count
+    }
+
+    /**
      * Whether this field wants a word held open at all.
      *
      * Off for passwords, URLs and anything asking for no suggestions. The keyboard has nothing
@@ -464,6 +484,8 @@ class KeyboardService : InputMethodService() {
         // to the path that produced it. A completed glide is always emitted before the capture
         // of the gesture that made it, which is the only reason this can be a local.
         var decoded: String? = null
+        typedThisGesture.setLength(0)
+        deletedThisGesture = 0
         outputs.forEach { out ->
             when (out) {
                 is GestureOutput.CommitPrimary -> if (!pendLetter(out)) commit(out.text)
@@ -485,7 +507,13 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type, out.keyId)
                 is GestureOutput.GlideCompleted -> decoded = commitGlide(out)
                 // Kept only while the gesture lab is asking for something; a no-op otherwise.
-                is GestureOutput.GestureCaptured -> GestureCapture.onGesture(this, out.trace, decoded)
+                is GestureOutput.GestureCaptured -> GestureCapture.onGesture(
+                    context = this,
+                    trace = out.trace,
+                    typed = typedThisGesture.toString(),
+                    deleted = deletedThisGesture,
+                    decoded = decoded,
+                )
                 else -> Unit
             }
         }
@@ -497,6 +525,7 @@ class KeyboardService : InputMethodService() {
         // ended it.
         flushPending()
         currentInputConnection?.commitText(text, 1)
+        typed(text)
         // iOS one-shot shift: the next letter is capitalised, then shift releases.
         if (shift == ShiftState.ONE_SHOT && text.isNotBlank()) {
             shift = ShiftState.OFF
@@ -538,6 +567,11 @@ class KeyboardService : InputMethodService() {
 
         val text = pending.textFor(decoder.read(pending.taps, geometry))
         if (pending.hasChanged(text)) {
+            // What the field gained or lost, which for a re-reading is both: the composing region
+            // is rewritten whole, so the honest account of this gesture is that it removed the
+            // old reading and put back a new one.
+            deleted(pending.shownLength)
+            typed(text)
             pending.markShown(text)
             ic.setComposingText(text, 1)
         }
@@ -604,9 +638,11 @@ class KeyboardService : InputMethodService() {
         val cased = if (shift == ShiftState.OFF) word else word.replaceFirstChar { it.uppercase() }
         val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
         val needsSpace = before != null && !before.isWhitespace() && before !in OPENERS
+        val written = if (needsSpace) " $cased" else cased
         ic.beginBatchEdit()
-        ic.commitText(if (needsSpace) " $cased" else cased, 1)
+        ic.commitText(written, 1)
         ic.endBatchEdit()
+        typed(written)
         if (shift == ShiftState.ONE_SHOT) {
             shift = ShiftState.OFF
             applyLayout()
@@ -681,7 +717,13 @@ class KeyboardService : InputMethodService() {
         flushPending()
         val ic = currentInputConnection ?: return
         val selected = ic.getSelectedText(0)
-        if (selected.isNullOrEmpty()) ic.deleteSurroundingText(1, 0) else ic.commitText("", 1)
+        if (selected.isNullOrEmpty()) {
+            ic.deleteSurroundingText(1, 0)
+            deleted(1)
+        } else {
+            deleted(selected.length)
+            ic.commitText("", 1)
+        }
         refreshCandidates()
     }
 
@@ -864,8 +906,12 @@ class KeyboardService : InputMethodService() {
         val text = keyboardView?.candidates?.getOrNull(position) ?: return
         val ic = currentInputConnection ?: return
         ic.beginBatchEdit()
-        if (candidateReplaceLength > 0) ic.deleteSurroundingText(candidateReplaceLength, 0)
+        if (candidateReplaceLength > 0) {
+            ic.deleteSurroundingText(candidateReplaceLength, 0)
+            deleted(candidateReplaceLength)
+        }
         ic.commitText(text, 1)
+        typed(text)
         ic.endBatchEdit()
         refreshCandidates()
     }

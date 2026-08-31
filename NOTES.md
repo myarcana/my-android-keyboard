@@ -291,6 +291,42 @@ that might not be. Backspace, a glide, the trackpad, a mode change, a focus chan
 move the keyboard did not make itself all flush. So do passwords, addresses and any field asking
 for no suggestions, which never hold a word at all.
 
+### A recorder that rejects is a recorder that deletes its mistakes
+
+The lab was built as a gatekeeper. One target armed at a time, each gesture judged against it,
+kept or thrown away, and the passage advanced only on a gesture it accepted. Every rejection was a
+hole in the bank -- and the holes were not random. They were exactly the mistakes.
+
+The number that made it undeniable: the first prose session recorded **276 taps and zero misses**.
+Not a thumb that never slipped. A recorder in which a slip was defined as a non-event, because a
+tap that started on the wrong key was refused for starting on the wrong key. The one sample worth
+having, for a decoder whose whole purpose is recovering a letter a thumb missed, was the one thing
+guaranteed not to be in the file.
+
+So the lab stops judging and keeps a transcript: the **intended** string, the **actual** string,
+the **gestures** in order with their raw paths, and the mapping between them. Nothing is refused;
+there is no outcome in which a gesture is not recorded.
+
+**The two mappings are different in kind and are obtained differently, and conflating them is the
+trap.** Gesture to output is *recorded* -- each gesture carries the exact edit it made, the text
+it typed and the characters it deleted, taken from the keyboard at the moment it made them.
+Rebuilding that afterwards by aligning strings would be guessing at something that was certain at
+the time, and it would guess wrong on precisely the interesting cases: a glide that types a word
+and a space in front of it, an emoji that replaces a run of characters, a backspace. Intended
+against actual is *compared afterwards*, because it cannot be known before -- whether a letter was
+a mistake depends on what the typist does next, and the correction is the ground truth. Pretending
+that verdict was available at the instant a finger lifted is what cost the bank its mistakes.
+
+What falls out is that the typist's own corrections become the labels. A backspace is direct
+evidence that what came before it was wrong, and it is stronger evidence than anything the lab
+could have inferred, because it comes from the only person who knows what was meant.
+
+The lab therefore never blocks and never waits. The passage is drawn against what has actually
+been typed -- green where the two still agree, red for what was typed after they stopped agreeing
+-- and the typing may drift, or run past the end, or be corrected, and the recording just
+continues. `Skip` used to skip one token, which was only a thing to do because a token could
+refuse to be typed; there is nothing to skip past now, so it takes the next passage instead.
+
 ### The passage knows the letters whatever the thumb does
 
 The lab assumed a target was a gesture: one word, one glide, one label. Every prose word of two

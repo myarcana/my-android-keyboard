@@ -258,7 +258,10 @@ One JSON object per line. Written and read by `gesture/GestureRecord.kt`, which 
 the JVM tests use, so the two ends cannot disagree.
 
 ```json
-{"v":4,"id":"892f902b","at":1756000004000,
+{"v":5,"kind":"session","id":"7c31aa02","at":1756000003000,
+ "passage":"corpus:12","intended":"ok i am","actual":"oi i am"}
+
+{"v":5,"id":"892f902b","at":1756000004000,"session":"7c31aa02","seq":3,"typed":"morning",
  "intent":"WORD","prompt":"word:morning","expected":"morning","decoded":"morning",
  "startKey":"m","layout":"en_qwerty_lower",
  "widthPx":1080.0,"keyUnitPx":92.0,"keyHeightPx":120.0,
@@ -278,6 +281,33 @@ missing `strokes` genuinely means one stroke and a missing resume threshold genu
 build had none — the number exists so a reader can tell which absences are real, not so old data
 can be refused. The bank is the one thing here that must never be invalidated by a change to the
 code that reads it.
+
+Version 5 is where the lab stopped judging. Up to 4 it armed one target at a time and **threw
+away any gesture it could not label** -- so the bank held the gestures that went well and nothing
+else. Its first prose session recorded 276 taps and zero mistakes, which is not a keyboard that
+never misses, it is a recorder that deletes the misses. From 5 every gesture is kept, and the file
+holds a transcript instead of a verdict:
+
+- a **session line** per run, carrying the `intended` passage and the `actual` text it produced;
+- `session`, `seq`, `typed` and `deleted` on every gesture.
+
+`typed` and `deleted` are the mapping from gesture to output, and they are **recorded at the
+moment the gesture is made, never inferred**. Applied in sequence they rebuild `actual` exactly,
+so every character can be traced to the gesture that produced it. Reconstructing that afterwards
+by lining strings up would be guessing at something that was certain at the time, and it would
+guess wrong on the interesting cases -- a glide that types a word and a space in front of it, an
+emoji that replaces a run of characters, a backspace.
+
+Whether a character was a *mistake* is the other question, and that one genuinely is post-hoc:
+it depends on what the typist does next. A backspace is the ground truth, and it only exists in
+hindsight. `intent` and `expected` survive on a v5 line as a hint written down at the time -- what
+the passage was asking for where the caret stood -- and are not evidence that the gesture was a
+correct attempt at anything.
+
+A session line is written twice, at the start of a run and at its end, under the same `id`. The
+opening one exists because the ordinary way a session ends is that it is abandoned, and a run
+whose intended text was never written down is a heap of gestures nobody can score. When merging,
+the longer `actual` wins; the gesture rule of "the archived copy wins" would keep the empty one.
 
 Version 4 added `word` and `letterIndex`, when prose passages began collecting tapped words as
 well as glided ones. Their absence on an older line is truthful rather than missing: before 4 the

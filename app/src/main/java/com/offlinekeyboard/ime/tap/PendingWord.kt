@@ -57,6 +57,9 @@ class PendingWord {
         }
     }
 
+    /** How many characters are currently on screen for this word. */
+    val shownLength: Int get() = shown.length
+
     /** True when [text] differs from what was last handed to [markShown]. */
     fun hasChanged(text: String): Boolean = text != shown
 

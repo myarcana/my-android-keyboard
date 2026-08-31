@@ -20,7 +20,7 @@ data class Target(
      * tapped rather than glided is a run of labelled letters rather than a lost sample. Empty for
      * the collision drill, which exists precisely to ask for one named gesture on one named key.
      *
-     * See [TargetReader], which is where the choice is actually made.
+     * See [PassageRun], which is what a run of typing is recorded against.
      */
     val letters: String = "",
 )
@@ -212,9 +212,9 @@ object Passages {
         val glidable = letters.length >= 2
         return Target(
             id = if (glidable) "word:${word.lowercase()}" else "tap:$letters",
-            // What the passage suggests, and what colours it on screen. It is no longer what the
-            // gesture will be filed as: a word may be glided or tapped out, and [TargetReader]
-            // labels each gesture with what the thumb actually did.
+            // What the passage suggests. It is not what a gesture will be filed as: the lab
+            // records what the thumb actually did and what it typed, and leaves the judging to
+            // whatever reads the transcript afterwards.
             intent = if (glidable) GestureIntent.WORD else GestureIntent.LETTER,
             startKeyId = letters.take(1),
             expected = word,
