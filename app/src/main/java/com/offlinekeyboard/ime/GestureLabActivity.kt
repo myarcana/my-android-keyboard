@@ -313,9 +313,14 @@ class GestureLabActivity : Activity() {
     private fun onRecorded(record: GestureRecord, run: PassageRun) {
         sessionRecorded++
         LabProgress.record(LabDeck.prefs(this))
-        record.verdictIntent?.let {
-            sessionDecided++
-            if (it == record.intent) sessionAgreed++
+        // Only the drill. A prose token carries a positional hint rather than an instruction, so
+        // measuring a verdict against it counts nothing -- and read as the heuristic collapsing
+        // the moment prose started collecting taps.
+        if (record.word == null) {
+            record.verdictIntent?.let {
+                sessionDecided++
+                if (it == record.intent) sessionAgreed++
+            }
         }
         if (record.intent == GestureIntent.WORD && record.decoded != null) {
             wordsTyped++

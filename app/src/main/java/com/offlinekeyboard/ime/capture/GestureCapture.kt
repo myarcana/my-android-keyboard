@@ -173,6 +173,11 @@ object GestureCapture {
             expected = aimedAt?.expected ?: "",
             trace = trace,
             decoded = decoded,
+            // Set only for a token that could have been typed more than one way -- a prose word,
+            // glided or tapped. Its absence is what marks a gesture the drill genuinely asked
+            // for, which is the only kind whose `intent` is an instruction rather than a hint,
+            // and so the only kind worth scoring the heuristic against.
+            word = aimedAt?.expected?.takeIf { aimedAt.letters.isNotEmpty() },
             sessionId = sessionId,
             seq = seq,
             typed = typed,

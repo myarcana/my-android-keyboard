@@ -211,7 +211,7 @@ object GestureBank {
      * collapsing from 92% to 61% the moment prose started collecting taps.
      */
     fun summarise(records: List<GestureRecord>): Summary {
-        val drill = records.filter { it.sessionId == null || it.word == null && it.seq < 0 }
+        val drill = records.filter { it.word == null }
         val decided = drill.filter { it.verdictIntent != null }
         return Summary(
             total = records.size,
