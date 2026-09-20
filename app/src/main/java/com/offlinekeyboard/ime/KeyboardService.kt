@@ -494,7 +494,9 @@ class KeyboardService : InputMethodService() {
             pinyin?.clear()
             currentInputConnection?.finishComposingText()
         }
-        keyboardView?.chineseMode = chineseMode
+        // The view is not told about the mode. How the strip draws follows from what is on it --
+        // the candidate kinds -- not from which subtype is active; see [KeyboardView.textStrip].
+        refreshCandidates()
     }
 
     /**
@@ -1412,12 +1414,18 @@ class KeyboardService : InputMethodService() {
         // would put an English feature in front of someone writing Chinese.
         if (chineseMode) {
             val session = pinyin
-            view.candidates = if (session == null || session.isEmpty) {
+            val texts = if (session == null || session.isEmpty) {
                 emptyList()
             } else {
                 session.candidates()
             }
-            view.candidateKinds = emptyList()
+            view.candidates = texts
+            // Kinds are supplied here even though every entry is Chinese, because the kinds are
+            // what select the text renderer -- see [KeyboardView.textStrip]. Leaving them empty
+            // made the CJK bar depend on a second switch (`chineseMode`) that had to agree with
+            // this one, which is exactly the disagreement that made a Chinese-only bar look
+            // unlike the mixed bar showing the same characters.
+            view.candidateKinds = texts.map { UnifiedCandidates.Kind.CHINESE }
             candidateReplaceLength = 0
             return
         }

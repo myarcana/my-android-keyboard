@@ -232,10 +232,10 @@ class KeyboardView @JvmOverloads constructor(
     /**
      * What each suggestion is, parallel to [candidates]; empty when they are all alike.
      *
-     * The English bar now holds emoji and Chinese at once, and the two cannot share a column
-     * width: an emoji is one square glyph and 牛肉麵 is three characters of text. Empty means the
-     * old uniform behaviour -- every entry an emoji in English, every entry Chinese in the CJK
-     * modes -- which is still what [chineseMode] and the default bar produce.
+     * The bar holds emoji and Chinese at once, and the two cannot share a column width: an emoji
+     * is one square glyph and 牛肉麵 is three characters of text. Empty means every entry is an
+     * emoji, which is what the default bar produces; every other caller -- the English bar and
+     * the CJK bar alike -- supplies one kind per candidate.
      */
     var candidateKinds: List<UnifiedCandidates.Kind> = emptyList()
         set(value) {
@@ -257,30 +257,16 @@ class KeyboardView @JvmOverloads constructor(
      * happens to be standing next to it, so that is the condition, and the transition from mixed
      * to Chinese-only now changes nothing about how the Chinese is drawn.
      *
-     * [chineseMode] does not need to be tested alongside this: the CJK bar leaves
-     * [candidateKinds] empty, so the kinds are absent rather than uniform, and it is
-     * `chineseMode || textStrip` at the two call sites that selects the text renderer.
+     * This is the *only* thing that selects the text renderer. There used to be a `chineseMode`
+     * flag beside it, set from the subtype, and the CJK bar left [candidateKinds] empty and
+     * relied on that flag instead -- so the same Chinese characters were routed to the renderer
+     * by two different switches that had to be kept in agreement, and the kinds the rest of this
+     * class reads (text size, the dimming rule) were absent on one of the two paths. The CJK bar
+     * now supplies `Kind.CHINESE` like any other caller and takes the identical path.
      */
     private val textStrip: Boolean
         get() = candidateKinds.size == candidates.size &&
             candidateKinds.any { it != UnifiedCandidates.Kind.EMOJI }
-
-    /**
-     * Whether the strip is showing Chinese candidates rather than emoji.
-     *
-     * The two are drawn differently and have to be: an emoji is one square glyph that fits a
-     * fixed column, while a candidate is one to several characters of text whose width nobody
-     * can know in advance. Sharing the emoji's fixed grid would clip 今天天气很好 to its first
-     * character and leave the rest of the bar empty.
-     */
-    var chineseMode: Boolean = false
-        set(value) {
-            if (field == value) return
-            field = value
-            pressedCandidate = -1
-            invalidateSlots()
-            invalidate()
-        }
 
     var layout: Layout = IosLayouts.QWERTY_LOWER
         set(value) {
@@ -545,7 +531,7 @@ class KeyboardView @JvmOverloads constructor(
             return
         }
         if (candidates.isEmpty()) return
-        if (chineseMode || textStrip) return drawTextCandidates(canvas, g, t, radius)
+        if (textStrip) return drawTextCandidates(canvas, g, t, radius)
         val cell = candidateCellWidth(g)
         // The emoji use the whole strip, evenly. They used to sit in its top 10%-70%, which put a
         // thin gap above them and a large empty one below: the lower part was a dead band that
@@ -728,7 +714,7 @@ class KeyboardView @JvmOverloads constructor(
         if (y >= g.stripHeight || g.isLetterReach(x, y)) return -1
         if (candidates.isEmpty() || status != null) return -1
         if (stripHandedOver) return -1
-        if (chineseMode || textStrip) {
+        if (textStrip) {
             // The same slots the drawing used, so the candidate under the finger is the one on
             // screen. Widths vary per candidate, so there is no arithmetic shortcut here.
             return textCandidateSlots(g)
