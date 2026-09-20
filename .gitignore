@@ -18,3 +18,14 @@ app/src/main/assets/asr/
 
 # The swipe decoder runtime and models: built and fetched by tools/fetch_swipe_runtime.sh.
 app/src/main/assets/swipe/
+
+# Model payload, relocated out of app/src/main/assets so a -Ppack build cannot ship it.
+# A self-contained build adds this back as an asset source dir; see app/build.gradle.kts.
+app/src/payload/
+
+# Fetched model payload for the -Ppack build: 1.2 GB of ASR/swipe runtimes and weights,
+# assembled by tools/pack_models.sh. Fetched, never authored -- see AGENTS.md.
+modelpack/
+
+# Kotlin incremental-compile scratch.
+.kotlin/

@@ -35,7 +35,12 @@ class SwipeTrie private constructor(private var handle: Long) : AutoCloseable {
             // natives live in that library but in no way depend on that class, and a dictionary
             // is loaded *before* the engine that will use it. Relying on the other class having
             // been touched first is a load-order assumption that was wrong the first time.
-            System.loadLibrary("swipe_jni")
+            //
+            // The library may live in the model pack rather than in this APK; see ModelPack.
+            // This is a class initialiser and has no Context, so the pack is found through the
+            // one the app installed at startup (ModelPackOptions.install). A self-contained
+            // build has none and loads its own copy, exactly as before.
+            com.offlinekeyboard.ime.pack.ModelPackRuntime.loadOptional("swipe_jni")
         }
 
         /** Null when the file is missing or unparseable, which is a fallback, not a crash. */

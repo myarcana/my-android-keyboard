@@ -1,20 +1,41 @@
 package com.offlinekeyboard.ime.gesture
 
+import com.offlinekeyboard.ime.layout.EditAction
 import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import com.offlinekeyboard.ime.layout.PopupEntry
+import com.offlinekeyboard.ime.layout.PopupGrid
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 data class PathPoint(val x: Float, val y: Float, val t: Long)
 
+/** Which way a space-bar squash flick went. */
+enum class SquashDirection { LEFT, RIGHT }
+
 /**
  * Gesture thresholds. Ratios rather than pixels so behaviour is identical on any screen
  * density; the debug overlay tunes these by feel on a real device.
  */
 data class GestureConfig(
-    val longPressMs: Long = 500L,
+    /**
+     * How long a still finger must hold before the press becomes a hold: the accent popup, the
+     * backspace repeat, the spacebar trackpad.
+     *
+     * Half the platform's 500ms, by request. The platform number is a *default* for views that
+     * have nothing better to do while waiting, not a perceptual constant, and a keyboard does
+     * have something better: every key here offers a hold, so the wait is paid on purpose rather
+     * than discovered by accident, and 250ms is long enough to stay clear of a tap (the bank's
+     * slowest tap lifts at 190ms) without making the user prove patience.
+     *
+     * It is not free. This is the window in which a slow glide can be mistaken for a hold, and
+     * halving it halves the slack -- the recorded "on" that dawdled 447ms before accelerating is
+     * now well past the deadline, and only [longPressSlopRatio] keeps it from opening a popup.
+     * That guard is what makes the shorter timeout safe; do not loosen both at once.
+     */
+    val longPressMs: Long = 250L,
     /**
      * Downward travel needed to read as a flick, as a fraction of key height.
      *
@@ -113,6 +134,62 @@ data class GestureConfig(
      */
     val bulkDeleteDistanceRatio: Float = 0.8f,
     /**
+     * Downward travel on the space bar that closes the keyboard, as a fraction of key height.
+     *
+     * Far larger than [flickDistanceRatio] -- three quarters of a key against three pixels --
+     * and the reason is that the space bar is the one key with nothing below it. A flick down
+     * from any letter has the rest of the keyboard to travel through; a flick down from space
+     * leaves the board almost immediately, so the gesture is made mostly of the part where the
+     * finger is already past the bottom row and heading for the screen edge. Asking for a
+     * deliberate, full-key drag is what keeps the keyboard from vanishing when a thumb rolls
+     * off the bottom of the space bar at the end of a sentence.
+     *
+     * It is also the cheapest possible mistake to make in the other direction: a user whose
+     * dismissal did not register flicks again, while one whose keyboard vanished mid-sentence
+     * has to find the text field and tap it. The asymmetry argues for the larger number.
+     */
+    val spaceDismissDistanceRatio: Float = 0.75f,
+    /**
+     * Sideways travel along the space bar that squashes the board, as a fraction of key *width*.
+     *
+     * In key widths rather than key heights because the gesture is horizontal and the space bar
+     * is wide: this is a journey along the key the finger is already on, and a key width of it
+     * is a little over a fifth of that bar.
+     *
+     * Distance alone does not separate this from the trackpad, which is why
+     * [spaceSquashMinSpeed] exists. A finger may cross the space bar slowly on its way into the
+     * trackpad -- that is the documented way in, and it is still PRESSED while it does so.
+     */
+    val spaceSquashDistanceRatio: Float = 1.0f,
+    /**
+     * How fast a sideways stroke must be to be a squash flick, in pixels per millisecond.
+     *
+     * This, not the distance, is what keeps the squash and the trackpad apart. Both start as a
+     * sideways drag on the space bar while PRESSED, and both can cover a key width; what
+     * differs is the manner. A flick is thrown -- the recorded flicks elsewhere in this file
+     * leave at speeds far above this -- while a finger heading for the trackpad is being placed,
+     * and creeps, because the user is waiting for the hold to take and watching for the cursor.
+     *
+     * 0.5 px/ms is 60px in 120ms on the target device: a deliberate throw, and roughly four
+     * times the speed [trackpadSlowSpeed] already calls "slow, leave the gain alone".
+     *
+     * The measurement is over the whole gesture rather than the last sample, so it asks whether
+     * the finger has been moving fast *since it went down*. A slow drift that speeds up at the
+     * end -- a thumb settling into the trackpad and then panning -- never qualifies, because the
+     * dawdle at the start is still in the average. The trackpad's own sampling, which does want
+     * instantaneous speed, keeps its separate smoothed estimate.
+     */
+    val spaceSquashMinSpeed: Float = 0.5f,
+    /**
+     * |dx| must exceed this multiple of |dy| for a space-bar flick to count as horizontal.
+     *
+     * The mirror of [verticalDominance] and deliberately gentler. A sideways flick along the
+     * space bar has nothing to be confused with: there is no glide from space and no secondary
+     * to pull down, so the only competing reading is the downward dismissal, which this keeps
+     * clear of. The dismissal's own guard is its much longer travel.
+     */
+    val horizontalDominance: Float = 1.5f,
+    /**
      * Trackpad gain: pixels the granular cursor travels per pixel of finger movement.
      * Vertical is deliberately higher -- a line is a much longer journey than a character, and
      * there is less room to move vertically on a keyboard than horizontally.
@@ -194,9 +271,36 @@ sealed interface GestureOutput {
     data class FlickPreview(val keyId: String, val text: String) : GestureOutput
     data object FlickPreviewCleared : GestureOutput
 
-    data class ShowAccents(val keyId: String, val accents: List<String>) : GestureOutput
+    /**
+     * The long-press popup opened. Entries are accents, edit actions, or both -- see [PopupEntry].
+     */
+    data class ShowAccents(val keyId: String, val entries: List<PopupEntry>) : GestureOutput {
+        /** The accent labels only, for readers that predate actions sharing this popup. */
+        val accents: List<String>
+            get() = entries.filterIsInstance<PopupEntry.Accent>().map { it.text }
+    }
     data class AccentHighlighted(val index: Int) : GestureOutput
     data class CommitAccent(val keyId: String, val text: String) : GestureOutput
+
+    /**
+     * An edit action was chosen from the popup.
+     *
+     * Deliberately not folded into [CommitAccent] with a magic string. What the service does with
+     * the two could hardly be more different -- one inserts text, the other reaches into the
+     * editor -- and a single case carrying both would put that decision in the service's string
+     * parsing rather than in the type.
+     */
+    data class CommitAction(val keyId: String, val action: EditAction) : GestureOutput
+
+    /**
+     * A language was chosen from the globe key's menu.
+     *
+     * Its own case for the same reason [CommitAction] is: what the service does with it -- ask
+     * the system to change input method -- has nothing to do with typing text, and folding it
+     * into [CommitAccent] would mean the service deciding by inspecting a string whether to type
+     * "English" or switch to it.
+     */
+    data class CommitLanguage(val keyId: String, val languageId: String) : GestureOutput
     data object HideAccents : GestureOutput
 
     data object GlideStarted : GestureOutput
@@ -218,6 +322,20 @@ sealed interface GestureOutput {
 
     /** Swipe up on backspace: clear the line, or the whole field if it has only one. */
     data object BulkDelete : GestureOutput
+
+    /** Swipe down on the space bar: put the keyboard away. */
+    data object DismissKeyboard : GestureOutput
+
+    /**
+     * Swipe sideways along the space bar: squash the board toward that edge, or unsquash it.
+     *
+     * Carries the *direction of the flick* rather than the state it should land in. Which state
+     * that is depends on the state the board is in now, which the machine deliberately does not
+     * know: it sees one gesture on one geometry and has no business holding the board's mode
+     * across the gestures that change it. [com.offlinekeyboard.ime.layout.Squash.flicked] owns
+     * that transition, in one place, where the view keeps the state.
+     */
+    data class SquashFlick(val toward: SquashDirection) : GestureOutput
 
     data object TrackpadStarted : GestureOutput
 
@@ -310,6 +428,19 @@ class TouchFsm(
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
     private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
     private val glideResumeRadius get() = config.glideResumeRadiusRatio * geometry.keyUnit
+    private val spaceDismissDistance get() = config.spaceDismissDistanceRatio * geometry.keyHeight
+
+    /**
+     * How far sideways a space-bar flick must travel to squash the board.
+     *
+     * Measured in *unsquashed* key widths, so the gesture asks for the same physical distance
+     * whichever state the board is in. Reading [LayoutGeometry.keyUnit] would shrink the
+     * threshold along with the keys, making the already-squashed board a third easier to flick
+     * than the full-width one -- so a thumb travelling to the far side of a narrow space bar
+     * would unsquash it by accident.
+     */
+    private val spaceSquashDistance
+        get() = config.spaceSquashDistanceRatio * geometry.unsquashedKeyUnit
 
     /** Deadline the host should schedule a [onLongPressTimeout] callback for, or null. */
     val longPressDeadline: Long? get() = down?.let { it.t + config.longPressMs }
@@ -401,12 +532,23 @@ class TouchFsm(
             // move before the timeout is the normal way into the trackpad, and there is no
             // glide competing for that gesture. The conflict is only ever accents versus a
             // slow-starting glide.
-            key.key.accents.isNotEmpty() && !hasDrifted() -> {
+            key.key.popup.isNotEmpty() && !hasDrifted() -> {
                 state = GestureState.ACCENTS
-                accentIndex = 0
+                val grid = popupGrid(key)
+                // The slot the finger is already over, measured, not assumed to be slot 0.
+                //
+                // The popup opens under a thumb that has not moved, so the entry it opens on must
+                // be the one that thumb is on. Hardcoding 0 here meant the first move event -- a
+                // pixel of tremor, arriving before any deliberate movement -- recomputed the slot
+                // and the highlight jumped. Where that slot *is* is [popupLeft]'s business: it
+                // anchors a single action under the key so this lands on it. Asking the same
+                // function the moves ask is what keeps the two from drifting apart again.
+                accentIndex = grid.entryAt(path.last().x, path.last().y)
                 listOf(
-                    GestureOutput.ShowAccents(key.key.id, key.key.accents),
-                    GestureOutput.AccentHighlighted(0),
+                    // The arranged entries, in cell order, so anyone drawing or asserting on
+                    // them is looking at the same popup the finger is moving over.
+                    GestureOutput.ShowAccents(key.key.id, grid.entries),
+                    GestureOutput.AccentHighlighted(accentIndex),
                 )
             }
             else -> emptyList()
@@ -436,7 +578,7 @@ class TouchFsm(
             GestureState.PRESSED -> onMoveWhilePressed(dx, dy)
             GestureState.FLICK -> onMoveWhileFlicking()
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
-            GestureState.ACCENTS -> onMoveWhileShowingAccents(x)
+            GestureState.ACCENTS -> onMoveWhileShowingAccents(x, y)
             GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
             GestureState.BACKSPACE -> bulkDeleteIfSwipedUp(dy)
             GestureState.GLIDE_LIFTED, GestureState.IDLE, GestureState.SPENT -> emptyList()
@@ -453,6 +595,7 @@ class TouchFsm(
             // the same thing and there is nothing else an upward swipe from backspace could be.
             return bulkDeleteIfSwipedUp(dy)
         }
+        if (key.key.type == KeyType.SPACE) return spaceFlick(dx, dy)
         if (isDownward && verticallyDominant && abs(dy) > flickDistance && key.key.secondary != null) {
             state = GestureState.FLICK
             return listOf(GestureOutput.FlickPreview(key.key.id, key.key.secondary))
@@ -481,6 +624,63 @@ class TouchFsm(
     }
 
     /**
+     * The three things a drag from the space bar can mean, decided in one place.
+     *
+     * Down puts the keyboard away; left and right squash the board toward that edge. All three
+     * go SPENT rather than back to PRESSED, for the reason [bulkDeleteIfSwipedUp] does: the
+     * gesture has already done its work, and lifting afterwards must not also type a space.
+     * SPENT is what makes each of these happen once however much the finger wobbles across the
+     * threshold on its way off the glass.
+     *
+     * Only reachable while PRESSED, so a live trackpad is never disturbed: once the hold has
+     * taken, the machine is in TRACKPAD and this is not consulted at all. The case that needs
+     * care is the one *before* that -- a finger sliding along the space bar while it waits for
+     * the hold -- and what separates the two there is speed, not distance. See
+     * [GestureConfig.spaceSquashMinSpeed]; a creeping finger keeps its trackpad, a thrown one
+     * squashes the board.
+     *
+     * Downward is tested first. It is the gesture with the longer reach and the stricter
+     * dominance, so the order only matters for a diagonal that satisfies both, and of those two
+     * readings the destructive-feeling one -- the board disappearing -- should be the one that
+     * has to be asked for unambiguously. Testing it first and requiring [verticalDominance] of
+     * it means a diagonal drag squashes rather than dismisses.
+     */
+    private fun spaceFlick(dx: Float, dy: Float): List<GestureOutput> {
+        // Both readings need the throw, for the same reason: a finger creeping away from the
+        // space bar is a finger on its way into the trackpad, whichever direction it creeps.
+        if (!isThrown()) return emptyList()
+        if (dy > spaceDismissDistance && abs(dy) > config.verticalDominance * abs(dx)) {
+            state = GestureState.SPENT
+            return listOf(GestureOutput.DismissKeyboard)
+        }
+        if (abs(dx) > spaceSquashDistance &&
+            abs(dx) > config.horizontalDominance * abs(dy)
+        ) {
+            state = GestureState.SPENT
+            val toward = if (dx > 0f) SquashDirection.RIGHT else SquashDirection.LEFT
+            return listOf(GestureOutput.SquashFlick(toward))
+        }
+        return emptyList()
+    }
+
+    /**
+     * Whether the finger has been moving fast enough, since it went down, to be a flick.
+     *
+     * Straight-line speed from the down point rather than path speed: a squash flick is a stroke
+     * in one direction, so the distance that matters is how far it got, and a finger that
+     * wandered about the space bar before ending up a key to the left has not thrown anything.
+     */
+    private fun isThrown(): Boolean {
+        val start = down ?: return false
+        val now = path.lastOrNull() ?: return false
+        val dt = now.t - start.t
+        // A device that reports no elapsed time cannot support a claim about speed. Refusing is
+        // the safe answer: the gesture simply stays a press, and the next sample decides.
+        if (dt <= 0L) return false
+        return hypot(now.x - start.x, now.y - start.y) / dt > config.spaceSquashMinSpeed
+    }
+
+    /**
      * Requirement 4: a flick that keeps travelling becomes a glide. The flick was only ever a
      * preview, so nothing needs to be undone in the editor -- just clear the preview.
      */
@@ -496,17 +696,23 @@ class TouchFsm(
         return emptyList()
     }
 
-    private fun onMoveWhileShowingAccents(x: Float): List<GestureOutput> {
+    private fun onMoveWhileShowingAccents(x: Float, y: Float): List<GestureOutput> {
         val key = origin ?: return emptyList()
-        val accents = key.key.accents
-        if (accents.isEmpty()) return emptyList()
-        // The popup is centred on the key and one key-width per accent.
-        val popupLeft = key.centerX - accents.size * geometry.keyUnit / 2f
-        val index = ((x - popupLeft) / geometry.keyUnit).toInt().coerceIn(0, accents.size - 1)
+        if (key.key.popup.isEmpty()) return emptyList()
+        val index = popupGrid(key).entryAt(x, y)
         if (index == accentIndex) return emptyList()
         accentIndex = index
         return listOf(GestureOutput.AccentHighlighted(index))
     }
+
+    /**
+     * Where this key's popup sits and what is in each cell.
+     *
+     * The state machine and the renderer both build it from the same function with the same
+     * inputs, rather than each computing a layout of its own. Two copies of this arithmetic is
+     * exactly how the popup came to highlight one entry and commit another.
+     */
+    private fun popupGrid(key: KeyRect) = PopupGrid.of(key, geometry)
 
     /**
      * Requirement 5: two-dimensional cursor movement. Vertical steps are emitted as their own
@@ -595,11 +801,26 @@ class TouchFsm(
             }
             GestureState.GLIDE -> return suspendGlide(x, y, t)
             GestureState.ACCENTS -> {
-                val accents = key?.key?.accents.orEmpty()
+                // The grid's entries, not the key's declared ones: the index counts cells in the
+                // arrangement the finger was moving over, and the two differ by the row wrapping
+                // and its padding.
+                val entries = key?.let { popupGrid(it).entries }.orEmpty()
                 buildList {
                     add(GestureOutput.HideAccents)
-                    accents.getOrNull(accentIndex)?.let {
-                        add(GestureOutput.CommitAccent(key!!.key.id, it))
+                    when (val chosen = entries.getOrNull(accentIndex)) {
+                        is PopupEntry.Accent ->
+                            add(GestureOutput.CommitAccent(key!!.key.id, chosen.text))
+                        is PopupEntry.Action ->
+                            add(GestureOutput.CommitAction(key!!.key.id, chosen.action))
+                        // Releasing on the language already in use is deliberately still a
+                        // commit rather than nothing: the service treats switching to the
+                        // current language as a no-op, and deciding that here would put a
+                        // second opinion about what is current inside the state machine.
+                        is PopupEntry.Language ->
+                            add(GestureOutput.CommitLanguage(key!!.key.id, chosen.id))
+                        // A padding cell, or a popup that vanished under the finger: releasing
+                        // on a hole does nothing, which is what a hole should do.
+                        PopupEntry.Blank, null -> Unit
                     }
                 }
             }

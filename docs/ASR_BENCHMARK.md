@@ -207,6 +207,40 @@ back as `这个包裹我已经好了`). Losing the script and losing the words h
 So the `s2twp` step stays, and it is doing real work rather than tidying edge cases: 39 of 150
 Han characters in SenseVoice's Taiwanese output need converting.
 
+## What this benchmark did not catch
+
+Reported from real use, after shipping:
+
+```
+spoken:   what's your favorite taiwanese food 牛肉麵嗎
+written:  what's your favorite taiwanese food ne roium ma
+```
+
+**SenseVoice's `auto` is one language decision per segment, not per word.** It prepends a single
+detected language token and decodes the rest of the segment conditioned on it. sherpa-onnx says
+so in as many words -- `Invalid sense-voice-language: '%s'. Valid values are: auto, zh, en, ja,
+ko, yue. Or you can leave it empty to use 'auto'` -- and `language = ""` is that same `auto`,
+not a separate code-switching mode. A mostly-English sentence detects `en`, and the Mandarin
+tail is then spelled out by an English-conditioned decoder as romanised mush.
+
+The 7.9% `mixed` score is not wrong, and it does not contradict this. **CER with whitespace
+removed is why the failure hid**: a romanised tail is a handful of characters on a long correct
+sentence, so the metric that made this table the right call for *choosing a model* averages away
+the single worst thing the shipped model does. A model is chosen on aggregate error; a user
+notices the one clause that came back as gibberish.
+
+Two things worth doing if this benchmark is ever re-run:
+
+- Report a **worst-prompt** column alongside the mean, or score the mixed prompts per clause.
+  Averaged CER cannot express "one clause in five is unusable".
+- Put the **language switch mid-sentence** rather than at a clause boundary in some prompts.
+  The recorded prompts pause at the switch, which hands the VAD a segment boundary and quietly
+  gives the Mandarin its own language decision -- the easy case, not the hard one.
+
+The runtime repair is in `app/src/main/java/com/offlinekeyboard/ime/asr/CodeSwitch.kt`: detect
+the romanised signature, decode that segment again forced to `zh`, keep the better answer.
+`auto` remains the default, so the configuration this table measured is still the one that ships.
+
 ## Deciding
 
 The bar is the `apple` row. Beat it in all four columns and the choice is made. The likely

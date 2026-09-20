@@ -33,6 +33,9 @@ class SpatialModel(
     val offsetY: Float = MEASURED_OFFSET_Y,
     val sigmaX: Float = MEASURED_SIGMA_X,
     val sigmaY: Float = MEASURED_SIGMA_Y,
+    /** The scatter the rescue pass measures against. See [rescueLogLikelihood]. */
+    val rescueSigmaX: Float = REFIT_SIGMA_X,
+    val rescueSigmaY: Float = REFIT_SIGMA_Y,
 ) {
 
     /** One letter a tap could have been, and what the touch point says about it. */
@@ -44,14 +47,50 @@ class SpatialModel(
      * Constant-free because only differences are ever used: this is compared against the same
      * quantity for a competing letter, and against a prior measured in the same nats.
      */
-    fun logLikelihood(x: Float, y: Float, letter: Char, geometry: LayoutGeometry): Float {
+    fun logLikelihood(x: Float, y: Float, letter: Char, geometry: LayoutGeometry): Float =
+        logLikelihood(x, y, letter, geometry, sigmaX, sigmaY)
+
+    /** The same, against an explicit scatter. See [rescueLogLikelihood] for why there are two. */
+    fun logLikelihood(
+        x: Float,
+        y: Float,
+        letter: Char,
+        geometry: LayoutGeometry,
+        sx: Float,
+        sy: Float,
+    ): Float {
         val rect = geometry.letterKeys.getOrNull(letter - 'a') ?: return NEVER
         val dx = (x - rect.centerX) / geometry.keyUnit - offsetX
         val dy = (y - rect.centerY) / geometry.keyHeight - offsetY
-        val zx = dx / sigmaX
-        val zy = dy / sigmaY
+        val zx = dx / sx
+        val zy = dy / sy
         return -0.5f * (zx * zx + zy * zy)
     }
+
+    /**
+     * ln P(touch | letter) as the rescue pass measures it, on the better-sampled scatter.
+     *
+     * Two sigmas is not two opinions about thumbs. It is one measurement used for two different
+     * questions, and the questions can afford different error budgets.
+     *
+     * [logLikelihood] answers "is this tap ambiguous *on its own*". It has no context and cannot
+     * acquire any, so it must not overstate ambiguity -- an overstated one hands the language
+     * model a letter the user typed deliberately. The tight [MEASURED_SIGMA_X] is the
+     * conservative choice there, and the pinning guarantee is built on it.
+     *
+     * This answers a question that only arises once the rest of the word is known and certain:
+     * given that this one letter is the only thing wrong, could the finger have missed? That is
+     * a question about how far thumbs genuinely scatter, and the honest answer is [REFIT_SIGMA_X]
+     * -- fitted over 2031 taps rather than 94, and documented on [MEASURED_SIGMA_X] as the better
+     * measurement that could not be shipped globally because it collapses the pinning band.
+     *
+     * Using it *only* here is what makes it safe. It never widens the first pass, so accurate
+     * typing is pinned exactly as it was, and this is unreachable unless the surrounding letters
+     * are already certain and a real, commoner word is waiting. The strictness that protected the
+     * user has not been given up; it has moved to where the evidence to afford it exists.
+     */
+    fun rescueLogLikelihood(x: Float, y: Float, letter: Char, geometry: LayoutGeometry): Float =
+        logLikelihood(x, y, letter, geometry, rescueSigmaX, rescueSigmaY)
 
     /**
      * The letters this tap could plausibly have meant, best first.
@@ -89,9 +128,123 @@ class SpatialModel(
         return all
     }
 
+    /**
+     * The letters a tap could have meant if its *neighbours* vouch for it, best first.
+     *
+     * This is [candidates] with a wider band, and the width is the entire idea. [candidates]
+     * asks a question about one touch point in isolation, so it has to be conservative: it
+     * cannot know whether the letters around this one will turn out to be certain or themselves
+     * a mess, so it assumes the worst and pins anything it can. That assumption is what makes
+     * accurate typing stable, and it is also what makes `teavhers` permanent -- the `v` tap is
+     * *accurate*, the finger really did hit `v`, so `c` is pruned before the `h`, `e`, `r`, `s`
+     * that would have argued for it are ever looked at.
+     *
+     * The wider band is affordable exactly when that assumption is not being made. [extraNats]
+     * is the slack the caller has already proved is available: evidence from letters other than
+     * this one, which [candidates] necessarily ignored. Spending it here is not a loosening of
+     * the model, it is the same budget accounted for honestly -- a letter is kept when the touch
+     * evidence against it is less than the lexicon evidence for it, and both sides of that
+     * comparison are in nats.
+     *
+     * Ordering by touch likelihood, best first, keeps the literal reading at the head: the drawn
+     * key is the best explanation of its own touch point by construction, so a caller that takes
+     * the first candidate on a tie gets the letter the user actually pressed.
+     */
+    fun rescueCandidates(
+        x: Float,
+        y: Float,
+        geometry: LayoutGeometry,
+        priorRange: Float,
+        extraNats: Float,
+    ): List<Candidate> {
+        val floorWidth = priorRange + extraNats.coerceAtLeast(0f)
+        val all = ArrayList<Candidate>(6)
+        var best = NEVER
+        for (i in 0 until 26) {
+            if (geometry.letterKeys[i] == null) continue
+            val letter = 'a' + i
+            val score = rescueLogLikelihood(x, y, letter, geometry)
+            if (score > best) best = score
+            all += Candidate(letter, score)
+        }
+        val floor = best - floorWidth
+        all.retainAll { it.logLikelihood >= floor }
+        all.sortByDescending { it.logLikelihood }
+        return all
+    }
+
+    /**
+     * How far above its expected landing point a press sits, for the nearest letter key, in
+     * standard deviations. Negative means below.
+     *
+     * This is the same measurement [logLikelihood] is built on, reported as a signed distance
+     * instead of a score, and it exists for the one question the letter-versus-letter comparison
+     * cannot answer: whether a touch in the suggestion strip was a press aimed high at the top
+     * row, or a tap on the strip itself.
+     *
+     * That question needs a *scale*, not a ranking. Comparing an emoji cell against a letter as
+     * a 27th candidate is not possible honestly -- the strip has no measured landing distribution
+     * and [WordIndex]'s prior is about English spelling, so any likelihood assigned to "the user
+     * meant the emoji" would be invented. What is measured, and is exactly what is needed here,
+     * is how thumbs scatter around a key they are aiming at: sigma. A press one sigma above the
+     * expected landing point is an ordinary press; one five sigma above it is not a press at that
+     * key at all, whatever is drawn under it.
+     *
+     * The vertical offset is what gives this its power. Thumbs land [MEASURED_OFFSET_Y] *low* --
+     * a fifth of a key height below the drawn centre -- so a touch arriving above a key's centre
+     * is already unusual before it has left the key, and the strip above is several sigma further
+     * again. The separation is large enough that the boundary does not have to be guessed.
+     *
+     * Horizontal distance is deliberately excluded. A press is assigned to the column it is over
+     * and the question here is only about height: a strip tap at the far left is as much a strip
+     * tap as one in the middle, and folding dx in would make the answer depend on how well
+     * centred the touch happened to be over whichever key sits below it.
+     */
+    fun sigmasAboveLetterRow(x: Float, y: Float, geometry: LayoutGeometry): Float {
+        val rect = geometry.letterKeys.filterNotNull().minByOrNull { r ->
+            val dy = if (y < r.top) r.top - y else if (y > r.bottom) y - r.bottom else 0f
+            val dx = if (x < r.left) r.left - x else if (x > r.right) x - r.right else 0f
+            dy * dy + dx * dx
+        } ?: return 0f
+        val expected = rect.centerY + offsetY * geometry.keyHeight
+        return (expected - y) / (sigmaY * geometry.keyHeight)
+    }
+
     companion object {
         /** A letter this layout does not have; never a candidate, never the best. */
         private const val NEVER = -Float.MAX_VALUE
+
+        /**
+         * How far above a key's expected landing point a touch stops being a press at that key,
+         * in standard deviations.
+         *
+         * This replaces a dead strip of screen at the bottom of the suggestion bar, which is what
+         * used to keep a high press on `q`-`p` from eating a word. The band was a blunt instrument
+         * -- it protected the letters by making a fixed slice of the bar refuse taps, so the emoji
+         * lost real estate whether or not anyone was typing, and the line was drawn by assertion
+         * where the underlying evidence is a smooth, already-measured distribution.
+         *
+         * **2.5 was chosen to be right under either spatial fit, which is the whole difficulty.**
+         * The two in play disagree by nearly a factor of two -- the shipped sigma_y of 0.130 key
+         * heights, and the honest refit of 0.227 documented on [MEASURED_SIGMA_X] -- and a
+         * threshold tuned to one behaves quite differently under the other. On the 34dp strip:
+         *
+         *  - at sigma 0.130 the entire strip already lies beyond 5.4 sigma, so any threshold
+         *    below that leaves all of it tappable, as it should be;
+         *  - at sigma 0.227 the strip bottom is 2.64 sigma, so a threshold of 3 or more would
+         *    start eating into the bar and 4 would claim a third of it for the letters.
+         *
+         * 2.5 is below both strip bottoms, so the emoji keep the whole bar either way, and it
+         * still puts the recorded press that turned "book" into a book emoji (1.82 sigma under
+         * the honest fit) on the letter side where it belongs. Two and a half sigma is also the
+         * right order of magnitude on its own terms: a press that high is not ordinary scatter.
+         *
+         * The reason this is not simply "the strip is safe now, delete the test" is that the
+         * threshold has to keep holding when the geometry moves. A taller strip, a shorter one,
+         * or a refit that widens sigma all change where the line falls in pixels, and this keeps
+         * the line attached to the evidence rather than to a number of dp that was true once.
+         */
+        const val LETTER_REACH_SIGMAS = 2.5f
 
         /**
          * Mean landing point relative to the drawn key centre, over the bank's 94 plain taps.
@@ -131,5 +284,28 @@ class SpatialModel(
          */
         const val MEASURED_SIGMA_X = 0.122f
         const val MEASURED_SIGMA_Y = 0.130f
+
+        /**
+         * The refit scatter, over 2031 taps with the misfiled space presses removed.
+         *
+         * These are the numbers the paragraph on [MEASURED_SIGMA_X] calls honest and declines to
+         * ship: `tools/fit_spatial.py` prints them, they are fitted on twenty times the data, and
+         * as a *global* replacement they would end pinning -- at this width a perfectly centred
+         * tap holds only about 10 nats over its sideways neighbour against a lexicon range of
+         * 13.0, so the language model would get a vote on every letter typed.
+         *
+         * They are used in exactly one place, [rescueLogLikelihood], where that objection does
+         * not apply because the question being asked is no longer "is this tap ambiguous" but
+         * "could this finger have missed, given that everything around it is right". The
+         * pinning band still comes from the tight fit, so nothing about accurate typing changes.
+         *
+         * This is the narrow form of the design decision that comment asks for, and it is worth
+         * being clear about which part is settled: the rescue path now has a measured basis, and
+         * the global fit is still open. Shipping these everywhere remains a separate change, and
+         * still needs the band to be re-derived from the gap between the two readings actually in
+         * contention rather than from the corpus-wide worst case.
+         */
+        const val REFIT_SIGMA_X = 0.227f
+        const val REFIT_SIGMA_Y = 0.208f
     }
 }

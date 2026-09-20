@@ -36,15 +36,20 @@ import com.offlinekeyboard.ime.asr.MicrophonePermissionActivity
 import com.offlinekeyboard.ime.asr.SpokenPunctuation
 import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
+import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.GestureCapture
+import com.offlinekeyboard.ime.text.GraphemeCluster
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
+import com.offlinekeyboard.ime.layout.EditAction
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
+import com.offlinekeyboard.ime.layout.Squash
+import com.offlinekeyboard.ime.pinyin.PinyinSession
 import com.offlinekeyboard.ime.tap.PendingWord
 import com.offlinekeyboard.ime.tap.TapDecoder
 import com.offlinekeyboard.ime.tap.WordIndex
@@ -58,6 +63,9 @@ import com.offlinekeyboard.ime.view.KeyboardView
  * its own to preserve, and so is the one place where guessing is the whole point.
  */
 private const val TAG = "OfflineKeyboard"
+
+/** Where [Squash] is remembered between input views. */
+private const val PREF_SQUASH = "squash"
 
 /**
  * Auto-scroll rate while the marker is parked past an edge of the visible text, in milliseconds
@@ -87,6 +95,13 @@ private const val BACKSPACE_REPEATS_BEFORE_WORDS = 18
 private const val BULK_DELETE_CHUNK = 2048
 /** Bounds the clearing loop, so a misbehaving editor cannot spin it forever. */
 private const val BULK_DELETE_MAX_CHUNKS = 64
+
+/**
+ * Text read back to size a single backspace. A grapheme cluster is bounded in practice -- the
+ * longest emoji in common use is a seven-person ZWJ sequence -- and this leaves ample room for
+ * one while keeping the read cheap enough to do on every repeat of a held backspace.
+ */
+private const val GRAPHEME_LOOKBEHIND = 32
 
 private const val EMOJI_ASSET = "emoji_en.tsv"
 
@@ -128,6 +143,16 @@ class KeyboardService : InputMethodService() {
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
 
+    /**
+     * How many characters each suggestion replaces, parallel to the bar.
+     *
+     * The single [candidateReplaceLength] was enough while the bar held only emoji, which always
+     * stand for the whole word that found them. A Chinese suggestion need not: 牛肉 is a good
+     * answer for `niuroumian` and replaces six of its ten letters, leaving `mian` to be typed
+     * on. Empty when the bar is uniform, in which case [candidateReplaceLength] applies to all.
+     */
+    private var candidateConsumes: List<Int> = emptyList()
+
     // --- tap decoding ---
     /**
      * Re-reads a run of letter taps once there is enough of a word to read. Shares the lexicon
@@ -135,8 +160,32 @@ class KeyboardService : InputMethodService() {
      */
     private var tapDecoder: TapDecoder? = null
 
+    /**
+     * The English lexicon, for judging whether typed letters are already an English word.
+     *
+     * The same object the glide and tap decoders use, held here because the suggestion bar needs
+     * a third thing from it: `ln P(word)`, which is the evidence that keeps 有 off the bar when
+     * `you` was typed. Null until [loadGlideEngine] finishes, and the bar simply offers Chinese
+     * un-discounted until then.
+     */
+    private var englishWords: Lexicon? = null
+
     /** Letter taps held as composing text, waiting for the word to end. */
     private val pending = PendingWord()
+
+    // --- chinese ---
+    /**
+     * Pinyin input, live only while a Chinese subtype is selected.
+     *
+     * Created lazily and loaded off the main thread the first time Chinese is chosen: an
+     * English-only session should not read 8 MB of dictionary for a language it never uses.
+     * Holding the raw letters here rather than in [pending] is what lets a half-typed Chinese
+     * word survive a language switch, which is requirement 10.
+     */
+    private var pinyin: PinyinSession? = null
+
+    /** True while the selected subtype is one of the Chinese ones. */
+    private var chineseMode = false
 
     /**
      * What the gesture currently being processed did to the field.
@@ -389,6 +438,10 @@ class KeyboardService : InputMethodService() {
      * a keyboard mode. Dictation runs with automatic language detection, so a segment's language
      * is not known until it comes back -- and in a code-switched sentence it can differ from the
      * one before it.
+     *
+     * This reads the *repaired* text: a segment whose Mandarin came back romanised is decoded
+     * again before it reaches here, so the Han characters that pick the script are present by
+     * this point rather than having been spelled out in Latin letters. See `asr/CodeSwitch.kt`.
      */
     private fun scriptFor(text: String): SpokenPunctuation.Script = when {
         text.none(::isHan) -> SpokenPunctuation.Script.LATIN
@@ -402,6 +455,77 @@ class KeyboardService : InputMethodService() {
         val tag = subtype.languageTag.ifEmpty { @Suppress("DEPRECATION") subtype.locale }
         return tag.startsWith("zh_TW", ignoreCase = true) ||
             tag.startsWith("zh-TW", ignoreCase = true)
+    }
+
+    /** Whether the selected subtype writes Chinese, in either script. */
+    private fun isChineseSubtype(): Boolean {
+        val subtype = getSystemService(InputMethodManager::class.java)
+            ?.currentInputMethodSubtype ?: return false
+        val tag = subtype.languageTag.ifEmpty { @Suppress("DEPRECATION") subtype.locale }
+        return tag.startsWith("zh", ignoreCase = true)
+    }
+
+    /**
+     * Brings the pinyin engine into line with the selected subtype.
+     *
+     * Called on every focus and every subtype change, because the globe key can switch language
+     * while a word is half-typed. What is *not* done here is clearing the buffer: the letters
+     * belong to the user, and requirement 10 says switching language must not destroy them. They
+     * stay composing, and are committed as letters if the language they were meant for is gone.
+     */
+    private fun syncChineseMode() {
+        val wasChinese = chineseMode
+        chineseMode = isChineseSubtype()
+        // The session is loaded in *both* modes now, because the English bar offers Chinese too.
+        // Still lazily and still off the main thread: the first English keystroke starts the
+        // read, and until it lands the bar is emoji-only rather than empty, which is exactly how
+        // the keyboard behaved before this existed.
+        val session = pinyin ?: PinyinSession(this).also { pinyin = it }
+        // Which language model the decoder scores against. In English there is no Chinese
+        // subtype to read it from, so the Traditional model is chosen by the same setting the
+        // user would use to get Traditional in Chinese mode.
+        session.traditional = if (chineseMode) isTraditionalSubtype() else preferTraditional()
+        // refreshCandidates on arrival, so the bar fills as soon as the dictionary lands
+        // rather than waiting for the next keystroke.
+        session.ensureLoaded { refreshCandidates() }
+        if (!chineseMode && wasChinese) {
+            // Leaving Chinese with letters still composing: they are already in the field as
+            // composing text, so finishing settles them exactly as typed.
+            pinyin?.clear()
+            currentInputConnection?.finishComposingText()
+        }
+        keyboardView?.chineseMode = chineseMode
+    }
+
+    /**
+     * Whether the English bar's Chinese suggestions should come from the Taiwan model.
+     *
+     * Read from the enabled subtypes rather than from a setting of its own: a user who has added
+     * the Traditional Chinese subtype has already said which Chinese they write, and asking them
+     * again in a second place is how the two answers come to disagree. With both Chinese
+     * subtypes enabled, or neither, this is false and the mainland model is used.
+     */
+    private fun preferTraditional(): Boolean {
+        val manager = getSystemService(InputMethodManager::class.java) ?: return false
+        val subtypes = runCatching {
+            manager.getEnabledInputMethodSubtypeList(null, true)
+        }.getOrNull().orEmpty()
+        var traditional = false
+        var simplified = false
+        for (subtype in subtypes) {
+            @Suppress("DEPRECATION")
+            val tag = subtype.languageTag.ifEmpty { subtype.locale }
+            if (!tag.startsWith("zh", ignoreCase = true)) continue
+            if (tag.contains("TW", ignoreCase = true) ||
+                tag.contains("Hant", ignoreCase = true) ||
+                tag.contains("HK", ignoreCase = true)
+            ) {
+                traditional = true
+            } else {
+                simplified = true
+            }
+        }
+        return traditional && !simplified
     }
 
     /**
@@ -433,6 +557,12 @@ class KeyboardService : InputMethodService() {
         keyboardView = view
         view.onOutput = ::handleOutputs
         view.onCandidate = ::commitCandidate
+        // A one-handed grip is a property of how the phone is being held, which outlives the
+        // input view: the system throws this view away and rebuilds it on a configuration
+        // change and whenever it pleases, and a hand that squashed the board would have to do
+        // it again every time if the state lived only here.
+        view.squash = loadSquash()
+        view.onSquashChanged = ::saveSquash
         applyLayout()
         loadEmojiIndex()
         inlineStrip = null
@@ -528,9 +658,22 @@ class KeyboardService : InputMethodService() {
         if (!restarting) clearInlineSuggestions()
         tapDecodingAllowed = allowsTapDecoding(info)
         shift = ShiftState.OFF
+        syncChineseMode()
         applyLayout()
         loadEmojiIndex()
         loadGlideEngine()
+        refreshCandidates()
+    }
+
+    /**
+     * The globe key, or the system switcher, chose another language.
+     *
+     * The composing buffer deliberately survives this: see [syncChineseMode].
+     */
+    override fun onCurrentInputMethodSubtypeChanged(newSubtype: android.view.inputmethod.InputMethodSubtype?) {
+        super.onCurrentInputMethodSubtypeChanged(newSubtype)
+        syncChineseMode()
+        applyLayout()
         refreshCandidates()
     }
 
@@ -571,7 +714,47 @@ class KeyboardService : InputMethodService() {
             plane.id.startsWith("en_qwerty") -> IosLayouts.QWERTY_LOWER
             else -> plane
         }
-        keyboardView?.layout = target
+        // The globe key's menu is device state, not layout: it is whatever the user has enabled
+        // right now. Injected here because this is already the one funnel every layout change
+        // goes through -- focus, shift, plane switch and subtype change all end up here -- so a
+        // language enabled in Settings shows up in the menu at the next keystroke, and the
+        // check mark against the current language cannot go stale.
+        keyboardView?.layout = LanguageMenu.attach(target, LanguageMenu.entries(this))
+    }
+
+    /**
+     * A language was slid to and released on the globe key's menu.
+     *
+     * The composing buffer is flushed first, exactly as [handleSpecialKey] does for a tap on the
+     * globe: the letters belong to the user and switching language must not destroy them
+     * (requirement 10), but they were typed for the language being left, so they are settled into
+     * the field rather than carried into a decoder that will read them differently.
+     *
+     * A failed switch falls back to the ring. [LanguageMenu.switchTo] can fail for reasons that
+     * are nobody's fault -- the window token is gone, or the subtype was disabled in Settings
+     * between the menu opening and the finger lifting -- and cycling to the next language is
+     * closer to what was asked for than doing nothing at all.
+     */
+    private fun switchLanguage(languageId: String) {
+        flushPending()
+
+        // Switching within this keyboard is the common case and has an API meant for exactly it:
+        // InputMethodService.switchInputMethod(id, subtype) needs no window token and none of
+        // the permissions the InputMethodManager route has grown. Tried first rather than as a
+        // fallback because it is the one path guaranteed to keep working.
+        val subtype = LanguageMenu.ownSubtypeFor(this, languageId)
+        if (subtype != null) {
+            val id = LanguageMenu.imeIdOf(languageId)
+            if (runCatching { switchInputMethod(id, subtype); true }.getOrDefault(false)) return
+        }
+
+        // Leaving for another keyboard, or the call above being refused. Needs the window token.
+        val token = window?.window?.attributes?.token
+        if (LanguageMenu.switchTo(this, token, languageId)) return
+
+        // Nothing worked. Cycling is not what was asked for, but it is the one thing an IME can
+        // always do, and it is nearer the request than leaving the language unchanged.
+        switchToNextInputMethod(false)
     }
 
     private fun handleOutputs(outputs: List<GestureOutput>) {
@@ -583,6 +766,8 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitPrimary -> if (!pendLetter(out)) commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
                 is GestureOutput.CommitAccent -> commit(out.text)
+                is GestureOutput.CommitAction -> runEditAction(out.action)
+                is GestureOutput.CommitLanguage -> switchLanguage(out.languageId)
                 GestureOutput.SelectionStarted -> beginSelection()
                 GestureOutput.TrackpadStarted -> startTrackpad()
                 is GestureOutput.TrackpadPan -> {
@@ -596,6 +781,11 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BackspaceRepeatStarted -> startBackspaceRepeat()
                 GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
                 GestureOutput.BulkDelete -> bulkDelete()
+                GestureOutput.DismissKeyboard -> dismissKeyboard()
+                // The board has already moved: KeyboardView owns the state because it owns the
+                // geometry. Nothing to do here but settle the word the flick interrupted, since
+                // the space bar that was pressed will now not be typing one.
+                is GestureOutput.SquashFlick -> flushPending()
                 is GestureOutput.SpecialKey -> handleSpecialKey(out.type, out.keyId)
                 is GestureOutput.GlideCompleted -> commitGlide(out)
                 // Kept only while the gesture lab is asking for something; a no-op otherwise.
@@ -611,6 +801,17 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun commit(text: String) {
+        // Space with a pinyin buffer open chooses the first candidate instead of typing a
+        // space. This is the convention every Chinese IME shares, and it is what lets a whole
+        // sentence be typed without ever looking at the bar: letters, space, letters, space.
+        // The space itself is swallowed -- Chinese is not written with spaces between words.
+        if (chineseMode && text == " ") {
+            val session = pinyin
+            if (session != null && !session.isEmpty) {
+                flushPinyin(takeFirstCandidate = true)
+                return
+            }
+        }
         // Whatever this is, it is not another letter of the word being held, so that word is
         // over. Settling it first keeps the two edits in order: the word, then the thing that
         // ended it.
@@ -622,7 +823,22 @@ class KeyboardService : InputMethodService() {
             shift = ShiftState.OFF
             applyLayout()
         }
+        returnToLetters(text)
         refreshCandidates()
+    }
+
+    /**
+     * Goes back to the letters after a character that all but guarantees one is coming, which is
+     * the iOS behaviour a thumb stops noticing it relies on.
+     *
+     * Only from the number and symbol planes, and only for the characters [TypingHabits] names.
+     * On the letter plane there is nothing to go back to, and switching would be a no-op that
+     * still had to be reasoned about every time this ran.
+     */
+    private fun returnToLetters(text: String) {
+        if (plane.id.startsWith("en_qwerty")) return
+        if (!TypingHabits.returnsToLetters(text)) return
+        switchPlane("mode_abc")
     }
 
     // --- tap decoding ---------------------------------------------------------------------
@@ -641,6 +857,10 @@ class KeyboardService : InputMethodService() {
      * deferred is the keyboard's final opinion about which letters they were.
      */
     private fun pendLetter(out: GestureOutput.CommitPrimary): Boolean {
+        // Chinese takes the letter first: in a Chinese subtype a letter is pinyin, not a word to
+        // be re-read against an English lexicon. The tap decoder and the glide engine are both
+        // English-only by construction, so they are simply not consulted here.
+        if (chineseMode && pendPinyin(out)) return true
         if (!tapDecodingAllowed) return false
         val decoder = tapDecoder ?: return false
         val geometry = keyboardView?.currentGeometry ?: return false
@@ -668,6 +888,98 @@ class KeyboardService : InputMethodService() {
         }
         refreshCandidates()
         return true
+    }
+
+    // --- chinese input ----------------------------------------------------------------------
+
+    /**
+     * Takes a letter into the pinyin buffer and shows the syllables as composing text.
+     *
+     * The letters go into the field rather than being withheld, the same bargain [pendLetter]
+     * makes for English: what is on screen is always what was typed, and only the keyboard's
+     * opinion about which characters they mean is deferred to the candidate bar.
+     *
+     * Returns false for anything that is not a pinyin letter -- a digit, a symbol, the space bar
+     * -- so the caller commits it the ordinary way.
+     */
+    private fun pendPinyin(out: GestureOutput.CommitPrimary): Boolean {
+        val session = pinyin ?: return false
+        if (!session.isReady) return false
+        val id = out.keyId
+        if (id.length != 1 || id[0] !in 'a'..'z') return false
+        val ic = currentInputConnection ?: return false
+
+        if (!session.append(id[0])) return false
+        // Shift has no meaning for pinyin, but leaving it armed would capitalise the next Latin
+        // letter typed after the Chinese word ends, which nobody asked for.
+        if (shift == ShiftState.ONE_SHOT) {
+            shift = ShiftState.OFF
+            applyLayout()
+        }
+        val composing = session.composing
+        deleted(composing.length - 1)
+        typed(composing)
+        ic.setComposingText(composing, 1)
+        refreshCandidates()
+        return true
+    }
+
+    /**
+     * Commits the chosen Chinese candidate.
+     *
+     * A candidate may cover only part of what was typed -- picking 北京 out of `beijingdaxue` --
+     * so what remains goes straight back as composing text and the bar re-offers for it. That is
+     * what makes entering a long phrase a few words at a time feel continuous.
+     */
+    private fun commitPinyin(position: Int): Boolean {
+        val session = pinyin ?: return false
+        val result = session.commit(position) ?: return false
+        val ic = currentInputConnection ?: return false
+        ic.beginBatchEdit()
+        // The composing region currently holds the raw letters; committing over it replaces them
+        // with the characters, which is exactly the edit the user asked for.
+        ic.setComposingText(result.text, 1)
+        ic.finishComposingText()
+        typed(result.text)
+        if (result.remaining.isNotEmpty()) ic.setComposingText(result.remaining, 1)
+        ic.endBatchEdit()
+        refreshCandidates()
+        return true
+    }
+
+    /**
+     * Backspace inside a pinyin buffer removes one letter, not one character of the field.
+     *
+     * Returns false once the buffer is empty so the ordinary backspace takes over and deletes
+     * text that is already committed.
+     */
+    private fun backspacePinyin(): Boolean {
+        val session = pinyin ?: return false
+        if (session.isEmpty) return false
+        session.backspace()
+        val ic = currentInputConnection ?: return false
+        if (session.isEmpty) ic.finishComposingText() else ic.setComposingText(session.composing, 1)
+        refreshCandidates()
+        return true
+    }
+
+    /**
+     * Settles a pinyin buffer that is still open.
+     *
+     * Space takes the first candidate, which is the convention every Chinese IME shares and the
+     * reason a sentence can be typed without looking at the bar. Anything else that ends the
+     * word -- moving the caret, changing field, pressing return -- commits the letters as they
+     * stand rather than guessing, because those are not acts of choosing a word.
+     */
+    private fun flushPinyin(takeFirstCandidate: Boolean) {
+        val session = pinyin ?: return
+        if (session.isEmpty) return
+        if (takeFirstCandidate && commitPinyin(0)) return
+        val letters = session.commitRaw()
+        val ic = currentInputConnection ?: return
+        ic.setComposingText(letters, 1)
+        ic.finishComposingText()
+        refreshCandidates()
     }
 
     /**
@@ -716,6 +1028,11 @@ class KeyboardService : InputMethodService() {
      * one at all next to a trackpad that can put the caret anywhere.
      */
     private fun flushPending() {
+        // A pinyin buffer is a held word too, and every caller of this means "settle whatever is
+        // open before doing something else to the field". Committed as letters rather than as
+        // the first candidate: a caret move or a focus change is not a choice of word, and
+        // guessing one would put characters in the field that nobody selected.
+        flushPinyin(takeFirstCandidate = false)
         if (pending.isEmpty) return
         pending.clear()
         currentInputConnection?.finishComposingText()
@@ -753,6 +1070,46 @@ class KeyboardService : InputMethodService() {
         }
         refreshCandidates()
         return cased
+    }
+
+    /**
+     * Runs an edit action chosen from a long-press popup.
+     *
+     * Everything goes through [InputConnection.performContextMenuAction] with the same
+     * `android.R.id.*` the text selection toolbar uses, rather than through synthesised ctrl+key
+     * events. Both reach the same handlers in a standard [android.widget.TextView], but only this
+     * one reaches them in a field that is *not* one: a WebView, a Compose text field or a game's
+     * own editor sees the menu action and does something sensible with it, where a ctrl+V it
+     * never registered a shortcut for is silently dropped. It is also the honest description of
+     * what the user asked for -- "paste" -- instead of a keystroke that usually means paste.
+     *
+     * The composing region is settled first, always. A held word is the keyboard's private
+     * opinion about letters that are already in the field, and every one of these actions is
+     * about to read, replace or move that text: copying with a composing region live copies the
+     * underline along with the words in some fields, and undo unwinds *through* it in others,
+     * leaving the keyboard holding a word the field no longer has.
+     */
+    private fun runEditAction(action: EditAction) {
+        flushPending()
+        val ic = currentInputConnection ?: return
+        ic.finishComposingText()
+        val id = when (action) {
+            EditAction.SELECT_ALL -> android.R.id.selectAll
+            EditAction.CUT -> android.R.id.cut
+            EditAction.COPY -> android.R.id.copy
+            EditAction.PASTE -> android.R.id.paste
+            EditAction.UNDO -> android.R.id.undo
+            EditAction.REDO -> android.R.id.redo
+        }
+        ic.performContextMenuAction(id)
+        // A one-shot shift that was armed before the hold has nothing left to capitalise: the
+        // gesture ended in an edit, not a letter. Leaving it armed would capitalise whatever was
+        // typed next, which is the sort of stray capital nobody can trace back to its cause.
+        if (shift == ShiftState.ONE_SHOT) {
+            shift = ShiftState.OFF
+            applyLayout()
+        }
+        refreshCandidates()
     }
 
     private fun handleSpecialKey(type: KeyType, keyId: String) {
@@ -815,6 +1172,10 @@ class KeyboardService : InputMethodService() {
     }
 
     private fun backspace() {
+        // Inside a pinyin buffer, backspace un-types a letter of the syllable being spelled --
+        // it must not settle the buffer first, or the first backspace would commit the very
+        // characters the user is trying to correct. Handled before flushPending for that reason.
+        if (chineseMode && backspacePinyin()) return
         // Also reached by the held-backspace repeat, which never passes through
         // handleSpecialKey. A delete against composing text is the one edit that would make the
         // held word and the field disagree, so it is settled first, every time.
@@ -822,8 +1183,16 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val selected = ic.getSelectedText(0)
         if (selected.isNullOrEmpty()) {
-            ic.deleteSurroundingText(1, 0)
-            deleted(1)
+            // One press removes one *visible* character, which is not one code unit: an emoji
+            // is a surrogate pair at least and a ZWJ family is eight units. Deleting a fixed 1
+            // left half a surrogate behind -- the glyph appeared to survive the press, or turned
+            // into tofu. See [GraphemeCluster].
+            val before = ic.getTextBeforeCursor(GRAPHEME_LOOKBEHIND, 0)
+            // A field that refuses to report its text gets the old behaviour; one code unit is
+            // the only safe guess when the text is unknown, and it is what happened before.
+            val units = if (before.isNullOrEmpty()) 1 else GraphemeCluster.lastClusterLength(before)
+            ic.deleteSurroundingText(units, 0)
+            deleted(units)
         } else {
             deleted(selected.length)
             ic.commitText("", 1)
@@ -884,6 +1253,37 @@ class KeyboardService : InputMethodService() {
      * from anywhere would be the one gesture on this keyboard that can destroy text the user
      * cannot see, and there is no undo to answer for it.
      */
+    /**
+     * Puts the keyboard away, as a flick down the space bar asks.
+     *
+     * Deliberately only the request. Settling the word in progress is [onFinishInputView]'s job
+     * and it already does it -- glide, pending letters, selection, trackpad, dictation -- for
+     * every other way the keyboard goes away, and the system calls it for this one too. Doing
+     * any of it again here would be a second teardown path to keep in step with the first, and
+     * the composing text would be flushed twice.
+     *
+     * [requestHideSelf] rather than hiding the window directly: it is the IME's own way of
+     * saying the user asked for this, so the system puts the keyboard back when the field next
+     * takes focus rather than treating it as dismissed for good.
+     */
+    private fun dismissKeyboard() {
+        requestHideSelf(0)
+    }
+
+    /** Which way the board is squashed, remembered across input views. See [KeyboardView.squash]. */
+    private fun squashPrefs() = getSharedPreferences("keyboard", Context.MODE_PRIVATE)
+
+    private fun loadSquash(): Squash {
+        val name = squashPrefs().getString(PREF_SQUASH, null) ?: return Squash.NONE
+        // Unknown values -- a downgrade, a hand-edited file -- fall back to the full-width board
+        // rather than throwing. There is no state here worth crashing a keyboard over.
+        return runCatching { Squash.valueOf(name) }.getOrDefault(Squash.NONE)
+    }
+
+    private fun saveSquash(squash: Squash) {
+        squashPrefs().edit().putString(PREF_SQUASH, squash.name).apply()
+    }
+
     private fun bulkDelete() {
         flushPending()
         val ic = currentInputConnection ?: return
@@ -944,7 +1344,13 @@ class KeyboardService : InputMethodService() {
             handler.post {
                 glide = engine
                 tapDecoder = index
+                // Kept for the suggestion bar, which weighs "these letters are an English word"
+                // against reading them as pinyin. Already in memory for the decoders, so this
+                // costs a reference rather than a second copy.
+                englishWords = lexicon
                 glideLoading = false
+                // The bar may already be showing a word whose ranking this changes.
+                if (lexicon != null) refreshCandidates()
                 if (engine == null) {
                     // Not a silent degradation: with nothing to decode a glide, gliding types
                     // nothing at all, and the reason belongs somewhere findable.
@@ -973,46 +1379,143 @@ class KeyboardService : InputMethodService() {
 
     private fun clearCandidates() {
         keyboardView?.candidates = emptyList()
+        keyboardView?.candidateKinds = emptyList()
         candidateReplaceLength = 0
+        candidateConsumes = emptyList()
     }
 
     /**
-     * Offers emoji for the word the caret sits at the end of.
+     * Offers suggestions for the word the caret sits at the end of, and a default set when there
+     * is no such word.
+     *
+     * In English the bar is not an emoji bar: it holds emoji *and* Chinese, ranked against each
+     * other by [UnifiedCandidates] on one log-probability scale. The letters `niuroumian` name
+     * no emoji and read as a perfectly good Chinese word, so the bar fills with Chinese;
+     * `happy` names several emoji and is not pinyin at all, so it fills with emoji; `ha` is
+     * genuinely both and shows both. None of that is a rule here -- it is what comparing the
+     * scores produces, and this function only supplies the two candidate sets and sorts them.
      *
      * The two-word form is tried first and the first form that matches wins, so "thumbs up"
      * beats "up" where both would match, and the length that produced the match is remembered:
-     * that is exactly what a tapped emoji replaces.
+     * that is exactly what a tapped suggestion replaces.
+     *
+     * Falling back to [EmojiIndex.DEFAULTS] rather than clearing is what keeps the bar populated
+     * at all times. The one case that still clears is a *selection*: the strip's whole gesture is
+     * to replace the text at the caret, and there is no sane reading of tapping a suggestion
+     * while a range is highlighted.
      */
     private fun refreshCandidates() {
         val view = keyboardView ?: return
+        // In Chinese the bar belongs to the pinyin buffer, not to the word behind the caret:
+        // it shows what the letters being typed could mean. With nothing composing there is
+        // nothing to offer, and the bar is left empty rather than filled with emoji, which
+        // would put an English feature in front of someone writing Chinese.
+        if (chineseMode) {
+            val session = pinyin
+            view.candidates = if (session == null || session.isEmpty) {
+                emptyList()
+            } else {
+                session.candidates()
+            }
+            view.candidateKinds = emptyList()
+            candidateReplaceLength = 0
+            return
+        }
         val index = emoji
         val ic = currentInputConnection
         if (index == null || ic == null) return clearCandidates()
         if (!ic.getSelectedText(0).isNullOrEmpty()) return clearCandidates()
 
-        val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0) ?: return clearCandidates()
+        val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
+            ?: return offerDefaultCandidates()
         for (word in TypedWord.endingAt(before)) {
-            val hits = index.search(word.query)
-            if (hits.isNotEmpty()) {
-                view.candidates = hits
+            val ranked = rankedFor(word.query)
+            if (ranked.isNotEmpty()) {
+                view.candidates = ranked.map { it.text }
+                view.candidateKinds = ranked.map { it.kind }
+                // A Chinese suggestion may explain only part of the letters -- 牛肉 out of
+                // `niuroumian` -- so what a tap replaces is carried per suggestion rather than
+                // shared. Emoji always consume the whole matched word, as they always did.
+                candidateConsumes = ranked.map {
+                    if (it.kind == UnifiedCandidates.Kind.CHINESE) it.consumes else word.length
+                }
                 candidateReplaceLength = word.length
                 return
             }
         }
-        clearCandidates()
+        offerDefaultCandidates()
+    }
+
+    /**
+     * The ranked bar for one candidate word: emoji and Chinese on a single scale.
+     *
+     * The Chinese half is only asked for when the dictionary is already in memory. It is loaded
+     * in the background from [onStartInput] like the emoji index, so this is a "not yet" rather
+     * than a "never" -- and the bar refreshes when it lands.
+     *
+     * It is also only asked for when the query *could* be pinyin. [TypedWord.endingAt] offers a
+     * two-word form first, for emoji named like "thumbs up", and a pinyin syllable never spans a
+     * space -- so a query containing one has no Chinese reading and the decoder would do sixteen
+     * Viterbi passes over the longest input on the bar to prove it. That cost landed on exactly
+     * the keystrokes that felt slowest: while emoji still matched, the cheap single-word form
+     * answered first and the two-word form was never reached, but once the letters read only as
+     * Chinese every keystroke paid for the full decode twice.
+     */
+    private fun rankedFor(query: String): List<UnifiedCandidates.Suggestion> {
+        val index = emoji ?: return emptyList()
+        val hits = index.search(query)
+        val session = pinyin
+        val chinese = if (session != null && session.isReady && !query.contains(' ')) {
+            session.scoredFor(query)
+        } else {
+            emptyList()
+        }
+        if (hits.isEmpty() && chinese.isEmpty()) return emptyList()
+        return UnifiedCandidates.rank(
+            query = query,
+            emojiHits = hits,
+            chinese = chinese,
+            englishScore = englishWords?.logProbability(query) ?: UnifiedCandidates.NOT_ENGLISH,
+        )
+    }
+
+    /**
+     * Fills the bar when no word is being typed, so the strip is never blank.
+     *
+     * The replace length is zero, and that is the entire difference between these and a matched
+     * emoji: a suggestion for "piz" stands *for* those letters and consumes them, while these
+     * stand for nothing on screen and must insert at the caret. Sharing [commitCandidate] is
+     * safe only because it deletes `candidateReplaceLength` characters and no more -- so the
+     * field has to be cleared here rather than left at whatever the last matched word set it to,
+     * or tapping a default emoji would eat the word behind the caret.
+     */
+    private fun offerDefaultCandidates() {
+        keyboardView?.candidates = EmojiIndex.DEFAULTS
+        keyboardView?.candidateKinds = emptyList()
+        candidateReplaceLength = 0
+        candidateConsumes = emptyList()
     }
 
     /** Replaces the typed word with the emoji, the way the iOS emoji suggestion does. */
     private fun commitCandidate(position: Int) {
-        // The emoji replaces a run of characters counted off the field, so the word being held
-        // has to be in the field and not in this keyboard before that count is taken.
+        // A Chinese candidate replaces the composing pinyin, which is the keyboard's own buffer
+        // rather than a run of characters counted off the field -- and it may consume only part
+        // of it. Handled before flushPending, which would otherwise settle the letters as Latin
+        // text and leave the candidate with nothing to replace.
+        if (chineseMode && commitPinyin(position)) return
+        // The suggestion replaces a run of characters counted off the field, so the word being
+        // held has to be in the field and not in this keyboard before that count is taken.
         flushPending()
         val text = keyboardView?.candidates?.getOrNull(position) ?: return
         val ic = currentInputConnection ?: return
+        // A Chinese suggestion may stand for only part of the word: picking 牛肉 out of
+        // `niuroumian` must eat exactly `niurou` and leave `mian` for the next suggestion to
+        // answer. Emoji, and every entry on a uniform bar, still replace the whole word.
+        val replace = candidateConsumes.getOrNull(position) ?: candidateReplaceLength
         ic.beginBatchEdit()
-        if (candidateReplaceLength > 0) {
-            ic.deleteSurroundingText(candidateReplaceLength, 0)
-            deleted(candidateReplaceLength)
+        if (replace > 0) {
+            ic.deleteSurroundingText(replace, 0)
+            deleted(replace)
         }
         ic.commitText(text, 1)
         typed(text)

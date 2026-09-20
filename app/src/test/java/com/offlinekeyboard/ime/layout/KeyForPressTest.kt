@@ -1,5 +1,6 @@
 package com.offlinekeyboard.ime.layout
 
+import com.offlinekeyboard.ime.tap.SpatialModel
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -71,14 +72,42 @@ class KeyForPressTest {
         assertNull(idAt(geometry.widthPx / 2f, 0f))
     }
 
+    /**
+     * The strip and the letters must between them claim every pixel of the bar exactly once.
+     *
+     * This is the property the old dead band gave away for free by construction, and the reason
+     * it is worth asserting now: the boundary is computed from the spatial model rather than set
+     * as a fraction, so a refit or a change of strip height moves it. A gap would swallow presses
+     * silently; an overlap would make a tap mean two things.
+     */
     @Test
-    fun `the buffer below the strip belongs to the top row, not the strip`() {
+    fun `every pixel of the strip belongs to exactly one of the strip and the keys`() {
         val e = geometry.keyRects.first { it.key.id == "e" }
-        var y = geometry.stripTouchBottom
-        while (y < e.top) {
+        var y = 0f
+        while (y < geometry.stripHeight) {
+            val letter = geometry.isLetterReach(e.centerX, y)
+            val key = idAt(e.centerX, y)
             assertEquals(
-                "a press at y=$y, between the strip and the top row, should reach a key",
-                "e",
+                "at y=$y, isLetterReach says $letter but keyForPress returned $key",
+                letter,
+                key != null,
+            )
+            y += 1f
+        }
+    }
+
+    /**
+     * The emoji keep the whole bar. Under the shipped sigma the entire strip sits more than five
+     * standard deviations above where a thumb aiming at the top row lands, so none of it is
+     * plausibly a letter press -- which is exactly the real estate the dead band used to take.
+     */
+    @Test
+    fun `the whole strip is available to the emoji`() {
+        val e = geometry.keyRects.first { it.key.id == "e" }
+        var y = 0f
+        while (y < geometry.stripHeight) {
+            assertNull(
+                "a press at y=$y is inside the strip and must not reach a key",
                 idAt(e.centerX, y),
             )
             y += 1f
@@ -92,6 +121,40 @@ class KeyForPressTest {
     @Test
     fun `the recorded press that ate a word now types the letter it aimed at`() {
         assertEquals("e", idAt(254.1f, 124.3f))
+    }
+
+    /**
+     * The same press, under the *honest* spatial fit.
+     *
+     * Worth its own test because the refit documented on
+     * [com.offlinekeyboard.ime.tap.SpatialModel.MEASURED_SIGMA_X] nearly doubles the scatter and
+     * halves the offset, which is what brings the boundary close to the bar. It is the binding
+     * case for [com.offlinekeyboard.ime.tap.SpatialModel.LETTER_REACH_SIGMAS]: under this fit the
+     * strip's bottom edge sits at 2.675 sigma, so the 2.5 threshold clears it by 0.175 sigma --
+     * about 4px -- while a threshold of 3 would take a slice of the bar back off the emoji.
+     *
+     * **That margin is thin, and deliberately pinned here.** If the spatial model is refitted
+     * again and this test goes red, the threshold and the strip height are what to look at; the
+     * failure is the design telling the truth, not a flaky assertion to relax.
+     *
+     * Note the recorded press itself is not the delicate part: at y=124.3 it is inside the top
+     * row's own rectangle, so `keyAt` claims it before any arbitration happens, under either fit.
+     * What this pins is the *strip* staying whole next to it.
+     *
+     * The model is passed explicitly rather than taken from the shipped constants so that this
+     * keeps testing the arbitration on a known distribution the day the fit is changed.
+     */
+    @Test
+    fun `the recorded press still types its letter under the honest spatial fit`() {
+        val honest = LayoutGeometry(
+            IosLayouts.QWERTY_LOWER,
+            1080f,
+            SpatialModel(offsetY = 0.099f, sigmaY = 0.227f),
+        )
+        assertEquals("e", honest.keyForPress(254.1f, 124.3f)?.key?.id)
+        // ...and the strip is still wholly the emoji's under that fit, which is the constraint
+        // that actually fixes the threshold. See SpatialModel.LETTER_REACH_SIGMAS.
+        assertNull(honest.keyForPress(254.1f, honest.stripHeight - 1f))
     }
 
     @Test

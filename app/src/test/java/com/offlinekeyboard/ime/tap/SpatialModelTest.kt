@@ -19,7 +19,7 @@ class SpatialModelTest {
     private val model = SpatialModel()
 
     /** The lexicon's real figure, from `WordIndex.of(lexicon).priorRange`. */
-    private val priorRange = 13.05f
+    private val priorRange = 13.00f
 
     private fun at(letter: Char, dx: Float, dy: Float): List<SpatialModel.Candidate> {
         val rect = geometry.letterKeys[letter - 'a']!!

@@ -302,7 +302,12 @@ class TouchFsmTest {
         f.onDown(e.centerX, e.centerY, 0)
         val out = f.onLongPressTimeout(config.longPressMs)
         assertEquals(GestureState.ACCENTS, f.state)
-        assertEquals(listOf("è", "é", "ê", "ë", "ē", "ė", "ę"), out.only<GestureOutput.ShowAccents>().accents)
+        // Seven accents wrap into a grid, so the popup's cell order is not the declared order;
+        // what must hold is that every accent is in there exactly once.
+        assertEquals(
+            listOf("è", "é", "ê", "ë", "ē", "ė", "ę").sorted(),
+            out.only<GestureOutput.ShowAccents>().accents.sorted(),
+        )
     }
 
     @Test
@@ -312,12 +317,16 @@ class TouchFsmTest {
         f.onDown(e.centerX, e.centerY, 0)
         f.onLongPressTimeout(config.longPressMs)
 
-        val accents = e.key.accents
-        val popupLeft = e.centerX - accents.size * geometry.keyUnit / 2f
-        val thirdX = popupLeft + 2.5f * geometry.keyUnit
-        f.onMove(thirdX, e.centerY, 600)
+        // Aim at a cell by its own geometry rather than by an assumed single row.
+        val grid = com.offlinekeyboard.ime.layout.PopupGrid.of(e, geometry)
+        val target = grid.entries.indexOfFirst {
+            it == com.offlinekeyboard.ime.layout.PopupEntry.Accent("ê")
+        }
+        val x = grid.cellLeft(target) + grid.cellWidth / 2f
+        val y = grid.cellTop(target) + grid.cellHeight / 2f
+        f.onMove(x, y, 600)
 
-        val out = f.onUp(thirdX, e.centerY, 700)
+        val out = f.onUp(x, y, 700)
         assertEquals("ê", out.only<GestureOutput.CommitAccent>().text)
         assertTrue(out.has<GestureOutput.HideAccents>())
     }
@@ -325,16 +334,22 @@ class TouchFsmTest {
     /**
      * A long press means held *still*. Starting a glide slowly must not open the accent popup:
      * a recorded "on" glide dawdled 447ms before picking up speed and lost the whole gesture to
-     * the popup firing at 500ms.
+     * the popup firing at the then-500ms deadline. At 250ms the slop guard is the only thing
+     * standing between that glide and the popup, which is why this test asserts on drift rather
+     * than on the clock.
      */
     @Test
     fun `a finger that has drifted does not open the accent popup`() {
         val e = key("e")
         val f = fsm()
         f.onDown(e.centerX, e.centerY, 0)
-        f.onMove(e.centerX - 4f, e.centerY + config.longPressSlopRatio * geometry.keyHeight + 2f, 450)
+        f.onMove(
+            e.centerX - 4f,
+            e.centerY + config.longPressSlopRatio * geometry.keyHeight + 2f,
+            config.longPressMs - 1,
+        )
         assertEquals(GestureState.PRESSED, f.state)
-        assertTrue(f.onLongPressTimeout(500).isEmpty())
+        assertTrue(f.onLongPressTimeout(config.longPressMs).isEmpty())
         assertEquals(GestureState.PRESSED, f.state)
     }
 
@@ -344,8 +359,8 @@ class TouchFsmTest {
         val e = key("e")
         val f = fsm()
         f.onDown(e.centerX, e.centerY, 0)
-        f.onMove(e.centerX + 1f, e.centerY + 1f, 450)
-        assertTrue(f.onLongPressTimeout(500).has<GestureOutput.ShowAccents>())
+        f.onMove(e.centerX + 1f, e.centerY + 1f, config.longPressMs - 1)
+        assertTrue(f.onLongPressTimeout(config.longPressMs).has<GestureOutput.ShowAccents>())
         assertEquals(GestureState.ACCENTS, f.state)
     }
 
@@ -358,8 +373,8 @@ class TouchFsmTest {
         val space = key("space")
         val f = fsm()
         f.onDown(space.centerX, space.centerY, 0)
-        f.onMove(space.centerX + geometry.keyHeight, space.centerY, 450)
-        assertTrue(f.onLongPressTimeout(500).has<GestureOutput.TrackpadStarted>())
+        f.onMove(space.centerX + geometry.keyHeight, space.centerY, config.longPressMs - 1)
+        assertTrue(f.onLongPressTimeout(config.longPressMs).has<GestureOutput.TrackpadStarted>())
     }
 
     @Test

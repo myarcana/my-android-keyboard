@@ -60,11 +60,45 @@ class LayoutGeometryTest {
         assertEquals(a.heightPx * 2f, b.heightPx, 0.01f)
     }
 
+    /**
+     * The keys are Gboard's; the strip above them deliberately is not.
+     *
+     * Gboard's 50dp strip is sized for *text* suggestions. Ours holds one square emoji per cell
+     * and was mostly empty space, so it is 34dp and the whole keyboard is 16dp shorter than
+     * Gboard's 279dp. The key half of the sum is unchanged and is what this still pins: a
+     * regression in KEY_HEIGHT, ROW_GAP or BOTTOM_PADDING has to fail here, while the strip is
+     * free to be tuned on its own.
+     */
     @Test
-    fun `reference keyboard matches the measured Gboard height`() {
+    fun `the key area matches the measured Gboard geometry`() {
         val g = geometry()
-        // 50 strip + 4x40 keys + 3x10.33 row gaps + 7.7 bottom = 248.7dp
-        assertTrue("height was ${g.heightPx}", abs(g.heightPx - 248.7f) < 1f)
+        // 4x40 keys + 3x10.33 row gaps + 38 bottom = 229dp, independent of the strip.
+        assertTrue(
+            "key area below the strip was ${g.heightPx - g.stripHeight}",
+            abs((g.heightPx - g.stripHeight) - 229f) < 1f,
+        )
+        // 34 strip + 229 = 263dp overall.
+        assertTrue("height was ${g.heightPx}", abs(g.heightPx - 263f) < 1f)
+    }
+
+    /**
+     * The space bar must end where Gboard's does: 54dp above the bottom of the screen, measured
+     * on the target device under gesture navigation. The keyboard sat 30dp lower than that when
+     * BOTTOM_PADDING still held a value scanned from a three-button screenshot.
+     *
+     * Checked as bottom padding + the navigation reserve, because those two are what the gap is
+     * made of and only their sum is visible to a thumb. 16dp is what the device reports for the
+     * gesture handle; KeyboardView reserves it below the key area.
+     */
+    @Test
+    fun `the bottom row clears the screen edge by Gboard's distance`() {
+        val gestureNavReserveDp = 16f
+        assertEquals(
+            "space bar must sit 54dp above the screen bottom, as Gboard's does",
+            54f,
+            Metrics.BOTTOM_PADDING + gestureNavReserveDp,
+            1f,
+        )
     }
 
     @Test

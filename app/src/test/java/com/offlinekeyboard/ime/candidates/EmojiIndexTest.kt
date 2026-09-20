@@ -61,10 +61,34 @@ class EmojiIndexTest {
         assertTrue(index.search("laugh").isNotEmpty())
     }
 
+    /**
+     * One letter used to be below the cutoff. It is now the shortest real query, because the bar
+     * is meant to be offering something from the first keystroke -- and an empty query still is
+     * not a query, which is the case the default set covers instead.
+     */
     @Test
-    fun `a single letter suggests nothing`() {
-        assertTrue(index.search("p").isEmpty())
+    fun `a single letter matches, and an empty query still does not`() {
+        assertTrue(index.search("p").isNotEmpty())
         assertTrue(index.search("").isEmpty())
+    }
+
+    /**
+     * The tiers have to carry the extra noise one letter lets in. Asserted as a property rather
+     * than a fixed emoji: at one letter there is usually no exact name or tag to match, so the
+     * winner comes from the prefix tiers and is therefore whatever the asset's frequency order
+     * puts first -- pinning today's answer would be a test of the data file, not of the ranking.
+     */
+    @Test
+    fun `a single letter still ranks an exact name first where one exists`() {
+        // "ox" is an exact name in the asset, so it must beat everything merely prefixed by it.
+        assertEquals("🐂", index.search("ox").first())
+    }
+
+    /** A blank bar is the thing being removed, so the fallback must actually be populated. */
+    @Test
+    fun `the default set fills a bar with no word to match`() {
+        assertEquals(8, EmojiIndex.DEFAULTS.size)
+        assertEquals(EmojiIndex.DEFAULTS.size, EmojiIndex.DEFAULTS.distinct().size)
     }
 
     @Test

@@ -79,6 +79,34 @@ or `tools/deploy.sh`, which does both and screenshots the result.
 
 Then enable "Offline Keyboard" in Settings → System → Languages & input → On-screen keyboards.
 
+### Deploying over the tailnet
+
+The phone does not have to be on USB, or even on the same network: with Tailscale on both ends
+it is reachable at a stable IP from anywhere. `tools/adb_tailnet.sh` drives that.
+
+```sh
+tools/adb_tailnet.sh persist 100.121.46.71 <port>   # once per boot; <port> from the phone
+tools/adb_tailnet.sh connect                        # thereafter, no arguments
+DEVICE=100.121.46.71:5555 tools/deploy.sh
+```
+
+Android's own Wireless debugging is awkward to automate against: it issues a *random* port, and
+it disarms whenever Wi-Fi changes or the screen locks, so every reconnect means reading a new
+port (and sometimes a new pairing code) off the phone. `persist` runs `adb tcpip 5555` once,
+which restarts adbd on a fixed port that is **not** tied to that toggle -- it stays up across
+Wi-Fi disconnects, verified by switching Wi-Fi off entirely, and therefore also works when the
+phone is on cellular.
+
+Two caveats, both structural:
+
+- **It does not survive a reboot.** adbd reverts to USB-only. Making it permanent needs
+  `persist.adb.tcp.port`, which is root-only; this phone is a `user` build, so after a reboot
+  you re-enable Wireless debugging once and re-run `persist`.
+- **Expect ~170 KB/s** when there is no direct path and traffic goes through a DERP relay, which
+  is the normal case for a phone behind carrier CGNAT. The keyboard APK is ~320 MB because of
+  the 229 MB SenseVoice model, so a full install takes about half an hour; code-only changes to
+  the test pad take seconds. USB from a laptop remains far quicker for rapid iteration.
+
 `local.properties` (git-ignored) points at the SDK; recreate with:
 
 ```sh
@@ -98,5 +126,74 @@ echo "sdk.dir=/opt/homebrew/share/android-commandlinetools" > local.properties
   mid-glide finger lifts that would otherwise type a word nobody asked for.
 - **Phase 4 — dictation: complete.** SenseVoice via sherpa-onnx, chosen by measurement against
   Apple: `docs/ASR_BENCHMARK.md`.
-- **Phase 5 — the suggestion bar: half.** Emoji done; Chinese candidates wait on Phase 3.
-- Phase 3 — Chinese input: not started, and the largest piece left. See `docs/PLAN.md`.
+- **Phase 3 — Chinese input: pinyin complete.** Two language models in one asset: mainland
+  Simplified, and a native Taiwan Traditional one with its own readings and corpus weights.
+  Sentence-level decoding, fuzzy pinyin, abbreviations, and a user dictionary that learns
+  corrections. Zhuyin is not built; see below.
+- **Phase 5 — the suggestion bar: complete.** Emoji and Chinese ranked together on one
+  probability scale, so the bar follows what the letters could mean rather than which language
+  is selected. See below.
+
+## Chinese input
+
+Not librime. `docs/PLAN.md` planned to vendor it through the NDK; what is here instead is a
+pure-Kotlin engine over a compiled dictionary, which builds with no native toolchain and is
+unit-testable from the JVM like the rest of the repo. The quality comes from the data and from
+decoding the whole input at once, rather than from C++:
+
+- **Sentence-level Viterbi decoding**, not per-syllable lookup. `jintiantianqihenhao` produces
+  今天天气很好 in one pass, scoring word frequencies as log-probabilities with character bigrams
+  to break ties between homophones. Looking each syllable up on its own cannot do this, and it
+  is the single biggest difference between a usable pinyin keyboard and a toy one.
+- **Fuzzy pinyin** (zh/z, ch/c, sh/s, n/l, f/h, ang/an, ing/in), ranked below the exact
+  spelling rather than merged with it, so `zongguo` still finds 中国 and `lan` still means 蓝.
+- **Abbreviations**: `bjdx` → 北京大学, including mixed forms like `beijingdx`.
+- **Two language models, not one dictionary and a converter.** Taiwan Traditional is its own
+  model — McBopomofo's Traditional vocabulary, keyed by Taiwan readings and weighted by a Taiwan
+  corpus — merged into the same asset as the mainland one, with a weight per region on every
+  entry. This is what conversion could not do: 蚵仔煎 is absent from the mainland dictionary
+  entirely (rime-ice normalises it to 蚝仔煎, read `hao zai jian`), and 軟體 and 網路 are read
+  `ruan ti` and `wang lu`, so no amount of rewriting the *output* of a `ruan jian` lookup
+  reaches them. Typing `niuroumian` gives 牛肉麵 first in Taiwan mode and 牛肉面 first in
+  mainland mode, because both are real entries under one key with their own corpus weights.
+- **A user dictionary**, so a correction sticks. It never leaves the device.
+
+**Zhuyin is deliberately absent.** It needs its own 37-symbol key layout, which is a keyboard
+rather than a setting; the subtype that promised it has been removed until that layout exists.
+
+## The suggestion bar
+
+One bar, one ranking. Emoji and Chinese are scored as log-probabilities on the same scale and
+sorted together, so what appears follows from what the letters could plausibly mean rather than
+from which language is selected:
+
+| typed | what the bar shows |
+|---|---|
+| `happy`, `sad`, `yes` | emoji only — these are English words and not pinyin |
+| `niuroumian` | 牛肉面 / 牛肉麵 — no emoji is named anything like it |
+| `ezijian` | 蚵仔煎 (Taiwan model) |
+| `ha` | 哈 alongside 😂 🤣 — genuinely ambiguous, so both appear |
+| `you`, `like`, `women` | emoji only, though all three are valid pinyin |
+
+That last row is the interesting one. Pinyin is written in the same 26 letters as English, and
+in isolation the Chinese reading is often the commoner string — 有 outscores 牛肉面 on raw
+frequency. The evidence that settles it is not about Chinese at all: it is that the letters are
+*already an English word*, charged as that word's own log-probability. So `the` suppresses its
+Chinese readings heavily, `beijing` — a rare English loanword — barely at all, and 北京 still
+wins there.
+
+`tools/rank_preview.py` prints the same scores the app computes, for any query, in either model.
+
+### Licence: the dictionary is GPL-3.0
+
+`app/src/main/assets/pinyin.bin` is built from [rime-ice](https://github.com/iDvel/rime-ice)
+(GPL-3.0 only), [McBopomofo](https://github.com/openvanilla/McBopomofo)'s dictionary data (MIT)
+for the Taiwan model, plus [OpenCC](https://github.com/BYVoid/OpenCC)'s conversion tables
+(Apache-2.0). rime-ice was chosen over permissively-licensed alternatives because it ships real
+usage weights and CC-CEDICT does not — and ranking is most of what makes candidates feel right.
+Only rime-ice carries a copyleft obligation; the other two add none.
+
+The consequence is real: **GPL-3.0 would apply to this app if it were ever distributed.** That
+is an acceptable trade for a personal keyboard and is not one for an app store. To change it,
+rebuild the asset from CC-CEDICT (CC-BY-SA 4.0) and accept weaker ranking; the sources are named
+at the top of `tools/build_pinyin_dict.py`.

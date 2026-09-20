@@ -29,7 +29,16 @@ enum class GestureIntent {
     LETTER,
 }
 
-/** What the state machine actually decided, at the moment the finger lifted. */
+/**
+ * What the state machine actually decided, at the moment the finger lifted.
+ *
+ * [ACCENT] covers the whole long-press popup, including the edit actions that now share it --
+ * copy, paste, select all and the rest. They are not a separate verdict on purpose. The bank
+ * reads these names back with `valueOf`, so a name this build invents is a crash in any build
+ * that predates it, and the gesture being described is identical either way: held a key, slid
+ * along the popup, lifted. Which slot was under the finger is a fact about the layout, which the
+ * record already carries, rather than a fact about the gesture.
+ */
 enum class GestureVerdict { TAP, FLICK, GLIDE, ACCENT, TRACKPAD, NONE }
 
 /**

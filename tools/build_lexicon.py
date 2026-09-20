@@ -77,6 +77,11 @@ INFORMAL = {
     "app": 8_000_000, "apps": 5_000_000, "email": 90_000_000, "online": 200_000_000,
     "wifi": 3_000_000, "phone": 120_000_000, "text": 150_000_000, "meeting": 40_000_000,
     "tonight": 30_000_000, "tomorrow": 40_000_000, "today": 150_000_000,
+    # count_1w is a 2012 crawl of older text and predates the word entering general English, so
+    # "emoji" is missing outright rather than merely ranked low. Scored beside "wifi", the other
+    # entry here that the crawl never saw. "emojis" is the plural people actually write; the
+    # Japanese-faithful "emoji" plural is not what a phone keyboard should be insisting on.
+    "emoji": 3_000_000, "emojis": 2_000_000,
 }
 
 # Contractions, scored from their bare form in the crawl. The multiplier is not tuning: the bare
@@ -162,10 +167,23 @@ def read_dictionary() -> set[str]:
 
 # Suffixes web2 does not list separately. It is a dictionary of headwords, so it has "peep" and
 # "message" but not "peeped" or "messaged" -- and an inflected form is exactly what a phone types.
-SUFFIXES = ("s", "es", "ed", "d", "ing", "er", "ers", "est", "ly", "'s")
+SUFFIXES = ("s", "es", "ed", "d", "ing", "er", "ers", "est", "ly", "'s", "ies")
+
+# The shortest part a compound may be split into. Two letters would make "as", "at" and "in"
+# available as halves and let any short token decompose into something; four rejects real
+# compounds like "doorknob". Three is the point where both halves have to be words in their
+# own right, which is what makes the check mean anything.
+MIN_COMPOUND_PART = 3
+
+# How far down the crawl a *part* of a compound may be found. web2 lists three-letter
+# curiosities -- "ume", "ait", "phe" -- that are dictionary words nobody writes, and each one is
+# a licence to split some crawl artifact into two "words": "docume", a truncated HTML token,
+# is "doc" + "ume". Requiring both halves to be words people actually write, not merely words
+# web2 records, is the same distrust of short entries that SHORT_WORD_RANK_LIMIT applies above.
+COMPOUND_PART_RANK_LIMIT = 30_000
 
 
-def known(word: str, dictionary: set[str]) -> bool:
+def known(word: str, dictionary: set[str], ranks: dict[str, int]) -> bool:
     """Whether the word, or a form web2 would list it under, is in the dictionary."""
     if word in dictionary:
         return True
@@ -175,13 +193,49 @@ def known(word: str, dictionary: set[str]) -> bool:
         stem = word[: -len(suffix)]
         if stem in dictionary or stem + "e" in dictionary:
             return True
+        # groceries -> grocery, strawberries -> strawberry. web2 lists the singular headword
+        # and nothing else, so without this every "-ies" plural in English fails the check --
+        # including ones far commoner than the proper nouns the tail filter lets through.
+        if suffix == "ies" and stem + "y" in dictionary:
+            return True
         # running -> run, bigger -> big: the doubled consonant is not part of the word.
         if len(stem) > 3 and stem[-1] == stem[-2] and stem[:-1] in dictionary:
+            return True
+    return is_compound(word, dictionary, ranks)
+
+
+def is_compound(word: str, dictionary: set[str], ranks: dict[str, int]) -> bool:
+    """Whether the word splits into two words web2 does list.
+
+    web2 is a dictionary of headwords and English builds compounds freely, so "breadcrumbs",
+    "lawnmower" and "babysitter" are absent from it while "bread", "crumb", "lawn", "mower",
+    "baby" and "sitter" are all there. A headword check alone therefore rejects a whole class of
+    ordinary words -- and rejects them *below* the crawl's proper nouns, which web2 does list.
+
+    The head must be a headword outright. The tail is allowed the suffix rules, because the
+    inflection on a compound lands on its end -- "breadcrumbs" is "bread" + "crumbs".
+
+    Both halves must also be words the crawl sees often, not merely words web2 records. web2 is
+    a complete dictionary, so it lists three-letter curiosities that license nonsense splits:
+    without the rank floor "docume" is "doc" + "ume" and passes.
+    """
+    for cut in range(MIN_COMPOUND_PART, len(word) - MIN_COMPOUND_PART + 1):
+        head, tail = word[:cut], word[cut:]
+        if head not in dictionary or not common(head, ranks):
+            continue
+        if tail in dictionary and common(tail, ranks):
+            return True
+        if len(tail) > MIN_COMPOUND_PART and known(tail, dictionary, ranks) and common(tail, ranks):
             return True
     return False
 
 
-def is_plausible(word: str, rank: int, dictionary: set[str]) -> bool:
+def common(part: str, ranks: dict[str, int]) -> bool:
+    """Whether a compound's half is a word people write, rather than one web2 merely lists."""
+    return ranks.get(part, len(ranks)) <= COMPOUND_PART_RANK_LIMIT
+
+
+def is_plausible(word: str, rank: int, dictionary: set[str], ranks: dict[str, int]) -> bool:
     """Whether a crawled token is a word someone would glide.
 
     The dictionary check is applied only to the tail. The head of the crawl is where the modern
@@ -197,7 +251,7 @@ def is_plausible(word: str, rank: int, dictionary: set[str]) -> bool:
         return False
     if word in WEB_JUNK:
         return False
-    if rank > 15_000 and dictionary and not known(word, dictionary):
+    if rank > 15_000 and dictionary and not known(word, dictionary, ranks):
         return False
     # A short word has to earn its place much harder than a long one, because its shape is a
     # *subset* of longer gestures rather than a rival to them. A glide of "would" passes through
@@ -222,11 +276,16 @@ def main() -> int:
         return 1
     dictionary = read_dictionary()
 
+    ordered = sorted(counts.items(), key=lambda kv: -kv[1])
+    # The crawl's rank for every token, so the compound check can ask whether a half is a word
+    # people write as well as one web2 lists.
+    ranks = {word: rank for rank, (word, _) in enumerate(ordered)}
+
     kept: dict[str, int] = {}
-    for rank, (word, count) in enumerate(sorted(counts.items(), key=lambda kv: -kv[1])):
+    for rank, (word, count) in enumerate(ordered):
         if len(kept) >= args.limit:
             break
-        if is_plausible(word, rank, dictionary):
+        if is_plausible(word, rank, dictionary, ranks):
             kept[word] = count
 
     for word, count in INFORMAL.items():

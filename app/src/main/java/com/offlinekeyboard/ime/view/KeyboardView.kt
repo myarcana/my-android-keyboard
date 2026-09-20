@@ -12,6 +12,8 @@ import android.graphics.RectF
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.TextPaint
+import android.text.TextUtils
 import android.util.AttributeSet
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -19,11 +21,13 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
+import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.TouchTrace
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.gesture.GestureState
 import com.offlinekeyboard.ime.gesture.PathPoint
+import com.offlinekeyboard.ime.gesture.SquashDirection
 import com.offlinekeyboard.ime.gesture.TouchFsm
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.Metrics
@@ -31,8 +35,13 @@ import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.Layout
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import com.offlinekeyboard.ime.layout.PopupEntry
+import com.offlinekeyboard.ime.layout.PopupGrid
+import com.offlinekeyboard.ime.layout.PopupShape
+import com.offlinekeyboard.ime.layout.Squash
 import kotlin.math.abs
 import kotlin.math.exp
+import kotlin.math.min
 
 /**
  * Palette sampled pixel-by-pixel from Gboard on the target device, so the keyboard sits in the
@@ -123,18 +132,51 @@ private const val FLICK_SETTLE_MS = 40f
  * the thumb while leaving it attached to the key it belongs to -- the finger is holding the
  * bottom of the same object it is reading the top of.
  *
- * The accent popup's top edge is this same height, and shares this number to stay that way. A
- * press and a long press are one gesture arriving at two depths: the letter rises to here when
- * the finger lands, and the alternatives to that letter open at the height the letter is already
- * standing at. If they disagreed, holding a key would jog its contents a second time for no
- * reason the hand could feel.
+ * The popup does *not* use this number -- it has its own, smaller [PopupGrid.POPUP_GAP] -- and the
+ * difference is the point. This lift is filled by the stretched key itself, so it reads as one
+ * object however large it gets; a detached popup held the same distance away is separated from its
+ * key by that much empty board, which is what used to put the accents nearer the row above than
+ * the letter they belong to. Both numbers live in [PopupGrid] because the state machine hit-tests
+ * the popup against the geometry they produce, and a renderer disagreeing with it would light one
+ * entry and commit another.
  *
  * The change is instant in both directions, never eased. The rise is not a movement the key makes
  * -- it is the shape a key has while a finger is on it, and the finger arrives and leaves at a
  * definite moment. Growing into it would also lose the race on every fast tap: a tap can be over
  * in forty milliseconds, and a key still on its way up when the finger has gone has shown nothing.
  */
-private const val PRESS_LIFT = 1.45f
+private const val PRESS_LIFT = PopupGrid.PRESS_LIFT
+
+/**
+ * How many suggestions fit across the strip.
+ *
+ * Eight rather than the ten-odd that a square cell used to produce, because the cell is now as
+ * wide as the strip is tall only by coincidence. Eight over a 360dp board is a ~44dp cell, which
+ * is wider than a letter key -- a comfortable target for something that, when mistapped,
+ * replaces a whole word rather than a character.
+ */
+private const val CANDIDATE_COLUMNS = 8
+
+/**
+ * Chinese candidate text height, as a fraction of the strip.
+ *
+ * Larger than the emoji's share of the same band because Hanzi carry their meaning in strokes
+ * that disappear at small sizes -- 情 and 晴 differ by one radical, and a bar too small to tell
+ * them apart is a bar that has to be read twice.
+ */
+private const val CHINESE_CANDIDATE_TEXT = 0.46f
+
+/** Space either side of a candidate, as a fraction of the strip height. */
+private const val CHINESE_CANDIDATE_PADDING = 0.22f
+
+/**
+ * Emoji height on a strip that also holds Chinese, as a fraction of it.
+ *
+ * Larger than [CHINESE_CANDIDATE_TEXT] because a glyph has no ascenders or descenders to spare:
+ * text set at 0.46 of the band fills it, while an emoji at the same nominal size looks small
+ * beside it. Sized so the two read as the same visual weight rather than the same number.
+ */
+private const val EMOJI_CANDIDATE_TEXT = 0.60f
 
 class KeyboardView @JvmOverloads constructor(
     context: Context,
@@ -166,9 +208,9 @@ class KeyboardView @JvmOverloads constructor(
      *
      * The chips are real Views from another process, so they cannot be drawn on this canvas and
      * live in an overlay above it instead. This flag is how the two stay out of each other's
-     * way: the emoji are neither drawn nor tappable underneath the thing covering them. It is
-     * the strip that is handed over, not the buffer below it -- see [Metrics.STRIP_TOUCH_FRACTION]
-     * -- so a press aimed high at the top letter row still snaps to the letter.
+     * way: the emoji are neither drawn nor tappable underneath the thing covering them. Only the
+     * overlay's own band is handed over -- see [Metrics.STRIP_OVERLAY_FRACTION] -- so a press
+     * aimed high at the top letter row still snaps to the letter.
      */
     var stripHandedOver: Boolean = false
         set(value) {
@@ -183,6 +225,60 @@ class KeyboardView @JvmOverloads constructor(
             if (field == value) return
             field = value
             pressedCandidate = -1
+            invalidateSlots()
+            invalidate()
+        }
+
+    /**
+     * What each suggestion is, parallel to [candidates]; empty when they are all alike.
+     *
+     * The English bar now holds emoji and Chinese at once, and the two cannot share a column
+     * width: an emoji is one square glyph and 牛肉麵 is three characters of text. Empty means the
+     * old uniform behaviour -- every entry an emoji in English, every entry Chinese in the CJK
+     * modes -- which is still what [chineseMode] and the default bar produce.
+     */
+    var candidateKinds: List<UnifiedCandidates.Kind> = emptyList()
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidateSlots()
+            invalidate()
+        }
+
+    /**
+     * True when the strip holds text candidates and must measure each one to place it.
+     *
+     * The question is "is there text on this bar", not "is there more than one kind on it".
+     * Asking the narrower question was a bug with a visible symptom: as letters were added the
+     * emoji stopped matching, the bar became all-Chinese, "more than one kind" went false, and a
+     * strip of Chinese text fell into the emoji's fixed 8-column grid -- which is sized for one
+     * square glyph, so 牛肉麵 was drawn crushed into a 44dp cell with the rest of the bar empty.
+     * The variable-width layout is the right rendering for Chinese whether or not an emoji
+     * happens to be standing next to it, so that is the condition, and the transition from mixed
+     * to Chinese-only now changes nothing about how the Chinese is drawn.
+     *
+     * [chineseMode] does not need to be tested alongside this: the CJK bar leaves
+     * [candidateKinds] empty, so the kinds are absent rather than uniform, and it is
+     * `chineseMode || textStrip` at the two call sites that selects the text renderer.
+     */
+    private val textStrip: Boolean
+        get() = candidateKinds.size == candidates.size &&
+            candidateKinds.any { it != UnifiedCandidates.Kind.EMOJI }
+
+    /**
+     * Whether the strip is showing Chinese candidates rather than emoji.
+     *
+     * The two are drawn differently and have to be: an emoji is one square glyph that fits a
+     * fixed column, while a candidate is one to several characters of text whose width nobody
+     * can know in advance. Sharing the emoji's fixed grid would clip 今天天气很好 to its first
+     * character and leave the rest of the bar empty.
+     */
+    var chineseMode: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            pressedCandidate = -1
+            invalidateSlots()
             invalidate()
         }
 
@@ -193,6 +289,28 @@ class KeyboardView @JvmOverloads constructor(
             requestLayout()
             invalidate()
         }
+
+    /**
+     * How far the board is squashed to one side, for one-handed reach.
+     *
+     * Kept here rather than in the service because it is a property of this view's geometry and
+     * nothing else: it survives a plane switch, a shift, and a language change, all of which
+     * replace [layout], and none of which should move the keys back under a hand that asked for
+     * them to be over here. The service is told when it changes only so it can save it.
+     */
+    var squash: Squash = Squash.NONE
+        set(value) {
+            if (field == value) return
+            field = value
+            geometry = null
+            // No requestLayout: the squash changes no *measurement* of this view, only where the
+            // keys sit inside it. Asking for a layout pass would resize the IME window for a
+            // height that has not changed.
+            invalidate()
+        }
+
+    /** Told when a space-bar flick changed [squash], so the service can persist it. */
+    var onSquashChanged: (Squash) -> Unit = {}
 
     private var geometry: LayoutGeometry? = null
     private val config = GestureConfig()
@@ -226,7 +344,14 @@ class KeyboardView @JvmOverloads constructor(
      */
     private val motions = mutableMapOf<String, KeyMotion>()
     private var lastFrameNanos = 0L
-    private var accentPopup: Triple<KeyRect, List<String>, Int>? = null
+    /**
+     * The key whose popup is open, and which cell is lit.
+     *
+     * The entries are not kept here: they are derived from the key by [PopupGrid], which is the
+     * same call the state machine hit-tests against. Holding a copy would be a second version of
+     * the popup that could disagree with the one deciding what a release commits.
+     */
+    private var accentPopup: Pair<KeyRect, Int>? = null
 
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
@@ -238,31 +363,68 @@ class KeyboardView @JvmOverloads constructor(
     private val candidatePointers = mutableMapOf<Int, Int>()
 
     /**
-     * Space reserved below the keys for the system navigation bar.
+     * Space reserved below the keys for the system navigation bar -- reserved *unconditionally*,
+     * whether or not a navigation bar is currently there.
      *
      * From targetSdk 35 the IME window is laid out edge to edge, so without this the bottom row
-     * sits underneath the nav buttons. The insets dispatched to this view are not a trustworthy
-     * source for the size of it: some hosts -- Firefox's address bar among them -- leave the
-     * window running to the bottom of the display while reporting a navigation-bar inset of
-     * zero, and the keyboard is then only as wrong as the host it happens to be typing into. So
-     * the overlap is measured instead: how far this view's own bottom edge reaches past the top
-     * of the navigation bar. The dispatched inset stays as the answer before the first layout,
-     * when there is no position to measure yet.
+     * sits underneath the nav buttons. The obvious implementation reserves only what the bar
+     * actually covers right now, and that is what this used to do: measure how far the view's
+     * bottom edge reaches past the top of the nav bar, falling back to the dispatched inset.
      *
-     * Feeding a measurement back into layout is safe here only because the IME window is
-     * anchored to the bottom of the display: making it taller moves its top edge and never its
-     * bottom, so the overlap being read does not move in response to the reserve it produces,
-     * and the second pass agrees with the first.
+     * The problem is that the keys are laid out from the *top* of this view while the window is
+     * anchored to its *bottom*. Total height is `keyboardHeight + navBarInset`, so every pixel
+     * of reserve pushes the whole key grid up by that much. A reserve that varies -- 0 under
+     * gesture navigation, ~48dp under three-button, zero-then-corrected across the first layout,
+     * and whatever a misreporting host like Firefox claims -- moves every letter on the screen
+     * with it. Keys landing in a different absolute position depending on which app is being
+     * typed into defeats the muscle memory the layout exists to serve, and it silently
+     * invalidates the tap model: [com.offlinekeyboard.ime.tap.SpatialModel] scores a touch
+     * against key centres, so a grid shifted underneath the finger biases every correction.
+     *
+     * So the reserve is the display's navigation-bar height *ignoring visibility* -- a constant
+     * for the device in its current orientation, independent of host, of gesture-versus-button
+     * navigation, and of when in the layout pass it is asked. Under gesture navigation this
+     * spends a small strip of empty space below the keys; that is the price of the keys being
+     * nailed to one position, which is what was asked for.
      */
     private var navBarInset = 0
 
-    /** What the host last said the navigation-bar inset was. See [navBarInset]. */
+    /**
+     * What the host last said the navigation-bar inset was.
+     *
+     * Only a fallback, for API < 30 and for the case where the display's metrics are
+     * unavailable. Above that it is deliberately *not* consulted: it is the per-host,
+     * time-varying number whose use made the keys move. See [navBarInset].
+     */
     private var dispatchedNavInset = 0
 
     private val theme: Theme get() = keyboardTheme(resources)
 
     private val fill = Paint(Paint.ANTI_ALIAS_FLAG)
     private val label = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER }
+
+    /**
+     * Measurement only, never drawn with.
+     *
+     * The Chinese candidate slots are measured from the touch path as well as the draw path, and
+     * a paint carries its text size until something changes it -- so measuring with [label]
+     * would leave the strip's text size on it after a tap, to be inherited by whatever drew
+     * next. Keeping a second paint is cheaper than the discipline of restoring the first.
+     */
+    private val measure = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    /**
+     * The language menu's left-aligned text.
+     *
+     * A [TextPaint] rather than a [Paint] because [TextUtils.ellipsize] takes one, and its own
+     * paint rather than [label] for the reason [measure] has one: [label] is centred and shared
+     * with every key face, so a popup that flipped it to LEFT and forgot to flip it back would
+     * shift the letters on the whole board. Owning the alignment here makes that unrepresentable
+     * instead of a discipline.
+     */
+    private val menuLabel = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
+        textAlign = Paint.Align.LEFT
+    }
     private val icon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.ROUND
@@ -275,7 +437,7 @@ class KeyboardView @JvmOverloads constructor(
     }
 
     private fun geometry(): LayoutGeometry =
-        geometry ?: LayoutGeometry(layout, width.toFloat()).also { geometry = it }
+        geometry ?: LayoutGeometry(layout, width.toFloat(), squash = squash).also { geometry = it }
 
     /** Where the keys are, for the service's glide decoding. */
     val currentGeometry: LayoutGeometry get() = geometry()
@@ -307,22 +469,22 @@ class KeyboardView @JvmOverloads constructor(
         }
     }
 
-    /** How much of this view the navigation bar covers, in pixels. See [navBarInset]. */
+    /**
+     * How much space to reserve below the keys for the navigation bar. See [navBarInset].
+     *
+     * Deliberately a property of the *display*, not of this view's current position or of the
+     * host's reported insets: `getInsetsIgnoringVisibility` answers how tall the bar is when
+     * shown, even while it is hidden, so the answer does not change when the bar comes and goes
+     * or when a host lies about it. Nothing here reads [height] or the on-screen location, which
+     * is what keeps the result identical on every layout pass, including the first.
+     */
     private fun requiredNavBarInset(): Int {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return dispatchedNavInset
-        if (!isAttachedToWindow || height == 0) return dispatchedNavInset
         val display = context.getSystemService(WindowManager::class.java)
             ?.maximumWindowMetrics ?: return dispatchedNavInset
-        val navBar = WindowInsetsCompat.toWindowInsetsCompat(display.windowInsets)
+        return WindowInsetsCompat.toWindowInsetsCompat(display.windowInsets)
             .getInsetsIgnoringVisibility(WindowInsetsCompat.Type.navigationBars())
             .bottom
-        if (navBar == 0) return 0
-        val onScreen = IntArray(2)
-        getLocationOnScreen(onScreen)
-        // Clamped rather than trusted outright: while the window is still sliding into place its
-        // bottom edge is below the display's, which would otherwise ask for a reserve taller
-        // than the bar it is reserving for.
-        return (onScreen[1] + height - (display.bounds.bottom - navBar)).coerceIn(0, navBar)
     }
 
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
@@ -359,15 +521,15 @@ class KeyboardView @JvmOverloads constructor(
         g.keyRects.forEach { rect -> if (pressOf(rect) > 0f) drawKey(canvas, rect, radius, t, g) }
 
         if (glidePath.size > 1) drawGlideTrail(canvas, g, t)
-        accentPopup?.let { (anchor, accents, selected) ->
-            drawAccentPopup(canvas, g, t, anchor, accents, selected, radius)
+        accentPopup?.let { (anchor, selected) ->
+            drawAccentPopup(canvas, g, t, anchor, selected, radius)
         }
     }
 
     /**
-     * The suggestion strip. Cells are square and left-aligned rather than stretched to fill the
-     * width: emoji are square, and a fixed cell means a suggestion does not jump sideways as
-     * the list behind it grows or shrinks with each letter typed.
+     * The suggestion strip. Cells are a fixed width rather than stretched to fill the space the
+     * current suggestions happen to need: a suggestion must not jump sideways as the list behind
+     * it grows or shrinks with each letter typed, because it is being aimed at while it changes.
      */
     private fun drawCandidates(canvas: Canvas, g: LayoutGeometry, t: Theme, radius: Float) {
         if (stripHandedOver) return
@@ -383,15 +545,22 @@ class KeyboardView @JvmOverloads constructor(
             return
         }
         if (candidates.isEmpty()) return
+        if (chineseMode || textStrip) return drawTextCandidates(canvas, g, t, radius)
         val cell = candidateCellWidth(g)
-        // Drawn smaller than the strip and sitting high in it, so the emoji read as their own
-        // band rather than as a row above the letters, and so the picture matches the touch
-        // area -- which stops at stripTouchBottom to keep high presses on q-p off the strip.
-        val top = g.stripHeight * 0.10f
-        val bottom = g.stripHeight * 0.70f
-        label.textSize = (bottom - top) * 0.74f
-        candidates.take(visibleCandidateCount(g)).forEachIndexed { i, candidate ->
-            val left = g.margin + i * cell
+        // The emoji use the whole strip, evenly. They used to sit in its top 10%-70%, which put a
+        // thin gap above them and a large empty one below: the lower part was a dead band that
+        // refused taps, and drawing into it would have advertised a target that did nothing. That
+        // band is gone -- a high press is now identified by how far above a thumb's measured
+        // landing point it sits, not by which slice of the bar it is in -- so the padding can be
+        // symmetric and the glyphs can have the height back.
+        val inset = g.stripHeight * 0.12f
+        val top = inset
+        val bottom = g.stripHeight - inset
+        // Sized off the cell as well as the band, so a glyph can never be wider than the cell it
+        // sits in however the two are retuned.
+        label.textSize = minOf((bottom - top) * 0.80f, cell * 0.62f)
+        candidates.take(CANDIDATE_COLUMNS).forEachIndexed { i, candidate ->
+            val left = g.stripMargin + i * cell
             if (i == pressedCandidate) {
                 fill.color = t.keyPressed
                 canvas.drawRoundRect(
@@ -405,6 +574,121 @@ class KeyboardView @JvmOverloads constructor(
             canvas.drawText(
                 candidate,
                 left + cell / 2f,
+                (top + bottom) / 2f - (label.descent() + label.ascent()) / 2f,
+                label,
+            )
+        }
+    }
+
+    /**
+     * Where each text candidate sits: a left edge and a width, in view pixels.
+     *
+     * Variable width, unlike the emoji grid, because a candidate is text: 好 and 今天天气很好
+     * cannot share a column size without either clipping the long one or stranding the short one
+     * in whitespace. Computed in one place and used by both the drawing and the hit test, so the
+     * thing under the finger is always the thing that was drawn -- splitting that calculation in
+     * two is how a bar comes to commit the candidate beside the one that was tapped.
+     *
+     * Candidates that do not fit are dropped rather than scrolled. A bar that scrolls invites a
+     * horizontal drag, and this strip already belongs to the glide and trackpad gestures.
+     *
+     * Measuring needs a text size set on a paint, and this runs from the hit test as well as
+     * from `onDraw` -- so it uses [measure], its own paint, rather than borrowing `label`.
+     * Sharing `label` would leave a text size behind on a touch, and the next thing to draw with
+     * it would silently come out at the candidate bar's size.
+     */
+    private fun textCandidateSlots(g: LayoutGeometry): List<Slot> {
+        // Measuring is the expensive half, and this runs from ACTION_MOVE -- which is nine tenths
+        // of the touch events -- so the answer is cached rather than recomputed per call. The
+        // inputs are the candidate list, the kinds, and the strip metrics, so the cache is
+        // dropped by the setters for the first two (see [invalidateSlots]) and keyed on the last:
+        // a rotation or a height change reaches here without passing through any setter.
+        cachedSlots?.let { if (it.width == width && it.stripHeight == g.stripHeight) return it.slots }
+
+        val slots = ArrayList<Slot>(candidates.size)
+        val padding = g.stripHeight * CHINESE_CANDIDATE_PADDING
+        val available = width - g.stripMargin * 2f
+        var x = g.stripMargin
+        for ((i, candidate) in candidates.withIndex()) {
+            // An emoji on a mixed strip is measured at its own size, not the text size: the two
+            // are drawn at different sizes (a glyph reads badly at text height) and measuring
+            // one while drawing the other is how a bar comes to commit the neighbour of what was
+            // tapped.
+            measure.textSize = g.stripHeight * textScaleFor(i)
+            val cellWidth = measure.measureText(candidate) + padding * 2f
+            if (x - g.stripMargin + cellWidth > available) break
+            slots.add(Slot(x, cellWidth))
+            x += cellWidth
+        }
+        cachedSlots = CachedSlots(width, g.stripHeight, slots)
+        return slots
+    }
+
+    /** One candidate's place on the strip: a left edge and a width, in view pixels. */
+    private class Slot(val left: Float, val width: Float)
+
+    private class CachedSlots(
+        val width: Int,
+        val stripHeight: Float,
+        val slots: List<Slot>,
+    )
+
+    private var cachedSlots: CachedSlots? = null
+
+    /** Drops the measured slots, for when the thing they were measured from changed. */
+    private fun invalidateSlots() {
+        cachedSlots = null
+    }
+
+    /** The text size, as a fraction of strip height, for the suggestion at [index]. */
+    private fun textScaleFor(index: Int): Float =
+        if (candidateKinds.getOrNull(index) == UnifiedCandidates.Kind.EMOJI) {
+            EMOJI_CANDIDATE_TEXT
+        } else {
+            CHINESE_CANDIDATE_TEXT
+        }
+
+    /**
+     * The strip wherever it holds text: candidates as text, each as wide as it needs to be.
+     *
+     * The one renderer for Chinese candidates, in the CJK modes and on the English bar alike,
+     * mixed with emoji or not. There is no second layout to disagree with it.
+     */
+    private fun drawTextCandidates(
+        canvas: Canvas,
+        g: LayoutGeometry,
+        t: Theme,
+        radius: Float,
+    ) {
+        val inset = g.stripHeight * 0.12f
+        val top = inset
+        val bottom = g.stripHeight - inset
+        val slots = textCandidateSlots(g)
+        slots.forEachIndexed { i, slot ->
+            val left = slot.left
+            val cellWidth = slot.width
+            label.textSize = g.stripHeight * textScaleFor(i)
+            if (i == pressedCandidate) {
+                fill.color = t.keyPressed
+                canvas.drawRoundRect(
+                    RectF(left + cellWidth * 0.04f, top, left + cellWidth * 0.96f, bottom),
+                    radius,
+                    radius,
+                    fill,
+                )
+            }
+            // The first candidate is what space commits, so it is the one the eye should land
+            // on; the rest are alternatives and are drawn a shade back. An emoji is drawn at
+            // full strength wherever it sits: dimming a glyph reads as "unavailable" rather than
+            // as "second choice", which is what the shade means for text.
+            label.color = when {
+                candidateKinds.getOrNull(i) == UnifiedCandidates.Kind.EMOJI -> t.text
+                i == 0 -> t.text
+                else -> t.secondaryText
+            }
+            canvas.drawText(
+                candidates[i],
+                left + cellWidth / 2f,
                 (top + bottom) / 2f - (label.descent() + label.ascent()) / 2f,
                 label,
             )
@@ -427,17 +711,33 @@ class KeyboardView @JvmOverloads constructor(
     private val letterGoneAt: Float
         get() = config.flickDistanceRatio / config.flickTravelRatio
 
-    private fun candidateCellWidth(g: LayoutGeometry): Float = g.stripHeight
-
-    private fun visibleCandidateCount(g: LayoutGeometry): Int =
-        ((width - 2 * g.margin) / candidateCellWidth(g)).toInt().coerceAtLeast(1)
+    /**
+     * How many suggestions the strip holds across. Fixed at a count rather than derived from a
+     * square cell, which is what it used to be: the cell was the strip's own height, so shortening
+     * the strip silently widened the row to ten-plus cramped cells. The number of emoji on offer
+     * is a thing to decide, not a side effect of how tall the bar is.
+     */
+    private fun candidateCellWidth(g: LayoutGeometry): Float =
+        (width - 2 * g.stripMargin) / CANDIDATE_COLUMNS
 
     /** Which suggestion a touch landed on, or -1 for none. */
     private fun candidateAt(x: Float, y: Float, g: LayoutGeometry): Int {
-        if (y >= g.stripTouchBottom || candidates.isEmpty() || status != null) return -1
+        // The strip reaches its full height now. What keeps a press aimed high at q-p off it is
+        // not a dead band at the bottom of the bar but the same test keyForPress uses, so the
+        // two cannot disagree about who owns a touch.
+        if (y >= g.stripHeight || g.isLetterReach(x, y)) return -1
+        if (candidates.isEmpty() || status != null) return -1
         if (stripHandedOver) return -1
-        val i = ((x - g.margin) / candidateCellWidth(g)).toInt()
-        return if (i in 0 until minOf(candidates.size, visibleCandidateCount(g))) i else -1
+        if (chineseMode || textStrip) {
+            // The same slots the drawing used, so the candidate under the finger is the one on
+            // screen. Widths vary per candidate, so there is no arithmetic shortcut here.
+            return textCandidateSlots(g)
+                .indexOfFirst { x >= it.left && x < it.left + it.width }
+        }
+        val i = ((x - g.stripMargin) / candidateCellWidth(g)).toInt()
+        // Bounded by the list as well as the row: the cells are a fixed grid now, so the ones
+        // past the end of a short list are empty and a tap there must land on nothing.
+        return if (i in 0 until minOf(candidates.size, CANDIDATE_COLUMNS)) i else -1
     }
 
     private fun drawKey(canvas: Canvas, rect: KeyRect, radius: Float, t: Theme, g: LayoutGeometry) {
@@ -551,39 +851,153 @@ class KeyboardView @JvmOverloads constructor(
         g: LayoutGeometry,
         t: Theme,
         anchor: KeyRect,
-        accents: List<String>,
         selected: Int,
         radius: Float,
     ) {
-        val w = accents.size * g.keyUnit
-        val left = (anchor.centerX - w / 2f).coerceIn(g.margin, width - g.margin - w)
-        // Opens level with the top of the raised key it grew out of -- see [PRESS_LIFT].
-        val top = anchor.top - liftAbove(anchor, g)
-        val bottom = top + g.keyHeight * 1.15f
+        // Built by the same function the state machine hit-tests against, so what is lit is what
+        // releasing commits. See PopupGrid.
+        val grid = PopupGrid.of(anchor, g)
+        val entries = grid.entries
 
         fill.color = t.popup
-        canvas.drawRoundRect(RectF(left, top, left + w, bottom), radius * 2, radius * 2, fill)
 
-        accents.forEachIndexed { i, accent ->
-            val cx = left + (i + 0.5f) * g.keyUnit
+        // A menu that is a single unbroken column is drawn as one panel rather than as a stack
+        // of rounded rows: per-row drawing would round every row's corners and leave seams down
+        // the list, which reads as a pile of separate buttons, where the language menu is one
+        // object you run a thumb down.
+        //
+        // Only when there is no padding to work around. A menu forced into several columns by a
+        // long list has blank cells in its first row, and those must stay holes -- the per-row
+        // path below is what knows how to leave them empty.
+        val solid = grid.shape == PopupShape.COLUMN && entries.none { it == PopupEntry.Blank }
+        if (solid) {
+            canvas.drawRoundRect(
+                RectF(grid.left, grid.top, grid.left + grid.width, grid.top + grid.height),
+                radius * 2,
+                radius * 2,
+                fill,
+            )
+        }
+
+        // Drawn per row, and only across the cells that hold something: a padded top row would
+        // otherwise show a panel of empty popup floating beside its entries.
+        for (row in 0 until if (solid) 0 else grid.rows) {
+            val first = row * grid.columns
+            val last = minOf(first + grid.columns, entries.size) - 1
+            val realFirst = (first..last).firstOrNull { entries[it] != PopupEntry.Blank } ?: continue
+            val realLast = (first..last).last { entries[it] != PopupEntry.Blank }
+            canvas.drawRoundRect(
+                RectF(
+                    grid.cellLeft(realFirst),
+                    grid.cellTop(realFirst),
+                    grid.cellLeft(realLast) + grid.cellWidth,
+                    grid.cellTop(realLast) + grid.cellHeight,
+                ),
+                radius * 2,
+                radius * 2,
+                fill,
+            )
+        }
+
+        entries.forEachIndexed { i, entry ->
+            if (entry == PopupEntry.Blank) return@forEachIndexed
+            val cellLeft = grid.cellLeft(i)
+            val cellTop = grid.cellTop(i)
+            val cx = cellLeft + grid.cellWidth / 2f
+            val cy = cellTop + grid.cellHeight / 2f
             if (i == selected) {
                 fill.color = t.popupSelected
                 canvas.drawRoundRect(
-                    RectF(left + i * g.keyUnit, top, left + (i + 1) * g.keyUnit, bottom),
+                    RectF(cellLeft, cellTop, cellLeft + grid.cellWidth, cellTop + grid.cellHeight),
                     radius * 2,
                     radius * 2,
                     fill,
                 )
             }
-            label.color = if (i == selected) Color.WHITE else t.text
-            label.textSize = g.keyUnit * 0.6f
-            canvas.drawText(
-                accent,
-                cx,
-                (top + bottom) / 2f - (label.descent() + label.ascent()) / 2f,
-                label,
-            )
+            val ink = if (i == selected) Color.WHITE else t.text
+            when (entry) {
+                is PopupEntry.Accent -> {
+                    label.color = ink
+                    label.textSize = g.keyUnit * 0.6f
+                    canvas.drawText(
+                        entry.text,
+                        cx,
+                        cy - (label.descent() + label.ascent()) / 2f,
+                        label,
+                    )
+                }
+                is PopupEntry.Action -> {
+                    icon.color = ink
+                    icon.strokeWidth = g.keyUnit * 0.06f
+                    KeyIcons.drawAction(canvas, entry.action, cx, cy, g.keyUnit * 0.52f, icon)
+                }
+                is PopupEntry.Language -> drawLanguageCell(
+                    canvas, g, entry, ink, cellLeft, cy, grid.cellWidth, grid.cellHeight,
+                )
+                // Filtered out above; the branch is here so adding an entry kind is a compile
+                // error rather than an invisible cell.
+                PopupEntry.Blank -> Unit
+            }
         }
+    }
+
+    /**
+     * One language in the globe key's menu: its name, and a tick if it is the one in use.
+     *
+     * Left-aligned rather than centred, which is the one place this popup departs from the accent
+     * one. A column of centred names has a ragged edge on both sides and reads as a pile of
+     * unrelated words; aligning them gives the list a spine, and the eye finds the one it wants by
+     * running down a single edge. It is also what every language list on the phone does.
+     *
+     * The text is ellipsised to the cell rather than the cell being sized to the text, because
+     * the cell's width is geometry -- the state machine hit-tests against it and has no font.
+     * See [PopupGrid.COLUMN_WIDTH_UNITS].
+     */
+    private fun drawLanguageCell(
+        canvas: Canvas,
+        g: LayoutGeometry,
+        entry: PopupEntry.Language,
+        ink: Int,
+        cellLeft: Float,
+        centerY: Float,
+        cellWidth: Float,
+        cellHeight: Float,
+    ) {
+        val padding = g.keyUnit * 0.30f
+        // The tick's column is reserved whether or not this row has one, so every name in the
+        // menu starts at the same x and the list keeps its spine.
+        val tickWidth = g.keyUnit * 0.42f
+        val textLeft = cellLeft + padding + tickWidth
+        val available = cellWidth - padding * 2 - tickWidth
+
+        menuLabel.color = ink
+        // Sized against the row rather than the key: the rows compress when many languages are
+        // enabled, and text that ignored that would overflow its own cell.
+        menuLabel.textSize = min(g.keyUnit * 0.46f, cellHeight * 0.44f)
+        val text = TextUtils.ellipsize(
+            entry.label,
+            menuLabel,
+            available,
+            TextUtils.TruncateAt.END,
+        ).toString()
+        canvas.drawText(
+            text,
+            textLeft,
+            centerY - (menuLabel.descent() + menuLabel.ascent()) / 2f,
+            menuLabel,
+        )
+
+        if (!entry.current) return
+        icon.color = ink
+        icon.strokeWidth = g.keyUnit * 0.055f
+        val tickX = cellLeft + padding + tickWidth / 2f
+        val r = tickWidth * 0.26f
+        val check = Path().apply {
+            moveTo(tickX - r, centerY)
+            lineTo(tickX - r * 0.2f, centerY + r * 0.8f)
+            lineTo(tickX + r, centerY - r * 0.8f)
+        }
+        canvas.drawPath(check, icon)
     }
 
     private fun drawTrackpadHint(canvas: Canvas, g: LayoutGeometry, t: Theme) {
@@ -719,7 +1133,7 @@ class KeyboardView @JvmOverloads constructor(
      * broken in a way that being twenty pixels lower does not.
      */
     private fun liftAbove(rect: KeyRect, g: LayoutGeometry): Float =
-        minOf(PRESS_LIFT * g.keyHeight, rect.top)
+        PopupGrid.liftAbove(rect, g)
 
     private fun keyRectOf(keyId: String?): KeyRect? =
         keyId?.let { id -> geometry().keyRects.firstOrNull { it.key.id == id } }
@@ -952,17 +1366,31 @@ class KeyboardView @JvmOverloads constructor(
                 is GestureOutput.CommitPrimary -> tick()
                 is GestureOutput.CommitSecondary -> tick()
                 is GestureOutput.CommitAccent -> tick()
+                is GestureOutput.CommitAction -> tick()
+                is GestureOutput.CommitLanguage -> tick()
                 is GestureOutput.SpecialKey -> tick()
                 GestureOutput.FlickPreviewCleared -> repaint = true
                 is GestureOutput.FlickPreview -> repaint = true
                 is GestureOutput.ShowAccents -> {
                     geometry().keyRects.firstOrNull { it.key.id == out.keyId }?.let {
-                        accentPopup = Triple(it, out.accents, 0)
+                        accentPopup = it to 0
                     }
+                    // The popup opened with no touch event to announce it -- the finger has been
+                    // still, and what changed is that half a second passed. A buzz is the only
+                    // signal that does not require looking at a popup the thumb is covering, and
+                    // it is the moment the gesture stopped being a keypress: lifting now no
+                    // longer types the letter.
+                    longPressTick()
                     repaint = true
                 }
                 is GestureOutput.AccentHighlighted ->
-                    accentPopup?.let { accentPopup = it.copy(third = out.index); repaint = true }
+                    accentPopup?.let {
+                        // Not on the opening highlight: ShowAccents has already buzzed for that
+                        // same moment, and the two arriving together read as one doubled tick.
+                        if (it.second != out.index) tick()
+                        accentPopup = it.copy(second = out.index)
+                        repaint = true
+                    }
                 GestureOutput.HideAccents -> { accentPopup = null; repaint = true }
                 GestureOutput.GlideStarted -> { glidePath = emptyList(); repaint = true }
                 is GestureOutput.GlideUpdated -> { glidePath = out.path; repaint = true }
@@ -970,7 +1398,35 @@ class KeyboardView @JvmOverloads constructor(
                 // and clearing it would tell the user their word had been taken when it has not.
                 GestureOutput.GlideSuspended -> Unit
                 is GestureOutput.GlideCompleted -> { glidePath = emptyList(); repaint = true }
-                GestureOutput.TrackpadStarted -> { trackpadActive = true; repaint = true }
+                // The board moves here rather than in the service, because the state machine
+                // reported a *direction* and the state it applies to lives on this view. The
+                // service still sees the output and saves the result.
+                is GestureOutput.SquashFlick -> {
+                    val next = squash.flicked(
+                        when (out.toward) {
+                            SquashDirection.LEFT -> Squash.LEFT
+                            SquashDirection.RIGHT -> Squash.RIGHT
+                        },
+                    )
+                    if (next != squash) {
+                        squash = next
+                        onSquashChanged(next)
+                        // The keys have just moved a long way under a finger that is still down.
+                        // A buzz is the only acknowledgement available: the hand asking for a
+                        // one-handed reach is covering the half of the screen that changed.
+                        longPressTick()
+                    }
+                }
+                GestureOutput.TrackpadStarted -> {
+                    // Same reason as the popup: the spacebar became a trackpad because time
+                    // passed, and the screen it is about to clear is behind the hand.
+                    longPressTick()
+                    trackpadActive = true
+                    repaint = true
+                }
+                // The first deletion is the long press itself, so the hold is already announced
+                // by the repeat that follows it. Buzzing here as well would double the first one.
+                GestureOutput.BackspaceRepeatStarted -> longPressTick()
                 GestureOutput.SelectionStarted -> { selecting = true; repaint = true }
                 GestureOutput.TrackpadEnded -> {
                     trackpadActive = false; selecting = false; repaint = true
@@ -992,6 +1448,24 @@ class KeyboardView @JvmOverloads constructor(
      */
     private fun tick() {
         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    /**
+     * The heavier buzz that says a hold has taken effect.
+     *
+     * Distinct from [tick] because the two answer different questions. A tick confirms something
+     * the finger just did; this one announces something that happened *while the finger did
+     * nothing* -- the moment a press became a popup, a trackpad or a backspace repeat. That
+     * moment has no other signal: the finger is still, and on the popup and the trackpad the
+     * thing that appeared is underneath the hand that summoned it.
+     *
+     * LONG_PRESS is the platform's own constant for exactly this, so it follows whatever the
+     * device and the user's haptic settings have decided a long press should feel like, rather
+     * than this keyboard inventing a vibration of its own. IGNORE_GLOBAL_SETTING is deliberately
+     * not passed: a user who has turned haptics off has said what they want.
+     */
+    private fun longPressTick() {
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
     }
 
     /**

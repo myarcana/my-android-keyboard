@@ -33,10 +33,82 @@ class Lexicon private constructor(
     private val buckets: Map<Int, IntArray>,
 ) {
 
+    /**
+     * Glided form -> spellings, most frequent first.
+     *
+     * Only the forms that need it are stored. For the overwhelming majority the spelling is the
+     * glided form unchanged, and an entry saying so would be 40,000 strings to say nothing; the
+     * absent case is handled by [spellings] returning the word the decoder already had.
+     */
+    private val spelledAs: Map<String, List<String>> = buildSpellings()
+
     val size: Int get() = words.size
 
     /** Word indices that begin with [first] and end with [last]. Empty when there are none. */
     fun bucket(first: Char, last: Char): IntArray = buckets[key(first, last)] ?: EMPTY
+
+    /**
+     * The spellings of a glided form, most frequent first.
+     *
+     * This exists because a decoder only ever answers in letters. A finger crossing `d-o-n-t` has
+     * no way to express the apostrophe in "don't" -- the key is not on the path and for most
+     * layouts not on the keyboard -- so every engine here decodes to the glided form and something
+     * afterwards has to put the spelling back. [Lexicon] is where the pair already lives, so it is
+     * where the question gets answered rather than in each engine separately.
+     *
+     * Most of the time the answer is one word and it is the word itself. The interesting cases are
+     * the 42 glided forms whose only spelling carries an apostrophe -- "dont" and "wheres" are not
+     * English, and a decoder that emits them is emitting a word no one can have meant -- and the
+     * ten that are genuinely two words, where "its" and "it's" are both real and the choice is the
+     * caller's to offer rather than this class's to make silently.
+     *
+     * A form with nothing to restore answers with itself, so callers can map every decode through
+     * this without asking first whether it was one of the interesting ones.
+     */
+    fun spellings(glided: String): List<String> = spelledAs[glided] ?: listOf(glided)
+
+    /** Word -> its index, for the exact-match lookups the suggestion bar makes. */
+    private val byWord: Map<String, Int> by lazy {
+        HashMap<String, Int>(words.size * 2).apply {
+            words.forEachIndexed { i, w -> putIfAbsent(w.lowercase(), i) }
+        }
+    }
+
+    /**
+     * `ln P(word)` for [word], or null when it is not an English word.
+     *
+     * Used by the unified suggestion bar to weigh "these letters are English" against "these
+     * letters are pinyin" -- `you` and `women` are both, and without this the Chinese reading
+     * wins on raw frequency. See [com.offlinekeyboard.ime.candidates.UnifiedCandidates].
+     *
+     * [logFrequency] is `100 * log10(count)`, so this is a change of base and a division by the
+     * corpus total. [LOG_CORPUS_TOTAL] is that total's natural log, implied by the commonest
+     * entry being about 6% of tokens -- the same reasoning the pinyin decoder's CORPUS_TOTAL
+     * rests on, and like it a constant factor that shifts every English word equally.
+     */
+    fun logProbability(word: String): Float? {
+        val i = byWord[word.lowercase()] ?: return null
+        return logFrequency[i] * LN10_PER_CENTIDECADE - LOG_CORPUS_TOTAL
+    }
+
+    private fun buildSpellings(): Map<String, List<String>> {
+        // Pass one: which glided forms are spelled differently from how they are glided. Only
+        // those need an entry at all.
+        val interesting = HashSet<String>()
+        letters.forEachIndexed { i, glided -> if (glided != words[i]) interesting += glided }
+
+        // Pass two: collect *every* spelling of those forms, including the one that is identical
+        // to the glided form. Missing it would turn "its" into "it's" outright, when the truth is
+        // that both are words and the caller should see both.
+        val grouped = HashMap<String, MutableList<Int>>(interesting.size * 2)
+        letters.forEachIndexed { i, glided ->
+            if (glided in interesting) grouped.getOrPut(glided) { ArrayList(2) } += i
+        }
+
+        return grouped.mapValues { (_, indices) ->
+            indices.sortedByDescending { logFrequency[it] }.map { words[it] }.distinct()
+        }
+    }
 
     /**
      * Writes this lexicon as an AOSP `.combined` dictionary, which is what swipe-library's
@@ -78,6 +150,21 @@ class Lexicon private constructor(
 
     companion object {
         private val EMPTY = IntArray(0)
+
+        /**
+         * Converts [logFrequency]'s unit -- hundredths of a decade -- into nats: `ln(10) / 100`.
+         */
+        private const val LN10_PER_CENTIDECADE = 0.0230258509f
+
+        /**
+         * `ln` of the English corpus total implied by the lexicon's own scale.
+         *
+         * The commonest entry scores 1036, i.e. a count of 10^10.36, and the commonest English
+         * word is around 6% of tokens; that puts the corpus near 3.8e11 and its log near 26.7.
+         * Only the constant matters, not its provenance: it shifts every English word equally
+         * and so cannot reorder them, it only sets where they sit against Chinese and emoji.
+         */
+        private const val LOG_CORPUS_TOTAL = 26.67f
 
         /**
          * A glide needs two keys to be a glide at all. One-letter entries ("a", "I") can only

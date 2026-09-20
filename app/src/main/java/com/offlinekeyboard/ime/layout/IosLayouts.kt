@@ -9,6 +9,15 @@ package com.offlinekeyboard.ime.layout
  * what was asked for.
  *
  * Accent lists are the iOS long-press popups.
+ *
+ * Layered on top of those, and not from iOS at all, are the edit actions: holding `c` offers
+ * copy, `v` paste, `x` cut, `a` select all, `z` undo and `y` redo. Every one is the letter from
+ * its own desktop shortcut, which is the whole design -- ctrl+C has meant copy for decades, so
+ * holding `c` is a guess the hand makes unprompted and nothing has to be taught. Undo and redo
+ * take z and y for the same reason; redo is ctrl+shift+Z on some platforms, but y is the one
+ * that is a key, and a long press has only its own letter to be named by. This is FUTO
+ * Keyboard's arrangement, and [returnKey] adds its fallback: the whole menu on Enter, which is
+ * present on every plane.
  */
 object IosLayouts {
 
@@ -16,7 +25,43 @@ object IosLayouts {
         primary: String,
         secondary: String? = null,
         accents: List<String> = emptyList(),
-    ) = Key(id = primary, primary = primary, secondary = secondary, accents = accents)
+        actions: List<EditAction> = emptyList(),
+    ) = Key(
+        id = primary,
+        primary = primary,
+        secondary = secondary,
+        accents = accents,
+        actions = actions,
+    )
+
+    /**
+     * Enter, which holds the whole edit menu rather than one command.
+     *
+     * The letter keys each carry the one action their own letter names, which is what makes them
+     * guessable -- and also what makes them useless when the letter is not on screen. On the
+     * number and symbol planes there is no `c` to hold, and in a field being edited with the
+     * shift layout the letters are there but a hand hunting for "paste" should not have to work
+     * out which plane it left it on. Enter is on every plane, in the same place, and is the one
+     * key whose tap action -- submit -- is never what a *held* finger wants, so the menu costs
+     * nothing to put there. FUTO makes the same call.
+     *
+     * Order is the edit menu's own, not the letters': the two clipboard commands that need a
+     * selection sit together, paste follows them, and undo/redo bracket the far end.
+     */
+    private fun returnKey() = Key(
+        "return",
+        "\n",
+        widthUnits = 2.5f,
+        type = KeyType.RETURN,
+        actions = listOf(
+            EditAction.SELECT_ALL,
+            EditAction.CUT,
+            EditAction.COPY,
+            EditAction.PASTE,
+            EditAction.UNDO,
+            EditAction.REDO,
+        ),
+    )
 
     val QWERTY_LOWER = Layout(
         id = "en_qwerty_lower",
@@ -28,7 +73,7 @@ object IosLayouts {
                     c("e", "3", listOf("è", "é", "ê", "ë", "ē", "ė", "ę")),
                     c("r", "4"),
                     c("t", "5"),
-                    c("y", "6", listOf("ÿ")),
+                    c("y", "6", listOf("ÿ"), listOf(EditAction.REDO)),
                     c("u", "7", listOf("û", "ü", "ù", "ú", "ū")),
                     c("i", "8", listOf("î", "ï", "í", "ī", "į", "ì")),
                     c("o", "9", listOf("ô", "ö", "ò", "ó", "œ", "ø", "ō", "õ")),
@@ -37,7 +82,12 @@ object IosLayouts {
             ),
             Row(
                 listOf(
-                    c("a", "@", listOf("à", "á", "â", "ä", "æ", "ã", "å", "ā")),
+                    c(
+                        "a",
+                        "@",
+                        listOf("à", "á", "â", "ä", "æ", "ã", "å", "ā"),
+                        listOf(EditAction.SELECT_ALL),
+                    ),
                     c("s", "#", listOf("ß", "ś", "š")),
                     c("d", "$"),
                     c("f", "&"),
@@ -51,10 +101,10 @@ object IosLayouts {
             Row(
                 listOf(
                     Key("shift", "", widthUnits = 1.5f, type = KeyType.SHIFT),
-                    c("z", "%", listOf("ž", "ź", "ż")),
-                    c("x", "-"),
-                    c("c", "+", listOf("ç", "ć", "č")),
-                    c("v", "="),
+                    c("z", "%", listOf("ž", "ź", "ż"), listOf(EditAction.UNDO)),
+                    c("x", "-", actions = listOf(EditAction.CUT)),
+                    c("c", "+", listOf("ç", "ć", "č"), listOf(EditAction.COPY)),
+                    c("v", "=", actions = listOf(EditAction.PASTE)),
                     c("b", "/"),
                     c("n", ";", listOf("ñ", "ń")),
                     c("m", ":"),
@@ -67,13 +117,17 @@ object IosLayouts {
                     Key("globe", "", widthUnits = 1.25f, type = KeyType.GLOBE),
                     Key("mic", "", widthUnits = 1.25f, type = KeyType.MIC),
                     Key("space", " ", widthUnits = 4.4f, type = KeyType.SPACE),
-                    Key("return", "\n", widthUnits = 2.5f, type = KeyType.RETURN),
+                    returnKey(),
                 ),
             ),
         ),
     )
 
-    /** Shift applied. Secondaries and accents are inherited from the lowercase layout. */
+    /**
+     * Shift applied. Secondaries, accents and edit actions are inherited from the lowercase
+     * layout -- the accents are uppercased with the letter, the actions are not, because copy is
+     * copy whatever case the key is showing.
+     */
     val QWERTY_UPPER = Layout(
         id = "en_qwerty_upper",
         rows = QWERTY_LOWER.rows.map { row ->
@@ -128,7 +182,7 @@ object IosLayouts {
             Key("globe", "", widthUnits = 1.25f, type = KeyType.GLOBE),
             Key("mic", "", widthUnits = 1.25f, type = KeyType.MIC),
             Key("space", " ", widthUnits = 4.4f, type = KeyType.SPACE),
-            Key("return", "\n", widthUnits = 2.5f, type = KeyType.RETURN),
+            returnKey(),
         ),
     )
 

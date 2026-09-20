@@ -298,6 +298,66 @@ that might not be. Backspace, a glide, the trackpad, a mode change, a focus chan
 move the keyboard did not make itself all flush. So do passwords, addresses and any field asking
 for no suggestions, which never hold a word at all.
 
+### Look-ahead cannot help a tap that was never in doubt
+
+The beam above already reads context in both directions -- nothing commits until the word ends, so
+`rhe` becomes `the` on the strength of two letters typed after the `r`. What it cannot do is fix
+`teavhers`. The pruning in `SpatialModel.candidates` runs *per tap, before any context exists*, and
+a squarely-hit `v` leaves one candidate standing. The beam never sees `c` at all. Look-ahead was
+never the missing ingredient; the tap had already been decided.
+
+So the fix is a **second pass that reopens pinned letters**, one at a time, asking a question the
+first pass could not: given that every *other* letter is now settled, is there a letter here the
+lexicon wants badly enough to outbid the touch evidence? The letters after the suspect one are as
+much a part of that fixed context as the letters before it, which is what makes this bidirectional
+in the sense that matters.
+
+**Building it turned up a hard numeric wall, and the wall is the interesting part.** The prior gaps
+available to argue for a correction are tiny, because a non-word does not score zero -- it scores
+`oovLogPrior`, the deliberately generous floor that is what lets `rhys` be typed. Measured against
+the shipped lexicon:
+
+| correction | prior gain |
+|---|---|
+| `teavhers` → `teachers` | 3.7 nats |
+| `wprd` → `word` | 5.1 nats |
+| `ot` → `it` | 1.4 nats |
+
+Against that, at the shipped `sigma_x` of 0.122 the touch cost of moving a letter one key is 45.3
+nats dead-centre, and it crosses zero at drift 0.445 -- which is *also* where `keyForPress` flips
+the literal to the neighbour. Sweeping finely across that boundary, the best gain available while
+the tap still reads as the wrong key was **-1.28, -3.58 and +0.13 nats**. The window in which a
+letter is both wrong and recoverable did not exist. Any margin at all left the feature inert, and
+that is how the constraint was found rather than assumed.
+
+What separates the two is `sigma_x`, and `SpatialModel` had already written down that the shipped
+0.122 is a known-wrong fit over 94 taps, with an honest refit of 0.227 over 2031. Shipping the
+refit globally collapses the pinning band to nothing -- the autocorrect this keyboard exists not to
+do. **So it is used in exactly one place.** The tight fit still decides what is pinned, so accurate
+typing is untouched; the refit decides only whether an already-suspect letter could have been a
+miss. One measurement, two questions, two error budgets -- and the strictness that protected the
+user moved to where the evidence to afford it exists.
+
+Two cases deliberately do *not* fire, and both are asserted so that a later change has to argue
+with them rather than quietly remove them.
+
+`ot` → `it` is the first. Its 1.4 nats is less than the ~1.6 the move costs even with the tap on
+the key edge, so the comparison is negative before any margin is consulted. Two letters carry too
+little signal for a prefix-mass prior, and when the evidence is that thin the keys actually
+pressed are the better guess.
+
+A word with *two* slips in it is the second, and it is the more interesting one because the
+obvious expectation is wrong. The pass does not fix them one at a time. Each step is scored
+against the current reading, and `teavhets` and the half-fixed `teachets` both fall to the
+unknown-spelling floor -- so fixing one letter wins a prior gain of exactly zero and the first
+step never starts. The word comes back untouched rather than half-corrected, which is the better
+of the two available failures: `teachets` would have been a confident answer invented out of a
+word the keyboard could not read.
+
+Both limits have the same root, which is that the prior knows about spellings and not about
+sentences. That is the thing to change if either matters enough, and it is a much larger feature
+than this one.
+
 ### A recorder that rejects is a recorder that deletes its mistakes
 
 The lab was built as a gatekeeper. One target armed at a time, each gesture judged against it,
@@ -600,7 +660,7 @@ up" beats "up", and a two-character minimum, below which the bar is noise.
 
 ### Held backspace accelerates
 
-500ms to start (the shared long-press timeout), then a character every 55ms, then whole words
+250ms to start (the shared long-press timeout), then a character every 55ms, then whole words
 every 140ms after 18 repeats -- about a second in. A fixed character rate is either too slow to
 clear a sentence or too fast to stop on the word you meant; both rates exist so neither has to
 compromise. Word deletion stops at a line break rather than running past it.
@@ -654,9 +714,11 @@ things follow from that, and all three are silent when got wrong.
 
 They cannot be drawn on `KeyboardView`'s canvas the way the emoji are, so the input view is now
 a `FrameLayout` holding the keyboard and an overlay lying on the strip. The overlay covers the
-strip's *tappable* part and no more: the buffer below `stripTouchBottom` catches presses aimed
-high at `q`-`p` and snaps them into the row, and a chip swallowing those would turn a slightly
-high `p` into nothing at all.
+upper part of the strip and no more, at `STRIP_OVERLAY_FRACTION`: a chip swallowing a press
+aimed high at `q`-`p` would turn a slightly high `p` into nothing at all. The chips are the one
+thing on the strip whose area cannot be settled per touch -- they are Views from another process,
+measured and placed before any finger exists -- so they take the band no letter press could
+plausibly reach, while the emoji keep the whole strip and arbitrate each touch as it arrives.
 
 The surface composites *behind* its window unless told otherwise, and `KeyboardView` paints its
 whole canvas including the strip, so there is no hole for it to show through. `setZOrderedOnTop(true)`
@@ -672,6 +734,133 @@ shows no surface at all, because a zero-width view never gets one.
 On this phone the payoff stops at username fields. ColorOS binds `com.oplus.securitykeyboard` to
 any field whose `inputType` carries a password variation, so the password half of a login is not
 served by this keyboard and cannot show its strip -- see the device notes, not this file.
+
+### Chinese is decoded as a sentence, not looked up a syllable at a time
+
+The difference between a pinyin keyboard people use and one they uninstall is almost entirely
+here. `tianqi` has three dictionary readings and `jintiantianqihenhao` has thousands; choosing
+per syllable, by frequency, gives 今天天气很号 about as often as the right answer, because
+each character's commonest reading is not the one the sentence wants. The engine (`ime/pinyin/`)
+runs a Viterbi pass over a lattice whose edges are dictionary words, so the whole input is
+decided together and context does the disambiguating.
+
+Four scoring facts were each found by getting them wrong first, and each one produced garbage
+that looked like a different bug:
+
+- **Scores must be log-*probabilities*, not log-weights.** Scoring a word as `ln(weight)` makes
+  every word worth a positive amount, so a path always improves by containing more words:
+  `shijian` decoded to 十几啊你 (four words) over 时间 (one), and `women` to 我们婀娜. No
+  per-word penalty fixes it, because the two quantities do not have the same sign. Dividing by a
+  corpus total makes every term negative and the arithmetic comes out right on its own.
+- **Single characters need a backoff penalty.** With characters as ordinary lattice edges, two
+  very common ones outscore the single word that spells them — 天起 beat 天气, 是件 beat 时间.
+  A word entry is better evidence than assembling the same text character by character, and
+  `BACKOFF` is what says so. Without the character edges at all, though, a sentence containing
+  one standalone character has *no* complete path, so they cannot simply be removed.
+- **Fuzzy spellings must not be dropped where both forms are real syllables.** The first cut
+  discarded any fuzzy variant that collided with a real syllable, which threw away 394 of them —
+  every pair worth having, since `zong`/`zhong` and `nan`/`lan` are exactly the confusions fuzzy
+  pinyin exists for. They are kept and ordered instead: exact first, fuzzy charged a penalty.
+- **The candidate bar has to leave room for prefixes.** Offering every whole-input decoding
+  filled the strip with 北京大学, 北京大雪, 北京大削, 北极难过大学 and no 北京 — so a phrase could
+  be typed whole or not at all, and committing it a word at a time was impossible.
+
+### Traditional was a conversion, and that was not Traditional support
+
+The original design was one Simplified dictionary plus OpenCC's `s2twp` chain, pre-composed into
+the asset at build time — 软件 → 軟件 → 軟體, the ordering being the subtlety, because the TW
+tables are keyed on *Traditional* and so must be a second pass over the output of the first.
+
+That is a good conversion and it was still the wrong thing. What it produces is **mainland
+Chinese written in Traditional characters**, which is not what a Taiwanese person types. Three
+facts, each checkable against the sources in `zhwork/`, say why:
+
+- **The vocabulary is absent, not merely spelled differently.** rime-ice has no 蚵仔煎 at all. It
+  carries an explicit normalisation comment — `「蚵仔煎」→「蚝仔煎」` — and stores the mainland
+  form read `hao zai jian`. No conversion recovers a word the dictionary does not have, so
+  `ezijian` could not produce 蚵仔煎 by any amount of table work.
+- **The readings differ, not just the glyphs.** 軟體 is read `ruan ti` and 網路 `wang lu`. A
+  dictionary keyed by `ruan jian` and `wang luo` cannot be reached by those keystrokes however
+  its *output* is rewritten, because conversion happens after the lookup.
+- **The frequencies are the wrong corpus.** 牛肉麵 should outrank 牛肉面 for a Taiwan user and the
+  reverse for a mainland one. One weight per word cannot express that.
+
+So Taiwan is now its own language model, merged into the same asset rather than layered over it:
+McBopomofo's 140k Traditional words, their Taiwan readings converted from bopomofo to this
+dictionary's pinyin spellings at build time (`tools/bopomofo.py`, verified to land 406 of 407
+syllables on spellings the shipped table already knows), weighted by McBopomofo's own Taiwan
+corpus counts (`phrase.occ`) rescaled onto the mainland corpus's scale so one `CORPUS_TOTAL`
+normalises both. The asset format is `PYD3`: every entry carries **two** weights, and zero means
+"this model does not have this word" rather than "this word is rare".
+
+The measured result, from `tools/dump_pinyin_dict.py`:
+
+| key | entry | cn weight | tw weight |
+|---|---|---|---|
+| `niu rou mian` | 牛肉面 | 35230 | 0 |
+| `niu rou mian` | 牛肉麵 | 0 | 11326 |
+| `e zi jian` | 蚵仔煎 | 0 | 707 |
+| `ruan ti` | 軟體 | 0 | 188127 |
+| `ruan jian` | 软件 | 502289 | 0 |
+
+Conversion survives, but demoted to a backstop: in Traditional mode the candidates already *are*
+Traditional, so `Script` only repairs text the Taiwan model could not supply — a learned word, or
+a character-floor entry that exists solely in the mainland tables. Running it over everything
+would reintroduce exactly the behaviour this replaced.
+
+Two things had to change to keep this honest. The decoder drops any word whose weight in the
+active model is zero, or both dictionaries would show up in both languages. And pruning ranks by
+the *stronger* of an entry's two weights, never their sum or average — averaging would have
+dropped 蚵仔煎 for being unknown in China, which is the exact failure the work existed to fix.
+
+### One suggestion bar, one probability scale
+
+The strip used to be two strips wearing the same paint: emoji in English, Chinese in the CJK
+subtypes, chosen by which subtype was active rather than by what the letters could mean. But
+`niuroumian` is not ambiguous — no emoji is named anything like it — while `ha` genuinely is, and
+`happy` genuinely is not. Only a score separates those three cases, so `UnifiedCandidates` puts
+all of them on one scale and sorts. It is not a merge of two ranked lists: merging can only
+decide how to interleave, which cannot express "this emoji is a better answer than that Chinese
+word".
+
+The scale is log-probability in nats, which is what the pinyin decoder already produced. Getting
+emoji onto it is the whole trick, and the constant is the part that is easy to get wrong: an
+emoji must be scored as the probability that *a token of text is this emoji*, not as its share of
+emoji. Those differ by about 5.7 nats, and using the wrong one pins emoji near 0 against Chinese
+near −8, so the bar is emoji-only forever regardless of what was typed. Emoji are roughly 1/300
+of tokens and Zipf-distributed — which is also exactly how `emoji_en.tsv` is ordered, so rank is
+the only frequency signal available and it is the right one.
+
+Two further terms are needed, and both are evidence rather than tuning:
+
+- **Coverage.** A reading that explains every letter typed is worth far more than one explaining
+  two letters of seven. Without it `happy` offers 哈 for its leading `ha`.
+- **Whether the letters are already an English word.** This is the one that matters, because
+  pinyin is written in the same 26 letters: `you`, `take`, `like`, `women` and `wo` are all
+  ordinary English *and* valid pinyin, and the Chinese reading is often the commoner string in
+  isolation — 有 beats 牛肉面 by six nats, because one common character beats a three-character
+  dish. Frequency alone therefore gets this backwards, and the missing evidence is not about
+  Chinese at all. The penalty is the English word's own `ln P` (from the lexicon the glide and
+  tap decoders already hold), so `the` costs a Chinese reading a great deal, `beijing` — a rare
+  English loanword — costs 北京 only 3.4 nats and it still wins, and letters that are not English
+  at all are charged nothing.
+
+The orderings asked for then fall out of the arithmetic instead of out of a rule. From
+`tools/rank_preview.py`, which prints the same scores the app computes:
+
+| typed | bar |
+|---|---|
+| `niuroumian` | 牛肉面 −10.95, then 牛肉 — no emoji match at all |
+| `niuroumian` (TW) | **牛肉麵 −12.08**, then 牛肉面 −17.53 |
+| `ezijian` (TW) | **蚵仔煎 −14.85**, well clear of the character floor |
+| `ha` | **哈 −7.73, 😂 −8.30, 🤣 −8.99** — genuinely mixed |
+| `happy` | 😂 −7.80 and nine more; no Chinese, `happy` is not pinyin |
+| `you` | 😘 −7.80 and emoji only; 有 charged 9.16 for being English |
+
+One consequence worth recording because it cost a debugging cycle: the decoder's own ranking is
+not the bar's ranking, so `scoredFor` must over-fetch. For `ezijian` the right answer sits below
+forty single characters that each explain one letter of seven, and cutting to the display limit
+before the coverage penalty runs discards it before the thing that recognises it ever sees it.
 
 ## Why the UI reads well
 
@@ -705,10 +894,25 @@ served by this keyboard and cannot show its strip -- see the device notes, not t
   it took taps across its whole height, and tapping an emoji *replaces the word being typed*. So
   a press aimed at a top-row letter that came in slightly high did not cost a character, it cost
   the word: a recorded press 26px above `e`, horizontally dead centre of `e`'s column, turned
-  "book" into 📖. The strip now stops taking taps at `STRIP_TOUCH_FRACTION` (0.78) of its height
-  and the emoji are drawn smaller and higher to match, so the picture and the touch area say the
-  same thing. The freed band is not dead -- `keyForPress` snaps it into the top row -- because a
-  buffer that swallowed presses would just be the gap bug again in a new place.
+  "book" into 📖. The first fix was a dead band: the strip stopped taking taps below
+  `STRIP_TOUCH_FRACTION` of its height. That worked and cost too much -- it spent a fixed slice
+  of the bar, permanently and whether or not anyone was typing, to catch a press that arrives
+  occasionally, and it drew the line by assertion when the evidence is a measured distribution.
+
+  It is now decided per touch by `LayoutGeometry.isLetterReach`, which asks `SpatialModel` how
+  many standard deviations above a thumb's *measured* landing point the touch sits. This is the
+  same fuzzy-hitbox machinery the tap decoder uses, extended over the strip. It works because of
+  the offset rather than in spite of it: thumbs land ~0.2 key heights *below* the drawn centre,
+  so a touch arriving above a key's centre is already unusual, and the strip above is further
+  again. Both `candidateAt` and `keyForPress` call the one function, so no pixel is claimed twice
+  or left unclaimed, and crossing the line gives the touch to the *letter* -- a misread letter
+  costs a character, a misread emoji costs the whole word.
+
+  Threshold is 2.5 sigma, and the constraint that fixes it is the disagreement between the two
+  spatial fits. On the 34dp strip the shipped sigma (0.130) puts the whole bar beyond 5.4 sigma,
+  while the honest refit (0.227) puts its bottom edge at 2.64. Anything at 3 or above would start
+  eating the bar under the refit; 2.5 keeps the emoji the whole strip under both and still reads
+  the recorded press as `e`. `KeyForPressTest` pins both fits for that reason.
 - **In the Gesture Lab, every line of chrome is a line of passage.** Reading ahead is the whole
   reason the lab produces natural gestures rather than aimed ones, and the screen it has to do it
   in is what the keyboard leaves over -- roughly a third of the display. So the header, the
@@ -737,15 +941,32 @@ screen size.
 | row gap | 10.33 |
 | suggestion strip | 50 |
 | corner radius | 8 |
-| total height | 249 |
+| bottom padding | 38 |
+| total height | 279 |
 
 Palette: `#ECEDFB` ground, white keys, `#E2DFFF` special keys, `#181B25` text.
+
+**Bottom padding is measured against Gboard, and the first measurement was taken wrong.** The
+horizontal metrics were scanned from a screenshot taken under *three-button* navigation, and the
+7.7dp that came off it looked right there only because `KeyboardView` was reserving 44dp for the
+button bar underneath it. Under gesture navigation the system reserves 16dp -- enough for the
+gesture handle, which is all a navigation reserve is for -- and the same constant put our space
+bar 71px (23.67dp) above the screen bottom against Gboard's 162px (54dp). The keyboard sat 91px,
+a little over 30dp, too low.
+
+38dp + the 16dp gesture reserve reproduces Gboard's 54dp. The distance lives in the layout
+constant rather than the navigation reserve because the reserve is already honest: the leftover
+is Gboard choosing not to put keys where a thumb rests, which is a layout decision.
+
+The lesson worth keeping is that a screenshot records the navigation mode it was taken in. Both
+keyboards must be captured back to back on the same device in the same mode before their
+geometry can be compared at all.
 
 ### Gesture thresholds — `gesture/GestureConfig`
 
 | parameter | value | why |
 |---|---|---|
-| `longPressMs` | 500 | matches the platform |
+| `longPressMs` | 250 | half the platform's 500ms; every key here offers a hold, so the wait is paid on purpose |
 | `flickDistanceRatio` | 0.20 × key height | Android's touch slop; below it the OS calls the finger still |
 | `verticalDominance` | 4.25 | what separates a flick from gliding "ok" |
 | `longPressSlopRatio` | 0.20 × key height | past this the finger is not holding still |
@@ -797,6 +1018,8 @@ The three it missed were each a different near-miss, and only one was a threshol
   *still*, which is what it means everywhere else on the platform, so it now cancels once the
   finger has drifted past touch slop. The space bar is exempt -- holding space and starting to
   move before the timeout is the normal way into the trackpad, and no glide competes for it.
+  `longPressMs` has since halved to 250ms, which puts that same 447ms dawdle well past the
+  deadline: the drift guard, not the clock, is now the only thing protecting a slow glide.
 
 One gesture in 208 is still misread: an "ok" that left at a ratio of 4.3, right against the 4.25
 threshold. That is the honest state of it -- see docs/GESTURE_BANK.md on why "ok" probably wants
@@ -850,6 +1073,39 @@ Four rules do the work, and each one was a bug first:
   nobody while "they've" is written constantly. Where the two spellings share a shape and the
   contraction is the commoner one -- "it's", "I'll", "I'd", "let's" -- an explicit list says so.
 
+### The pinyin dictionary -- `assets/pinyin.bin`
+
+12.1 MB, generated by `tools/build_pinyin_dict.py`, committed for the same reason the lexicon is:
+there is no INTERNET permission to fetch it with. Sources are rime-ice (mainland words, readings
+and usage weights), McBopomofo (Traditional words, Taiwan readings and Taiwan corpus counts) and
+OpenCC (the conversion backstop). **The rime-ice data is GPL-3.0 and that licence reaches the app
+if it is ever distributed** -- chosen knowingly, because the permissive alternative (CC-CEDICT)
+ships no frequencies and ranking is most of what makes candidates feel right. McBopomofo's data
+is MIT and adds no further obligation. See the README for how to undo the GPL choice.
+
+It grew from 8.4 MB when the Taiwan model was added: 166k of its entries are Traditional words
+that no conversion of the Simplified data could have produced, and every entry now carries a
+weight per region rather than one. Both are what the section above is about.
+
+A binary format rather than the upstream text: 880,000 lines of YAML parsed at startup would be
+seconds and a large heap on a keyboard that has to appear instantly. Sections are read with one
+`ByteBuffer` and binary-searched in place, and nothing is decoded until a lookup reaches it. Keys
+are sorted by syllable id so a prefix is a contiguous run -- the same trick `WordIndex` uses over
+letters.
+
+| parameter | value | why |
+|---|---|---|
+| entries | 450,000 words | after a per-key cap of 60; the tail is never scrolled to |
+| regions per entry | 2 weights | mainland and Taiwan; 0 means "not in this model", not "rare" |
+| bigrams | 150,000 pairs | past this the counts are below the decoder's smoothing floor |
+| beam width | 4 paths | the right sentence survives a weak start; 8 was not better |
+| `CORPUS_TOTAL` | 2e9 | probability denominator; any value above the largest weight works |
+| `BACKOFF` | 6.0 nats | a word beats the characters spelling it, a name is still reachable |
+| `FUZZY_PENALTY` | 2.3 nats | "about ten times less likely" per fuzzily-matched syllable |
+| `LEARNED_BONUS` | 12.0 nats | sized to the gaps `unigram` actually produces; 3 did nothing |
+| `MAX_READINGS` | 16 | fuzzy readings sort last, and cutting at 4 dropped them entirely |
+| `FULL_DECODINGS` | 5 | leaves room on the bar for prefix words |
+
 ### Tap decoding -- `tap/SpatialModel`, `tap/WordIndex`
 
 | parameter | value | where it comes from |
@@ -862,10 +1118,25 @@ Four rules do the work, and each one was a bug first:
 | `oovLogPrior` | median word | the value of a spelling the lexicon has never seen |
 | `MIN_TAPS` | 2 | at one letter the prior is about the alphabet, not about a word |
 | `beamWidth` | 24 | a ceiling; a tap usually contributes one candidate and rarely three |
+| `REFIT_SIGMA_X` | 0.227 key widths | refit over 2031 taps; used **only** by the rescue pass |
+| `REFIT_SIGMA_Y` | 0.208 key heights | the same |
+| `RESCUE_REACH_NATS` | 20 nats | which letters get listed; the comparison does the refusing |
+| `RESCUE_MARGIN_NATS` | 1.0 nats | ceilinged by the prior gaps, which are 1.4-5.1 nats |
+| `MAX_RESCUES` | 2 | each substitution spends the certainty the next one rests on |
 
 Rerun `tools/fit_spatial.py` after any sitting with the Gesture Lab; the first four move with the
 bank. The next two are not tunable at all -- they are read off `assets/lexicon_en.tsv`, so
 regenerating the lexicon moves them and the pinned band with them.
+
+The two sigma pairs are the same measurement at two confidence levels, and which one applies is
+decided by the question, not by the caller. `MEASURED_*` decides what is pinned and must stay
+conservative; `REFIT_*` is better-sampled and is consulted only once a letter is already suspect
+and every letter around it is settled. Shipping the refit globally is still an open decision and
+still collapses the pinning band -- see the section above.
+
+`RESCUE_MARGIN_NATS` is a ceiling, not a preference: a non-word scores `oovLogPrior` rather than
+zero, so the whole budget a correction has to spend is a few nats. A margin of 6 switches the
+feature off silently, which is how the number was arrived at.
 
 `MIN_TAPS` is the one that looks arbitrary and is not. At a single letter the prior is not about
 a word, it is about which letters English words begin with -- a fact about the dictionary rather
@@ -1011,6 +1282,58 @@ rule: a flick is not a flick until the finger lifts, so ticking on the way down 
 presses that went on to type nothing and tick twice for the ones that did. Every entered key ticks
 -- letters, flicked symbols, accents and the special keys -- and gestures that type nothing stay
 silent.
+
+### The long-press popup — `layout/PopupGrid`, `layout/EditAction`
+
+The popup used to be a row of accents and is now a grid that may hold editing commands as well:
+holding `c` offers copy, `v` paste, `x` cut, `a` select all, `z` undo, `y` redo, and Enter carries
+the whole menu. The letters are the ones from the desktop shortcuts, which is the entire reason it
+needs no teaching -- ctrl+C has meant copy for forty years. It is FUTO Keyboard's arrangement.
+
+**An action is not text, and the type says so.** A popup cell is a `PopupEntry.Accent` or a
+`PopupEntry.Action`, and they leave as different outputs (`CommitAccent`, `CommitAction`). The
+alternative -- a string with a flag -- has one failure mode, which is committing the word "Copy"
+into the field, and the sealed type makes it unrepresentable. Actions run through
+`performContextMenuAction` with the platform's own `android.R.id.*`, not synthesised ctrl+key
+events: a WebView or a Compose field honours the menu action and ignores a shortcut it never
+registered.
+
+**The primary sits under the thumb, and that is what positions the popup.** The popup is placed so
+that the entry it opens on is the one the finger is already on -- so holding `c` and simply
+letting go copies, with nothing to aim at. A key with no action has its middle accent there, which
+is the same thing as centring the popup on its key, so accent popups kept the placement they had.
+The single action a key carries therefore goes in the *middle* of the entry order rather than at
+the front; leading with it would work for that one gesture and would hang the popup off to one
+side of the key it belongs to.
+
+**Where clamping wins, the arrangement moves rather than the popup.** Against the ends of the
+board the popup has to be pushed back on screen and the column over the thumb is no longer the
+middle one -- on `a`, the leftmost key, only column 0 ever lands under the finger. So the column is
+decided *first*, from the geometry, and the entries are then arranged around it. Positioning alone
+cannot fix this, because by then the popup has nowhere left to move.
+
+**Long rows wrap, and the ragged edge goes at the top.** Beyond five entries the popup becomes a
+grid, because eight accents in one row span most of the keyboard, drag the popup away from its own
+key, and put the far end across the hand holding the key down. Cells are indexed row-major, so a
+row that is not full has to be the first one; the bottom row -- the one the thumb is on -- is
+always whole, and the gap is padded with `PopupEntry.Blank`, which draws nothing and commits
+nothing.
+
+**One object owns both the drawing and the hit test.** `PopupGrid.of(key, geometry)` is the only
+way to build one, and the renderer and the state machine both call it. They used to compute the
+layout separately, and the two drifted: the popup lit one entry and committed another wherever the
+clamp had shifted it. Everything the popup's shape depends on -- including `PRESS_LIFT`, which
+decides how high the pressed key stands -- lives in that one file for the same reason.
+
+**The opening highlight is measured, never assumed.** It is `entryAt` of where the finger actually
+is, not index 0. Hardcoding it meant the first move event -- a pixel of tremor, before any
+deliberate movement -- recomputed the cell and the selection visibly jumped.
+
+**A hold buzzes.** Opening the popup, starting the spacebar trackpad and beginning a backspace
+repeat all fire `HapticFeedbackConstants.LONG_PRESS`, and moving between cells fires the ordinary
+keyboard tick. These are the moments where something happens *while the finger is doing nothing*,
+and on the popup and the trackpad the thing that appeared is underneath the hand that summoned it,
+so a buzz is the only signal that does not require looking.
 
 ### Cursor and selection
 

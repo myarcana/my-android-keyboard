@@ -3,7 +3,6 @@
     <string name="app_name">Offline Keyboard</string>
     <string name="ime_name">Offline Keyboard</string>
     <string name="subtype_en">English</string>
-    <string name="subtype_zh_tw_zhuyin">繁體注音</string>
     <string name="subtype_zh_tw_pinyin">繁體拼音</string>
     <string name="subtype_zh_cn">简体拼音</string>
     <string name="gesture_lab_name">Gesture Lab</string>

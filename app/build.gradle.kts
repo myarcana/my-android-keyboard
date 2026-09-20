@@ -14,11 +14,47 @@ android {
         versionCode = 1
         versionName = "0.2.0-phase1"
 
-        // Phone + emulator. Native engines land in Phase 2/3/4.
-        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+        // Phone only for a device deploy. The emulator's x86_64 copies of the native runtimes
+        // are ~40 MB that a physical phone can never load; drop them when the models and libs
+        // are in the pack anyway. A self-contained build keeps both, as it always did.
+        ndk {
+            abiFilters += if (project.hasProperty("pack")) listOf("arm64-v8a")
+            else listOf("arm64-v8a", "x86_64")
+        }
+
+        // Whether this APK expects a model pack, read at runtime by
+        // `com.offlinekeyboard.ime.pack.ModelPack.expected`. It lives in `defaultConfig` because
+        // `buildConfigField` is a `defaultConfig`/`buildType` method and not an `android {}` one --
+        // calling it from the enclosing block resolves against `android` and fails.
+        buildConfigField("boolean", "MODEL_PACK", if (project.hasProperty("pack")) "true" else "false")
     }
 
     buildFeatures { buildConfig = true }
+
+    /**
+     * The payload split, and why it is done by relocating the files rather than excluding them.
+     *
+     * `jniLibs` drops out of a `-Ppack` build by simply not adding its `srcDir`. Assets have no
+     * equivalent switch in this AGP version: `AndroidSourceDirectorySet` exposes only
+     * `srcDir(s)`/`setSrcDirs` and no `exclude`, and the variant-level `Sources.assets` has no
+     * filter either (`ResourcesPackaging.excludes` covers `res/`, not `assets/`). An
+     * `exclude("swipe")` call on the assets source set therefore does not compile -- it resolves
+     * to Gradle's `Configuration.exclude(group, module)` and fails with a receiver mismatch,
+     * which is the error this block used to produce.
+     *
+     * So the payload lives in `src/payload/` and is added as an extra asset source directory only
+     * for a self-contained build. Relocating rather than filtering has the property that matters:
+     * what goes in the APK is decided by which directory is listed, not by a pattern that can
+     * silently stop matching when a path moves. Both locations are git-ignored fetched runtimes.
+     *
+     * `pinyin.bin`, the lexicons and the emoji index stay in the normal `assets/` and stay out of
+     * the pack on purpose: they are small, they change with the code that reads them, and moving
+     * them into the pack would mean reinstalling the pack whenever a lexicon is rebuilt.
+     */
+    if (!project.hasProperty("pack")) {
+        // A self-contained build ships and reads its own models, exactly as before the split.
+        sourceSets["main"].assets.srcDir("src/payload")
+    }
 
     /**
      * The dictation runtime, fetched by tools/fetch_asr_runtime.sh rather than committed.
@@ -29,7 +65,12 @@ android {
      * there is nothing to merge.
      */
     sourceSets["main"].kotlin.srcDir("../third_party/sherpa-onnx/kotlin-api")
-    sourceSets["main"].jniLibs.srcDir("../third_party/sherpa-onnx/jniLibs")
+    // In a `-Ppack` build the sherpa native libraries ship in the :modelpack APK instead, so this
+    // APK stops carrying 60 MB of `.so` on every deploy. The Kotlin binding above still comes
+    // from third_party, which is why the sources stay unconditional.
+    if (!project.hasProperty("pack")) {
+        sourceSets["main"].jniLibs.srcDir("../third_party/sherpa-onnx/jniLibs")
+    }
 
     /**
      * Glide decoding: FUTO's swipe-library, taken the same way and for the same reason.
@@ -40,7 +81,9 @@ android {
      * decoder, which is also the switch the A/B comparison flips.
      */
     sourceSets["main"].kotlin.srcDir("../third_party/swipe-library/kotlin-api")
-    sourceSets["main"].jniLibs.srcDir("../third_party/swipe-library/jniLibs")
+    if (!project.hasProperty("pack")) {
+        sourceSets["main"].jniLibs.srcDir("../third_party/swipe-library/jniLibs")
+    }
 
     androidResources {
         // SenseVoice is read straight out of the APK by the native runtime, which mmaps it and

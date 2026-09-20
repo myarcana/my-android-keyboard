@@ -16,10 +16,14 @@ import com.offlinekeyboard.ime.layout.Metrics
 /**
  * The overlay that holds a password manager's chips, sitting exactly over the emoji strip.
  *
- * It covers the *tappable* part of the strip and no more. The few pixels below that -- the buffer
- * that catches presses aimed high at the top letter row and snaps them into it -- stay with
+ * It covers the upper part of the strip and no more. The pixels below that stay with
  * KeyboardView, because a chip swallowing them would turn a slightly high `p` into nothing at
- * all. See [Metrics.STRIP_TOUCH_FRACTION].
+ * all.
+ *
+ * Unlike the emoji, these chips cannot have their area decided per-touch. They are real Views
+ * from another process and have to be measured and placed before any finger exists, so they take
+ * the part of the strip no press aimed at the letters could plausibly reach. See
+ * [Metrics.STRIP_OVERLAY_FRACTION].
  */
 @RequiresApi(Build.VERSION_CODES.R)
 class InlineSuggestionStrip(context: Context) : HorizontalScrollView(context) {
@@ -44,7 +48,7 @@ class InlineSuggestionStrip(context: Context) : HorizontalScrollView(context) {
      */
     override fun onMeasure(widthSpec: Int, heightSpec: Int) {
         val w = MeasureSpec.getSize(widthSpec)
-        val h = Metrics.stripTouchHeightPx(w.toFloat()).toInt()
+        val h = Metrics.stripOverlayHeightPx(w.toFloat()).toInt()
         super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY))
     }
 

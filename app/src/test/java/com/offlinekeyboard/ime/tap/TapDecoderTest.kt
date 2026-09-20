@@ -177,4 +177,189 @@ class TapDecoderTest {
             assertNull(decoder.read(listOf(tap('r', dx = dx)), geometry))
         }
     }
+
+    // --- context in both directions -------------------------------------------------------
+
+    /**
+     * A typo tap: the finger was travelling toward [intended] and came down on the key next to
+     * it, [hit], without reaching the middle of it. [drift] is how far past `hit`'s aim point it
+     * carried, as a fraction of the distance between the two keys -- so 0 is a dead-centre press
+     * on the wrong key and 1 would be a clean press on the right one.
+     *
+     * Modelling a mistake this way rather than as a dead-centre press on the wrong key is the
+     * difference between testing a typo and testing a decision. A press in the exact middle of
+     * `v` is not a slip toward `c`; it is someone typing `v`, and a keyboard that rewrites it
+     * has overridden them. Real mis-hits land between the two keys, which is precisely why the
+     * touch evidence against them is affordable: 45 nats dead-centre, but around 6 at the point
+     * a sliding thumb actually clips the neighbouring key.
+     */
+    private fun typo(hit: Char, intended: Char, drift: Float = 0.44f): TapDecoder.Tap {
+        val from = geometry.letterKeys[hit - 'a']!!
+        val to = geometry.letterKeys[intended - 'a']!!
+        val span = (to.centerX - from.centerX) / geometry.keyUnit
+        return tap(hit, dx = span * drift)
+    }
+
+    /**
+     * The look-ahead case, and the one the first pass structurally cannot reach.
+     *
+     * The `v` here is a slip toward `c` -- the finger was heading for `c` and clipped `v` on the
+     * way -- but it is still inside the drawn `v` key, so the literal really is `teavhers` and
+     * the first pass pins it. Nothing about that tap *on its own* says it was a mistake. What
+     * overturns it is the five letters after it: `teachers` is a word the corpus knows well and
+     * `teavhers` is not a word at all.
+     */
+    @Test
+    fun `a slipped key is fixed by the letters that follow it`() {
+        val decoder = decoder() ?: return
+        val typed = listOf(
+            tap('t'), tap('e'), tap('a'), typo('v', 'c'),
+            tap('h'), tap('e'), tap('r'), tap('s'),
+        )
+        assertEquals("teavhers", literalOf(typed))
+        assertEquals("teachers", decoder.read(typed, geometry))
+    }
+
+    /**
+     * The limit of what one letter of context can buy, asserted because it is a real boundary
+     * of the feature rather than a gap in it.
+     *
+     * `ot` is the case that looks easiest and is hardest. Two letters means a single tap of
+     * context, and more importantly it means the prior has almost nothing to say: `it` outscores
+     * `ot` by 1.4 nats, against 3.7 for `teachers` and 5.1 for `word`. That is smaller than the
+     * touch cost of moving the letter at all -- about 1.6 nats even with the tap on the very
+     * edge of the key -- so the comparison comes out negative before the margin is consulted.
+     *
+     * The keyboard declining here is the model working. `ot` is not obviously a typo for `it`
+     * to something that only knows prefix mass; two letters simply do not carry enough signal,
+     * and when the evidence is this thin the keys that were actually pressed are the better
+     * guess. Fixing this would mean a prior that knows about sentences, which is a different
+     * feature and a much larger one.
+     */
+    @Test
+    fun `a two-letter word has too little context to be rescued`() {
+        val decoder = decoder() ?: return
+        val typed = listOf(typo('o', 'i'), tap('t'))
+        assertEquals("ot", literalOf(typed))
+        assertNull("two letters should not be enough to overrule the keys pressed", decoder.read(typed, geometry))
+    }
+
+    /**
+     * Look-behind, to show the pass is not quietly left-to-right. The mistake is on the *last*
+     * letter, so everything arguing for the fix was typed before it.
+     */
+    @Test
+    fun `a mistake on the final letter is fixed by the letters before it`() {
+        val decoder = decoder() ?: return
+        val typed = listOf(tap('w'), typo('p', 'o'), tap('r'), tap('d'))
+        assertEquals("wprd", literalOf(typed))
+        assertEquals("word", decoder.read(typed, geometry))
+    }
+
+    /**
+     * The other half of the same rule, and the reason [typo] takes a drift at all: a press in
+     * the *middle* of the wrong key is left alone. At that point the touch evidence is some 45
+     * nats against the neighbour and no prior gap in this lexicon comes close to buying it --
+     * which is the model declining to override a deliberate keystroke, not a threshold.
+     */
+    @Test
+    fun `a dead-centre press on a wrong key is left alone`() {
+        val decoder = decoder() ?: return
+        val typed = listOf(
+            tap('t'), tap('e'), tap('a'), typo('v', 'c', drift = 0f),
+            tap('h'), tap('e'), tap('r'), tap('s'),
+        )
+        assertEquals("teavhers", literalOf(typed))
+        assertNull("a squarely-pressed key was overridden", decoder.read(typed, geometry))
+    }
+
+    // --- what the rescue pass is still not allowed to do ------------------------------------
+
+    /**
+     * The contract test from above, restated against the new pass because it is the thing most
+     * at risk from it. A rescue needs a commoner *word* to move toward, and an unknown spelling
+     * has none, so widening the spatial reach cannot reach these.
+     */
+    @Test
+    fun `the rescue pass still leaves unknown words alone`() {
+        val decoder = decoder() ?: return
+        listOf("rhys", "kade", "zamil", "qwertz", "xyzzy").forEach { word ->
+            assertNull("$word was rescued into something else", decoder.read(taps(word), geometry))
+        }
+    }
+
+    /**
+     * A real word is not traded for a commoner real word. This is the line between fixing a
+     * mis-hit and overriding a choice: both spellings are words, the user hit the keys for one
+     * of them accurately, and the keyboard has no business preferring the other however much
+     * commoner it is.
+     */
+    @Test
+    fun `a correctly typed word is never swapped for a commoner one`() {
+        val decoder = decoder() ?: return
+        listOf("cad", "bat", "pin", "hot", "vane", "cot").forEach { word ->
+            assertNull("$word was swapped for a commoner word", decoder.read(taps(word), geometry))
+        }
+    }
+
+    /**
+     * A rescue may move a letter sideways, where a mis-hit explains it, but not vertically.
+     * `RESCUE_REACH_NATS` is set below the distance to the row above for this reason: a finger
+     * a whole row out is not the typo this pass models.
+     */
+    @Test
+    fun `a rescue does not reach the row above`() {
+        val decoder = decoder() ?: return
+        // A slip sideways from `f` onto `g`: "fine" is reachable, and so is "gone" or "mine"
+        // only by moving a letter a whole row, which the reach is set below.
+        val typed = listOf(typo('g', 'f'), tap('i'), tap('n'), tap('e'))
+        assertEquals("gine", literalOf(typed))
+        val reading = decoder.read(typed, geometry)
+        assertTrue(
+            "expected a sideways rescue or none, got $reading",
+            reading == null || reading == "fine",
+        )
+    }
+
+    /**
+     * Two slips in one word come back untouched, and this is asserted because the obvious
+     * expectation -- that the pass fixes them one at a time -- is wrong for a reason worth
+     * pinning down.
+     *
+     * Each step is scored against the current reading, and with two mistakes in it the word is
+     * not in the lexicon either way: `teavhets` and the half-fixed `teachets` both fall to the
+     * unknown-spelling floor, so fixing one letter wins a prior gain of exactly zero and the
+     * first step never starts. The result is the literal, not a half-correction.
+     *
+     * That is the better of the two available failures. A keyboard that produced `teachets`
+     * here would have invented a confident answer out of a word it could not read; returning
+     * the keys that were actually pressed says "I don't know what you meant", which is true.
+     */
+    @Test
+    fun `two slips in one word are left alone rather than half-corrected`() {
+        val decoder = decoder() ?: return
+        val typed = listOf(
+            tap('t'), tap('e'), tap('a'), typo('v', 'c'),
+            tap('h'), tap('e'), typo('t', 'r'), tap('s'),
+        )
+        assertEquals("teavhets", literalOf(typed))
+        assertNull("a two-slip word was half-corrected", decoder.read(typed, geometry))
+    }
+
+    /** The one-letter-per-tap guarantee, restated over taps the rescue pass actually moves. */
+    @Test
+    fun `a rescued reading still has exactly one letter per tap`() {
+        val decoder = decoder() ?: return
+        val words = listOf(
+            listOf(tap('t'), tap('e'), tap('a'), typo('v', 'c'), tap('h'), tap('e'), tap('r'), tap('s')),
+            listOf(typo('o', 'i'), tap('t')),
+            listOf(tap('w'), typo('p', 'o'), tap('r'), tap('d')),
+            listOf(tap('t'), tap('h'), tap('i'), typo('m', 'n'), tap('g'), tap('s')),
+        )
+        words.forEach { typed ->
+            val reading = decoder.read(typed, geometry) ?: return@forEach
+            assertEquals("wrong length for $reading", typed.size, reading.length)
+            assertTrue("$reading is not letters", reading.all { it in 'a'..'z' })
+        }
+    }
 }

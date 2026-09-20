@@ -74,9 +74,33 @@ class EmojiIndex private constructor(
     }
 
     companion object {
-        /** One letter matches almost everything, so the bar would be noise rather than help. */
-        const val MIN_QUERY = 2
+        /**
+         * The shortest query the bar will look up.
+         *
+         * One letter does match a great many emoji, which is why this was 2. What makes it
+         * tolerable at 1 is the ranking rather than the cutoff: the tiers put exact names first
+         * and bare prefixes last, so "a" leads with the emoji actually *called* "a" -- and the
+         * alternative at one letter is not a cleaner bar but the default set below, which is not
+         * about the letter being typed at all.
+         */
+        const val MIN_QUERY = 1
         const val MAX_RESULTS = 12
+
+        /**
+         * What the bar offers when there is no word to look emoji up by -- an empty field, just
+         * after a space, or straight after punctuation.
+         *
+         * The strip is the one row that is always on screen, and leaving it blank whenever a word
+         * is not half-typed wasted it for most of the time the keyboard is up. These are the
+         * common ones in rough order of use, and they are a *fallback*: the moment a letter is
+         * typed, the word's own matches replace them.
+         *
+         * Committed here rather than read from the asset because they are a UI decision about
+         * which emoji a person reaches for unprompted, not a fact about the Unicode data -- the
+         * asset's own frequency order leads with emoji that are common in text overall, which is
+         * not the same question.
+         */
+        val DEFAULTS = listOf("😀", "😂", "❤️", "👍", "🙏", "🎉", "🔥", "😍")
 
         private const val TIER_EXACT_NAME = 0
         private const val TIER_EXACT_TERM = 1

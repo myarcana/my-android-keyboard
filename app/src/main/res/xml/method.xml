@@ -1,8 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Subtypes are the languages shown in the system keyboard switcher and cycled by the globe key.
-  Traditional Chinese gets two, because Taiwan's standard input is Zhuyin but Pinyin is also
-  wanted: the layout differs between them even though both produce Traditional characters.
+
+  Both Chinese subtypes are Pinyin, typed on the ordinary QWERTY letters, and differ only in the
+  script they produce: zh_TW writes Taiwan Traditional (including Taiwan vocabulary, 軟體 rather
+  than the character-wise 軟件) and zh_CN writes Simplified. One dictionary serves both; the
+  conversion is com.offlinekeyboard.ime.pinyin.Script.
+
+  Zhuyin was declared here before it existed. It needs its own 37-symbol key layout, which is a
+  keyboard rather than a setting, so the subtype is gone until that layout is. A language the
+  globe key cycles to that then behaves as QWERTY pinyin is worse than one that is absent.
 -->
 <!--
   supportsInlineSuggestions is what makes password managers offer to fill from the suggestion
@@ -19,12 +26,6 @@
         android:imeSubtypeMode="keyboard"
         android:imeSubtypeExtraValue="layout=qwerty"
         android:isAsciiCapable="true" />
-
-    <subtype
-        android:label="@string/subtype_zh_tw_zhuyin"
-        android:imeSubtypeLocale="zh_TW"
-        android:imeSubtypeMode="keyboard"
-        android:imeSubtypeExtraValue="layout=zhuyin,script=traditional" />
 
     <subtype
         android:label="@string/subtype_zh_tw_pinyin"

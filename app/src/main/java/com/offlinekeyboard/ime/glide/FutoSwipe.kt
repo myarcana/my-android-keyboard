@@ -23,6 +23,16 @@ private const val ASSET_DIR = "swipe"
  * view instead of the keys -- there is no error, only quietly worse words. [LayoutGeometry] owns
  * that frame and says why it is the three letter rows and nothing else.
  *
+ * **What comes back is a glided form, not a spelling.** The beam search walks an `ITrie` whose
+ * edges are the 26 letters of the layout, and the built-in trie reconstructs its answer by walking
+ * that same parent chain -- so a word is only ever spelled in the alphabet it was traversed in.
+ * The library anticipates this and leaves a hook for it (`ITrie::get_word` is documented as the
+ * place to "include them here" for apostrophes not on the layout), but the hook is only reachable
+ * from a custom trie: `load_trie_simple`, which is what our JNI patch calls, parses the surface
+ * forms into a local `ParsedCombined` and then keeps only the alpha-forms, dropping the surfaces
+ * when it returns. Restoring the spelling on this side costs a map lookup and needs no native
+ * rebuild -- which matters, because the `.so` is prebuilt and pinned.
+ *
  * The models and the native library are fetched and built rather than committed, so [open]
  * returning null is the ordinary state of a checkout that has not run
  * `tools/fetch_swipe_runtime.sh`. Nothing decodes glides in that state -- gliding types nothing,
@@ -32,6 +42,7 @@ private const val ASSET_DIR = "swipe"
 class FutoSwipe private constructor(
     private val decoder: SwipeDecoder,
     private val dictionary: SwipeTrie,
+    private val lexicon: Lexicon,
 ) : GlideEngine, AutoCloseable {
 
     override val name = "futo"
@@ -65,7 +76,7 @@ class FutoSwipe private constructor(
         return runCatching {
             val results = decoder.recognize(x, y, t, topK = 5)
             lastMicros = decoder.lastTiming().totalUs
-            results.map { it.word }
+            results.flatMap { lexicon.spellings(it.word) }.distinct()
         }.onFailure { Log.w(TAG, "decode failed", it) }.getOrDefault(emptyList())
     }
 
@@ -139,7 +150,7 @@ class FutoSwipe private constructor(
                     lmVocabPath = contextLm?.let { File(it, "vocab.txt").absolutePath },
                 )
                 Log.i(TAG, "loaded: decoder=${swipe.hasDecoder()} lm=${swipe.hasLm()}")
-                FutoSwipe(swipe, trie)
+                FutoSwipe(swipe, trie, lexicon)
             }.onFailure {
                 // UnsatisfiedLinkError included: a build with no native library is a build that
                 // uses the other decoder, not a build that crashes.

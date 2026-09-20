@@ -120,7 +120,7 @@ object InlineAutofill {
      */
     fun chipHeightPx(keyboardWidthPx: Int): Int {
         if (keyboardWidthPx <= 0) return 0
-        val strip = Metrics.stripTouchHeightPx(keyboardWidthPx.toFloat())
+        val strip = Metrics.stripOverlayHeightPx(keyboardWidthPx.toFloat())
         return (strip * (1f - 2 * CHIP_INSET_FRACTION)).toInt()
     }
 }
