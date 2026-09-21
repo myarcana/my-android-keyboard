@@ -1179,6 +1179,13 @@ Two things this exposed, both general:
 - **Up on the first row goes to offset 0** in Firefox (and down on the last to the end). Moved in
   the text, same row -- which is what a scroll looks like, so it set off the repeating edge
   scroll. Landing on the end of the text is now read as the edge.
+- **Its editor bounds are wrong, so they are ignored.** A textarea whose text ran from x=38 to
+  990 reported `editorBounds` of 204..912 after the matrix; in another field the caret sat at
+  x=67 inside reported bounds of 168..596. The row-edge guard stopped left arrows a character
+  inside the phantom left edge, so the marker slid on to the start of the line while the
+  caret stayed put -- the "marker moves, cursor doesn't follow" report. For an editor that
+  needs the borrowed composition, the bounds are treated as absent (left edge 0, right edge
+  learned from a wrap), the same as the test pad.
 
 ### Trackpad gain and acceleration
 

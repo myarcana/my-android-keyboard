@@ -1938,7 +1938,15 @@ class KeyboardService : InputMethodService() {
         pendingVertical = 0
         pendingFromOffset = -1
 
-        info.editorBoundsInfo?.editorBounds?.let { bounds ->
+        if (anchorNeedsComposition) {
+            // Firefox's editor bounds are simply wrong: a textarea whose text ran from x=38 to
+            // 990 was reported as 204..912, and in another the caret sat at x=67 inside bounds
+            // of 168..596. Trusting them held the caret a character inside the phantom left
+            // edge -- every left arrow refused while the marker slid on to the start of the
+            // line. Treat it as an editor that publishes none, like the test pad.
+            editorLeft = 0f
+            editorRight = Float.NaN
+        } else info.editorBoundsInfo?.editorBounds?.let { bounds ->
             val corners = floatArrayOf(bounds.left, bounds.top, bounds.right, bounds.bottom)
             info.matrix.mapPoints(corners)
             editorLeft = corners[0]
