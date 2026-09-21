@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.KeyEvent.KEYCODE_ENTER
@@ -31,6 +32,7 @@ import android.view.inputmethod.InputMethodManager
 import androidx.annotation.RequiresApi
 import com.offlinekeyboard.ime.autofill.InlineAutofill
 import com.offlinekeyboard.ime.autofill.InlineSuggestionStrip
+import com.offlinekeyboard.ime.asr.CommandMerge
 import com.offlinekeyboard.ime.asr.Dictation
 import com.offlinekeyboard.ime.asr.MicrophonePermissionActivity
 import com.offlinekeyboard.ime.asr.SpokenPunctuation
@@ -39,6 +41,8 @@ import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.text.GraphemeCluster
+import com.offlinekeyboard.ime.text.WordBoundary
+import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
@@ -81,6 +85,25 @@ private const val EDGE_SCROLL_FASTEST_MS = 45L
 private const val EDGE_SCROLL_FULL_SPEED_PX = 420f
 
 /**
+ * How long an arrow may go unacknowledged before the chase concludes it moved nothing.
+ *
+ * This is a *clock*, deliberately, and not a count of calls. It used to be three "ticks", but
+ * the chase is driven from two sources -- the caret reports it is actually waiting for, and the
+ * touch moves that pan the marker -- and only the first carries any news. Touch moves arrive
+ * every 8-16ms, so three of them elapse in well under the round trip of sending a key event to
+ * another process and getting CursorAnchorInfo back. The wait therefore expired on the finger
+ * moving rather than on the caret being silent: the pending counters were cleared while the
+ * arrows were still in flight, the next touch event recomputed the same error from the same
+ * stale caretX, and sent it again. That is what detached the caret from the marker and spammed
+ * arrows -- the loop dead-reckoned past the target, then slammed back when the real position
+ * finally arrived.
+ *
+ * Generous on purpose. The cost of waiting too long is one extra round of latency at the very
+ * end of the text; the cost of waiting too little is the thrash above.
+ */
+private const val CHASE_ACK_TIMEOUT_MS = 140L
+
+/**
  * Held backspace. It deletes characters at first, then whole words -- the same acceleration
  * iOS has, and the reason it exists is that a fixed character rate is either too slow to clear
  * a sentence or too fast to stop on the word you meant.
@@ -91,19 +114,26 @@ private const val BACKSPACE_WORD_INTERVAL_MS = 140L
 private const val BACKSPACE_REPEATS_BEFORE_WORDS = 18
 
 /**
- * Text read backwards in one go when clearing a line. A line longer than this is cleared by
- * repeating, so the number only trades IPC calls against the rare very long line.
- */
-private const val BULK_DELETE_CHUNK = 2048
-/** Bounds the clearing loop, so a misbehaving editor cannot spin it forever. */
-private const val BULK_DELETE_MAX_CHUNKS = 64
-
-/**
  * Text read back to size a single backspace. A grapheme cluster is bounded in practice -- the
  * longest emoji in common use is a seven-person ZWJ sequence -- and this leaves ample room for
  * one while keeping the read cheap enough to do on every repeat of a held backspace.
  */
 private const val GRAPHEME_LOOKBEHIND = 32
+
+/**
+ * Text read back to size a swipe-up line delete.
+ *
+ * Far larger than the word and grapheme lookbehinds because a "line" here is a run of text
+ * between newlines, not a visual row, and in a field that soft-wraps -- a message box, a note --
+ * a paragraph someone typed in one go can run to several hundred characters with no break in
+ * it. Reading short would silently clear only part of the line and leave the rest, which looks
+ * like the gesture misfired.
+ *
+ * Bounded rather than unbounded because `getTextBeforeCursor` copies across an IPC boundary and
+ * the editor is free to be slow about it. 1024 covers any line a person types by hand; beyond
+ * that the flick clears what it can reach and a second flick takes the rest.
+ */
+private const val LINE_LOOKBEHIND = 1024
 
 private const val EMOJI_ASSET = "emoji_en.tsv"
 
@@ -266,8 +296,13 @@ class KeyboardService : InputMethodService() {
     /** Arrow keys sent but not yet reflected in a CursorAnchorInfo update. */
     private var pendingHorizontal = 0
     private var pendingVertical = 0
-    /** How long we have waited for that reflection, so an impossible move cannot wedge us. */
-    private var chaseWaitTicks = 0
+    /**
+     * When the outstanding arrows were sent, so an impossible move cannot wedge us.
+     *
+     * Wall clock rather than a count of calls: see [CHASE_ACK_TIMEOUT_MS]. 0 means nothing is
+     * outstanding.
+     */
+    private var pendingSentAt = 0L
     /** Caret offset when the outstanding vertical arrows were sent, to tell moved from stuck. */
     private var pendingFromOffset = -1
 
@@ -420,6 +455,9 @@ class KeyboardService : InputMethodService() {
         override fun onStateChanged(state: Dictation.State) {
             setStatus(when (state) {
                 Dictation.State.IDLE -> null
+                // Opening the microphone takes a moment but not a nameable one: leave whatever
+                // the strip is showing alone rather than flashing a message on its way past.
+                Dictation.State.STARTING -> keyboardView?.status
                 Dictation.State.LOADING -> getString(R.string.dictation_loading)
                 Dictation.State.LISTENING -> getString(R.string.dictation_listening)
                 Dictation.State.TRANSCRIBING -> getString(R.string.dictation_transcribing)
@@ -427,7 +465,10 @@ class KeyboardService : InputMethodService() {
             if (state == Dictation.State.IDLE) refreshCandidates()
         }
 
-        override fun onText(text: String) = commitDictated(text)
+        override fun onText(
+            transcript: CommandMerge.Transcript,
+            detections: List<CommandMerge.Detection>,
+        ) = commitDictated(transcript, detections)
 
         override fun onUnavailable(reason: Dictation.Reason) {
             setStatus(null)
@@ -441,20 +482,45 @@ class KeyboardService : InputMethodService() {
         }
     }
 
+    /**
+     * Starts loading the recogniser before the microphone is ever tapped.
+     *
+     * [Dictation.warmUp] existed for exactly this and nothing called it, so every first tap paid
+     * for a 239 MB model on the spot -- several seconds of a key that looks broken rather than
+     * busy. Called alongside [loadGlideEngine] for the same reason it is: the keyboard coming up
+     * is the last moment that is still free, and both guard themselves against a second call.
+     *
+     * Constructing [Dictation] does not touch the microphone or ask for permission, so warming
+     * an engine the user never invokes costs a load that would otherwise have happened later.
+     */
+    private fun warmUpDictation() {
+        val engine = dictation ?: Dictation(this).also { dictation = it }
+        engine.warmUp()
+    }
+
     private fun toggleDictation() {
         val engine = dictation ?: Dictation(this).also { dictation = it }
         if (engine.state != Dictation.State.IDLE) engine.stop() else engine.start(dictationListener)
     }
 
     /**
-     * Commits one recognised segment.
+     * Commits one recognised segment, with the punctuation commands heard in the same audio.
      *
      * The model returns a clause per pause with no punctuation the speaker did not say, so the
      * spacing between segments is ours to get right: a space between them in Latin script, and
      * none in Chinese, where words do not take one.
+     *
+     * [detections] comes from the keyword spotter rather than the transcript, and carries the
+     * marks the speaker asked for. It is empty when the spotter is unavailable, in which case
+     * [SpokenPunctuation.applyMerged] is exactly the text-only path that shipped before it.
      */
-    private fun commitDictated(raw: String) {
-        val text = SpokenPunctuation.apply(raw, scriptFor(raw))
+    private fun commitDictated(
+        transcript: CommandMerge.Transcript,
+        detections: List<CommandMerge.Detection>,
+    ) {
+        val raw = transcript.text
+        val text = SpokenPunctuation.applyMerged(transcript, detections, scriptFor(raw))
+        logDictated(raw, text)
         if (text.isEmpty()) return
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
@@ -465,6 +531,29 @@ class KeyboardService : InputMethodService() {
         ic.endBatchEdit()
         dictatedAnything = true
         refreshCandidates()
+    }
+
+    /**
+     * Logs what the recogniser said against what was committed.
+     *
+     * The pair is the point. [Dictation] logs the segment it decoded; this logs whether
+     * [SpokenPunctuation] then recognised any of it as a spoken mark. A raw segment containing
+     * "coma" that commits unchanged is a *near-miss* -- the speaker asked for punctuation and
+     * the table did not match -- and those are the lines to collect, because they are what an
+     * alias table would have to cover.
+     *
+     * `marks` counts punctuation in the committed text, which after `stripModelPunctuation` can
+     * only have come from a word the speaker said. Zero marks beside a suspicious raw word is
+     * the signature being hunted.
+     *
+     * Debug-only, and dictated text is private, so this stays off unless explicitly enabled:
+     *
+     *     adb shell setprop log.tag.OfflineKeyboard DEBUG
+     */
+    private fun logDictated(raw: String, committed: String) {
+        if (!Log.isLoggable(TAG, Log.DEBUG)) return
+        val marks = committed.count { it in ",.?!;:\u2014\u2026，。？！；：、" }
+        Log.d(TAG, "raw=[$raw] committed=[$committed] marks=$marks")
     }
 
     private fun isHan(c: Char): Boolean =
@@ -705,6 +794,8 @@ class KeyboardService : InputMethodService() {
         applyLayout()
         loadEmojiIndex()
         loadGlideEngine()
+        warmUpDictation()
+        refreshFlickContext()
         refreshCandidates()
     }
 
@@ -755,6 +846,9 @@ class KeyboardService : InputMethodService() {
                 InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
             )
         }
+        // After the caret bookkeeping above, so the flick prior reads the new position rather
+        // than the one the caret just left.
+        refreshFlickContext()
         if (!trackpadActive) refreshCandidates()
     }
 
@@ -833,6 +927,7 @@ class KeyboardService : InputMethodService() {
                 GestureOutput.BackspaceRepeatStarted -> startBackspaceRepeat()
                 GestureOutput.BackspaceRepeatEnded -> stopBackspaceRepeat()
                 GestureOutput.BulkDelete -> bulkDelete()
+                GestureOutput.DeleteLine -> deleteLine()
                 GestureOutput.DismissKeyboard -> dismissKeyboard()
                 // The board has already moved: KeyboardView owns the state because it owns the
                 // geometry. Nothing to do here but settle the word the flick interrupted, since
@@ -850,6 +945,12 @@ class KeyboardService : InputMethodService() {
                 else -> Unit
             }
         }
+        // Every gesture that types anything has just changed what the caret sits after, and the
+        // next press may arrive before the editor gets round to calling onUpdateSelection --
+        // which on a fast thumb it routinely does. Refreshing here rather than waiting for that
+        // callback is what makes the mid-word rule true of the word actually being typed instead
+        // of the one before it.
+        refreshFlickContext()
     }
 
     private fun commit(text: String) {
@@ -921,14 +1022,19 @@ class KeyboardService : InputMethodService() {
         if (id.length != 1 || id[0] !in 'a'..'z') return false
         if (pending.length >= TapDecoder.MAX_TAPS) flushPending()
 
-        pending.add(out.x, out.y, id[0], upper = shift != ShiftState.OFF)
+        // Resolved against the keys that are on screen *now*, and the geometry is not kept past
+        // this line. A held word can outlive the grid it was typed on -- a rotation, a
+        // split-screen drag, the navigation bar arriving, a one-handed squash -- and re-scoring
+        // stored pixels against a grid that has since moved is what turned an accurately typed
+        // word into a different one. See [TapDecoder.Tap].
+        pending.add(out.x, out.y, id[0], upper = shift != ShiftState.OFF, geometry = geometry)
         // iOS one-shot shift: the next letter is capitalised, then shift releases.
         if (shift == ShiftState.ONE_SHOT) {
             shift = ShiftState.OFF
             applyLayout()
         }
 
-        val text = pending.textFor(decoder.read(pending.taps, geometry))
+        val text = pending.textFor(decoder.read(pending.taps))
         if (pending.hasChanged(text)) {
             // What the field gained or lost, which for a re-reading is both: the composing region
             // is rewritten whole, so the honest account of this gesture is that it removed the
@@ -1288,23 +1394,13 @@ class KeyboardService : InputMethodService() {
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
         if (before.isNullOrEmpty()) return
-        var n = 0
-        while (n < before.length && before[before.length - 1 - n] == ' ') n++
-        while (n < before.length && !before[before.length - 1 - n].isWhitespace()) n++
-        ic.deleteSurroundingText(n.coerceAtLeast(1), 0)
+        // Coerced to 1 so a cursor sitting directly after a line break still makes progress:
+        // the scan stops at the break and would otherwise return 0, leaving a held backspace
+        // spinning against it forever.
+        ic.deleteSurroundingText(WordBoundary.deleteLength(before).coerceAtLeast(1), 0)
         refreshCandidates()
     }
 
-    /**
-     * Requirement 11: hold backspace and swipe up to clear what was typed.
-     *
-     * Clears back to the start of the line -- which in a single-line field, the common case, is
-     * the whole field, since there is no line break to stop at. Starting from the beginning of a
-     * line there is nothing on it to clear, so the gesture takes the line above instead, and
-     * repeating it walks a paragraph away a line at a time. Deleting the entire field outright
-     * from anywhere would be the one gesture on this keyboard that can destroy text the user
-     * cannot see, and there is no undo to answer for it.
-     */
     /**
      * Puts the keyboard away, as a flick down the space bar asks.
      *
@@ -1336,7 +1432,28 @@ class KeyboardService : InputMethodService() {
         squashPrefs().edit().putString(PREF_SQUASH, squash.name).apply()
     }
 
+    /**
+     * Requirement 11: swipe *down* on backspace to delete the word before the cursor.
+     *
+     * The smaller of the two bulk deletes; [deleteLine] is the upward one. What it destroys is
+     * bounded by something the user can see and retype, and repeating the flick walks back a
+     * word at a time.
+     *
+     * A selection is what the user pointed at, so it wins over the word behind the cursor -- the
+     * same precedence a plain backspace uses. Inside a pinyin buffer the word is the syllable
+     * being spelled, so the whole buffer goes rather than committed text behind it.
+     */
     private fun bulkDelete() {
+        // An open pinyin buffer is the word in progress: drop it and stop, so the flick never
+        // reaches past it into text that is already committed.
+        val session = pinyin
+        if (chineseMode && session != null && !session.isEmpty) {
+            session.clear()
+            currentInputConnection?.finishComposingText()
+            refreshCandidates()
+            return
+        }
+
         flushPending()
         val ic = currentInputConnection ?: return
         ic.beginBatchEdit()
@@ -1350,25 +1467,55 @@ class KeyboardService : InputMethodService() {
             return
         }
 
-        var clearedSomething = false
-        for (chunk in 0 until BULK_DELETE_MAX_CHUNKS) {
-            val before = ic.getTextBeforeCursor(BULK_DELETE_CHUNK, 0)
-            if (before.isNullOrEmpty()) break
-            val lineBreak = before.lastIndexOf('\n')
-            val onThisLine = if (lineBreak >= 0) before.length - 1 - lineBreak else before.length
-            if (onThisLine > 0) {
-                ic.deleteSurroundingText(onThisLine, 0)
-                clearedSomething = true
-                // A line break in view means the line's start has been reached; stop there.
-                // Without one the chunk was all one line, so more of it may lie further back.
-                if (lineBreak >= 0) break
-            } else {
-                if (clearedSomething) break
-                // Started at the beginning of a line: step over the break and take the line above.
-                ic.deleteSurroundingText(1, 0)
-            }
+        deleteWordBackwards()
+        ic.endBatchEdit()
+    }
+
+    /**
+     * Swipe up on backspace: delete the line before the cursor.
+     *
+     * The same precedence as [bulkDelete], for the same reasons -- an open pinyin buffer is the
+     * text in progress and goes first, then a selection, because both are narrower than the
+     * line and both are what the user is actually pointing at. Only once neither is there does
+     * the gesture reach committed text, and then it takes everything back to the line break
+     * without crossing it: [WordBoundary.lineDeleteLength] leaves the newline in place so the
+     * cursor stays on a line of its own rather than being pulled up onto the previous one.
+     *
+     * Deliberately *not* coerced to a minimum of 1 the way [deleteWordBackwards] is. That
+     * coercion exists so a held backspace cannot spin forever against a line break; this
+     * gesture is one flick that the user repeats by hand, so a cursor on an empty line simply
+     * does nothing, and the line break above survives until a plain backspace is used on it.
+     */
+    private fun deleteLine() {
+        val session = pinyin
+        if (chineseMode && session != null && !session.isEmpty) {
+            session.clear()
+            currentInputConnection?.finishComposingText()
+            refreshCandidates()
+            return
         }
 
+        flushPending()
+        val ic = currentInputConnection ?: return
+        ic.beginBatchEdit()
+        ic.finishComposingText()
+
+        val selected = ic.getSelectedText(0)
+        if (!selected.isNullOrEmpty()) {
+            ic.commitText("", 1)
+            ic.endBatchEdit()
+            refreshCandidates()
+            return
+        }
+
+        val before = ic.getTextBeforeCursor(LINE_LOOKBEHIND, 0)
+        if (!before.isNullOrEmpty()) {
+            val units = WordBoundary.lineDeleteLength(before)
+            if (units > 0) {
+                ic.deleteSurroundingText(units, 0)
+                deleted(units)
+            }
+        }
         ic.endBatchEdit()
         refreshCandidates()
     }
@@ -1456,6 +1603,35 @@ class KeyboardService : InputMethodService() {
      * to replace the text at the caret, and there is no sane reading of tapping a suggestion
      * while a range is highlighted.
      */
+    /**
+     * Tells the view what the caret is sitting after, for [FlickPrior].
+     *
+     * One character and one boolean, refreshed whenever the caret may have moved. It is
+     * deliberately separate from [refreshCandidates] even though both are driven by the same
+     * events: that one returns early in several places -- no emoji index, a live selection,
+     * Chinese mode -- and each of those returns would silently leave the flick thresholds
+     * reading a caret from some earlier sentence. A gesture threshold going stale is invisible
+     * until it types the wrong thing, so this gets its own path with no early exits.
+     *
+     * A failure to read the editor sets [FlickPrior.Context.UNKNOWN] rather than keeping the
+     * last good answer, for the same reason: an editor that will not say is not evidence that
+     * nothing has changed.
+     */
+    private fun refreshFlickContext() {
+        val view = keyboardView ?: return
+        val ic = currentInputConnection
+        if (ic == null) {
+            view.flickContext = FlickPrior.Context.UNKNOWN
+            return
+        }
+        // The word this keyboard is holding as composing text counts as being mid-word even
+        // though the editor may not have it yet -- it is the strongest evidence available that a
+        // word is in progress, and it is evidence only this side knows about.
+        val composing = !pending.isEmpty
+        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
+        view.flickContext = FlickPrior.Context(before = before, composing = composing)
+    }
+
     private fun refreshCandidates() {
         val view = keyboardView ?: return
         // In Chinese the bar belongs to the pinyin buffer, not to the word behind the caret:
@@ -1617,6 +1793,8 @@ class KeyboardService : InputMethodService() {
         caretTop = Float.NaN
         pendingHorizontal = 0
         pendingVertical = 0
+        pendingSentAt = 0L
+        pendingFromOffset = -1
         verticalStuckDir = 0
         if (anchorNeedsComposition) holdCompositionForAnchor()
         else handler.postDelayed(anchorProbe, ANCHOR_PROBE_MS)
@@ -1934,9 +2112,12 @@ class KeyboardService : InputMethodService() {
             // actually wanted -- the caret moves within the visible text, and only pushes the
             // view when it reaches the edge.
         }
+        // The report has adjudicated whatever was outstanding, so the wait is over and the next
+        // round starts from the position below rather than from dead reckoning.
         pendingHorizontal = 0
         pendingVertical = 0
         pendingFromOffset = -1
+        pendingSentAt = 0L
 
         if (anchorNeedsComposition) {
             // Firefox's editor bounds are simply wrong: a textarea whose text ran from x=38 to
@@ -2031,6 +2212,16 @@ class KeyboardService : InputMethodService() {
         if (trackpadActive && edgeScrollDirection() != 0) handler.post(edgeScrollTick)
     }
 
+    /**
+     * Moves the caret toward the marker.
+     *
+     * Driven from two places: [onUpdateCursorAnchorInfo], which has just learned where the
+     * caret really is, and [panMarker], which only knows the finger moved. Only the first
+     * carries news, which is why the wait for an outstanding arrow is timed on the clock rather
+     * than counted in calls -- see [CHASE_ACK_TIMEOUT_MS]. A touch move arriving mid-flight
+     * finds the deadline unexpired and leaves the loop alone; the correction is recomputed from
+     * a fresh position the moment the report lands.
+     */
     private fun chaseCaret() {
         if (!trackpadActive || caretX.isNaN() || markerX.isNaN()) return
         // Selections are steered by steerSelection, which stores them reversed so the reported
@@ -2041,23 +2232,31 @@ class KeyboardService : InputMethodService() {
         // unconditionally wedges the chase permanently: the caret simply stops following the
         // marker from then on.
         if (pendingHorizontal != 0 || pendingVertical != 0) {
-            if (chaseWaitTicks < 3) {
-                chaseWaitTicks++
-                return
-            }
+            // The wait is measured on the clock, so a touch move may end it -- but only by
+            // observing real elapsed silence, never merely by being one more call. At the very
+            // end of the text no report is ever delivered, so if touch moves could not expire
+            // the wait at all the chase would wedge there permanently.
+            val waited = SystemClock.uptimeMillis() - pendingSentAt
+            if (waited < CHASE_ACK_TIMEOUT_MS) return
             // Timing out *is* the signal that the arrows achieved nothing: a move that changes
             // the caret always reports back. Nothing reported means the caret is against the
             // start or end of the text, which is the only way to learn it -- waiting for an
             // update that will never come would leave the marker free to keep travelling
             // beyond the text, and every pixel of that has to be un-travelled before the caret
             // responds again.
+            //
+            // Only a *silent* timeout means that, though. A report that arrives having moved
+            // the caret clears the counters in onUpdateCursorAnchorInfo before ever reaching
+            // here, so anything still outstanding at this point genuinely went unanswered.
             if (pendingVertical != 0) {
                 verticalStuckDir = if (pendingVertical > 0) 1 else -1
             }
+            trace("CHASE timeout after ${waited}ms pendV=$pendingVertical vStuck=$verticalStuckDir")
             pendingHorizontal = 0
             pendingVertical = 0
+            pendingSentAt = 0L
+            pendingFromOffset = -1
         }
-        chaseWaitTicks = 0
         val meta = 0
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
@@ -2196,6 +2395,10 @@ class KeyboardService : InputMethodService() {
         )
         val ic = currentInputConnection ?: return
         val now = SystemClock.uptimeMillis()
+        // Every arrow, whatever sent it, restarts the clock the chase waits on. Stamped here
+        // rather than at each call site so no path can send a key and forget to arm the wait --
+        // an unarmed wait reads as an instant timeout, which is the thrash this fixes.
+        pendingSentAt = now
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, meta))
         ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, keyCode, 0, meta))
     }

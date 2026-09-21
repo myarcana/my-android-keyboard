@@ -87,4 +87,31 @@ class WordIndexTest {
             widest - index.oovLogPrior <= index.priorRange + 0.0001f,
         )
     }
+
+    /**
+     * No real spelling is ever outbid by an invented one, which is what the floor is *for*.
+     *
+     * This failed for 18,355 of the 40,028 shipped spellings when [WordIndex.oovLogPrior] was the
+     * median word *count* while [WordIndex.logPrior] returns prefix *mass* -- two different
+     * quantities on two different scales, compared as though they were one. The consequence was
+     * not academic: it paid the rescue pass to move a rare word toward nonsense, since inventing
+     * a spelling won prior outright. `aback` lost to a made-up neighbour by 1.5 nats, clearing
+     * [TapDecoder.RESCUE_MARGIN_NATS] on the prior alone.
+     *
+     * The floor is now the rarest mass the lexicon can report, so the worst a real spelling can
+     * do is tie with the unknown one. An unknown spelling stays typable -- that is what keeps
+     * `rhys` and `zamil` working -- it just never wins.
+     */
+    @Test
+    fun `no real spelling scores below an invented one`() {
+        val lexicon = lexicon ?: return
+        val index = WordIndex.of(lexicon)
+        val losers = lexicon.letters.filter {
+            index.logPrior(index.spanOf(it)) < index.oovLogPrior
+        }
+        assertTrue(
+            "${losers.size} real spellings lose to nonsense, e.g. ${losers.take(5)}",
+            losers.isEmpty(),
+        )
+    }
 }

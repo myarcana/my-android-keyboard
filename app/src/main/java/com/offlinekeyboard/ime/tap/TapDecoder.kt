@@ -58,8 +58,57 @@ class TapDecoder(
     private val beamWidth: Int = 24,
 ) {
 
-    /** Where a finger went down, and the key that was drawn under it. */
-    data class Tap(val x: Float, val y: Float, val literal: Char)
+    /**
+     * Where a finger went down, measured against the keys that were on screen at that moment.
+     *
+     * **Not pixels.** A touch point is only meaningful next to the key grid it was aimed at, and
+     * the grid moves: a rotation, a split-screen drag, the navigation bar arriving, a one-handed
+     * squash flick. A pending word outlives all of those, so a [Tap] that stored pixels would be
+     * re-scored against a grid the finger never saw -- every letter offset sideways, and the
+     * decoder faithfully returning the best word for keys nobody pressed. That is not a risk to
+     * be remembered at each call site; it is made unrepresentable here by resolving the geometry
+     * once, at capture, and keeping only the result.
+     *
+     * [offsets] holds, for each letter a-z, how far the touch landed from where a thumb aiming
+     * at that letter is expected to land -- in key widths and key heights, the units
+     * [SpatialModel] scores in. Letters this layout does not have are null. Because every
+     * quantity the model needs is already relative to the keys, nothing downstream can consult a
+     * later geometry even by mistake.
+     */
+    class Tap(
+        /** Per-letter (dx, dy) from the expected landing point, in key widths and heights. */
+        val offsets: Array<FloatArray?>,
+        /** The key drawn under the finger: the reading that must always stay available. */
+        val literal: Char,
+        /** How far the press sat above the nearest letter row, in sigma. For the strip test. */
+        val sigmasAboveLetterRow: Float = 0f,
+    ) {
+        companion object {
+            /**
+             * Resolves a touch point against the keys that are on screen now.
+             *
+             * This is the *only* place a pixel meets a [LayoutGeometry] for tap decoding, which
+             * is what confines the geometry's lifetime to the instant of the press.
+             */
+            fun of(
+                x: Float,
+                y: Float,
+                literal: Char,
+                geometry: LayoutGeometry,
+                model: SpatialModel = SpatialModel(),
+            ): Tap {
+                val offsets = arrayOfNulls<FloatArray>(26)
+                for (i in 0 until 26) {
+                    val rect = geometry.letterKeys[i] ?: continue
+                    offsets[i] = floatArrayOf(
+                        (x - rect.centerX) / geometry.keyUnit - model.offsetX,
+                        (y - rect.centerY) / geometry.keyHeight - model.offsetY,
+                    )
+                }
+                return Tap(offsets, literal, model.sigmasAboveLetterRow(x, y, geometry))
+            }
+        }
+    }
 
     private data class Hypothesis(
         val span: WordIndex.Span,
@@ -75,10 +124,10 @@ class TapDecoder(
      * Null rather than the literal string so the caller can tell "nothing to do" from "this is
      * what I think you meant", and skip re-writing composing text that has not changed.
      */
-    fun read(taps: List<Tap>, geometry: LayoutGeometry): String? {
+    fun read(taps: List<Tap>): String? {
         if (taps.size < MIN_TAPS || taps.size > MAX_TAPS) return null
 
-        val perTap = taps.map { candidatesFor(it, geometry) }
+        val perTap = taps.map { candidatesFor(it) }
         val literal = taps.joinToString("") { it.literal.toString() }
 
         // The overwhelmingly common case: every tap landed somewhere only one letter can explain.
@@ -90,7 +139,7 @@ class TapDecoder(
             decode(perTap) ?: return null
         }
 
-        val settled = rescue(reading, taps, geometry)
+        val settled = rescue(reading, taps)
         return if (settled == literal) null else settled
     }
 
@@ -146,17 +195,17 @@ class TapDecoder(
      * the two failures -- the keyboard says "I don't know what you meant" instead of inventing a
      * confident answer from a word it cannot read.
      */
-    private fun rescue(reading: String, taps: List<Tap>, geometry: LayoutGeometry): String {
+    private fun rescue(reading: String, taps: List<Tap>): String {
         var current = reading
         repeat(MAX_RESCUES) {
-            val improved = rescueOnce(current, taps, geometry) ?: return current
+            val improved = rescueOnce(current, taps) ?: return current
             current = improved
         }
         return current
     }
 
     /** One substitution, or null when no position has a case strong enough to make. */
-    private fun rescueOnce(reading: String, taps: List<Tap>, geometry: LayoutGeometry): String? {
+    private fun rescueOnce(reading: String, taps: List<Tap>): String? {
         val currentPrior = index.logPrior(spanOf(reading))
         var bestWord: String? = null
         var bestGain = RESCUE_MARGIN_NATS
@@ -166,9 +215,9 @@ class TapDecoder(
             // What the touch says about the letter currently read here, on the same refit
             // scatter the alternatives are scored against -- both sides of the subtraction have
             // to be in one measurement for the difference to mean anything.
-            val held = spatial.rescueLogLikelihood(tap.x, tap.y, reading[i], geometry)
+            val held = spatial.rescueLogLikelihood(tap, reading[i])
             val alternatives = spatial.rescueCandidates(
-                tap.x, tap.y, geometry, index.priorRange, RESCUE_REACH_NATS,
+                tap, index.priorRange, RESCUE_REACH_NATS,
             )
             alternatives.forEach { candidate ->
                 if (candidate.letter == reading[i]) return@forEach
@@ -210,12 +259,12 @@ class TapDecoder(
      * unable to return the letter whose key the user visibly pressed, which is the one reading
      * that must never become unavailable.
      */
-    private fun candidatesFor(tap: Tap, geometry: LayoutGeometry): List<SpatialModel.Candidate> {
-        val found = spatial.candidates(tap.x, tap.y, geometry, index.priorRange)
+    private fun candidatesFor(tap: Tap): List<SpatialModel.Candidate> {
+        val found = spatial.candidates(tap, index.priorRange)
         if (found.any { it.letter == tap.literal }) return found
         val literal = SpatialModel.Candidate(
             tap.literal,
-            spatial.logLikelihood(tap.x, tap.y, tap.literal, geometry),
+            spatial.logLikelihood(tap, tap.literal, spatial.sigmaX, spatial.sigmaY),
         )
         return found + literal
     }
@@ -274,12 +323,19 @@ class TapDecoder(
          *
          * The size of this is dictated by the prior, and the prior's gaps are small by
          * construction. A non-word does not score zero; it scores [WordIndex.oovLogPrior], the
-         * deliberately generous "an unknown spelling is an ordinary word" floor that is what lets
-         * `rhys` and `zamil` be typed at all. Measured against the shipped lexicon, `teachers`
-         * beats the non-word `teavhers` by 3.7 nats, `word` beats `wprd` by 5.1, and `it` beats
-         * `ot` by 1.4. Those gaps are the entire budget a correction has to spend, whatever the
-         * touch evidence does, so a margin of 6 would silently switch the feature off -- which is
-         * how this number was arrived at, rather than by preference.
+         * floor that is what lets `rhys` and `zamil` be typed at all. Measured against the
+         * shipped lexicon, `teachers` beats the non-word `teavhers` by 9.3 nats, `word` beats
+         * `wprd` by 10.8, and `it` beats `ot` by 1.4. Those gaps are the entire budget a
+         * correction has to spend, whatever the touch evidence does, and the smallest of them is
+         * what forbids a large margin -- which is how this number was arrived at, rather than by
+         * preference.
+         *
+         * The word-against-non-word gaps above are wider than they once were, and deliberately
+         * so: the floor used to be the median *word count* compared against *prefix mass*, two
+         * different quantities, which put a made-up spelling above 45.9% of the real lexicon and
+         * paid the pass to move rare words toward nonsense. The gaps between two *real* readings,
+         * such as `it` and `ot`, are unchanged -- those are the ones this margin is sized
+         * against, and they are the cases where declining is the right answer.
          *
          * 1.0 nat is a prior ratio of about 2.7:1: enough that a coin-flip never rewrites text,
          * small enough to fit inside gaps this size. The real protection against over-correction

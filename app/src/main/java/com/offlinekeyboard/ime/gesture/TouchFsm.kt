@@ -7,6 +7,7 @@ import com.offlinekeyboard.ime.layout.LayoutGeometry
 import com.offlinekeyboard.ime.layout.PopupEntry
 import com.offlinekeyboard.ime.layout.PopupGrid
 import kotlin.math.abs
+import kotlin.math.exp
 import kotlin.math.hypot
 import kotlin.math.roundToInt
 
@@ -128,9 +129,10 @@ data class GestureConfig(
      */
     val flickToGlideRatio: Float = 2.5f,
     /**
-     * Upward travel on backspace that clears the line, as a fraction of key height. Larger than
-     * [flickDistanceRatio] because this gesture destroys text: a thumb drifting off the key
-     * must not trigger it, and there is nothing to undo it with.
+     * Vertical travel on backspace that deletes in bulk -- the line above the cursor on an
+     * upward stroke, the word behind it on a downward one -- as a fraction of key height.
+     * Larger than [flickDistanceRatio] because these gestures destroy text: a thumb drifting
+     * off the key must not trigger them, and there is nothing to undo them with.
      */
     val bulkDeleteDistanceRatio: Float = 0.8f,
     /**
@@ -246,6 +248,34 @@ data class GestureConfig(
      * keyboard is a key width or more away far more often than not.
      */
     val glideResumeRadiusRatio: Float = 1.25f,
+    /**
+     * How far one nat of [FlickPrior] bias may move the flick thresholds, as a fraction.
+     *
+     * The prior is a belief about which reading is likelier *before* the finger has moved; the
+     * thresholds are how much movement is demanded as proof. This is the exchange rate between
+     * them, and it is one number rather than one per threshold so that the two axes cannot drift
+     * into disagreeing about how much a nat is worth.
+     *
+     * 0.22 makes the [FlickPrior.Weights.noRoomBelow] case -- a bottom-row key with nothing under
+     * it -- ask for roughly half the usual downward travel, and the mid-word penalty ask for
+     * about a fifth more. Both are inside the range the bank scored flat across (every value from
+     * 0.02 to 0.12 of [flickDistanceRatio] classified all 286 samples identically), which is the
+     * point: the prior is moving the threshold within the region the evidence could not separate,
+     * not overruling a boundary the evidence drew.
+     */
+    val flickPriorGain: Float = 0.22f,
+    /**
+     * The band the prior may move the thresholds inside, as multiples of their configured value.
+     *
+     * A clamp, not a preference, and it is the safety property of this whole mechanism. Whatever
+     * the prior believes, a flick still has to be a real downward stroke and a glide still has to
+     * be able to escape: no context can drive the required travel to zero, where a resting thumb
+     * would type symbols, nor to infinity, where the gesture would stop existing. The bounds are
+     * asymmetric because the failures are: a flick that does not register is retried, while a
+     * flick that fires on a drifting thumb corrupts text the user was not looking at.
+     */
+    val flickPriorMinScale: Float = 0.45f,
+    val flickPriorMaxScale: Float = 2.2f,
 )
 
 sealed interface GestureOutput {
@@ -320,8 +350,18 @@ sealed interface GestureOutput {
     data object BackspaceRepeatStarted : GestureOutput
     data object BackspaceRepeatEnded : GestureOutput
 
-    /** Swipe up on backspace: clear the line, or the whole field if it has only one. */
+    /** Swipe down on backspace: delete the word before the cursor. */
     data object BulkDelete : GestureOutput
+
+    /**
+     * Swipe up on backspace: delete the whole line before the cursor.
+     *
+     * The larger of the two destructive backspace gestures, and upward because that is the
+     * direction that takes the finger *off* the board rather than further into it: a downward
+     * stroke from backspace ends near the screen edge where a thumb naturally lands, so the
+     * cheaper delete is the one that lives there.
+     */
+    data object DeleteLine : GestureOutput
 
     /** Swipe down on the space bar: put the keyboard away. */
     data object DismissKeyboard : GestureOutput
@@ -383,7 +423,10 @@ enum class GestureState {
     TRACKPAD,
     SELECTING,
 
-    /** Backspace held down, deleting repeatedly. An upward swipe from here clears the line. */
+    /**
+     * Backspace held down, deleting repeatedly. A swipe from here deletes in bulk: up takes the
+     * line above the cursor, down takes the word behind it.
+     */
     BACKSPACE,
 
     /**
@@ -404,6 +447,26 @@ enum class GestureState {
 class TouchFsm(
     private val geometry: LayoutGeometry,
     private val config: GestureConfig = GestureConfig(),
+    /**
+     * Scores how plausible a flick is from a given key in a given context. See [FlickPrior].
+     *
+     * Injected with a default so every existing caller -- and every replay of the bank -- keeps
+     * working unchanged, and so a test can hand in a prior with all its weights at zero to get
+     * exactly the old machine back.
+     */
+    private val prior: FlickPrior = FlickPrior(),
+    /**
+     * What the editor looked like when the finger went down.
+     *
+     * Passed at construction rather than read during the gesture because the machine has no way
+     * to reach an editor and must not grow one: it is pure so that a recorded path replays to
+     * the same verdict on a laptop years later. The host builds this once per press.
+     *
+     * Defaults to [FlickPrior.Context.UNKNOWN], under which every context-dependent term
+     * abstains -- so a host that has not been taught to supply it behaves exactly as before
+     * rather than under some half-informed guess.
+     */
+    private val context: FlickPrior.Context = FlickPrior.Context.UNKNOWN,
 ) {
     var state: GestureState = GestureState.IDLE
         private set
@@ -422,8 +485,70 @@ class TouchFsm(
     /** Where and when the finger left the glass, while a glide is suspended. */
     private var lift: PathPoint? = null
 
-    private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight
+    /**
+     * The downward travel this gesture must show to be a flick, in pixels.
+     *
+     * Not a constant any more: it is [GestureConfig.flickDistanceRatio] scaled by what
+     * [FlickPrior] makes of the key the finger is on and the caret it is typing at. A stroke
+     * down from the bottom row, where no word can follow, is asked for less proof; a stroke made
+     * in the middle of a word is asked for more.
+     *
+     * Everything downstream reads this rather than the raw ratio, so the arming test, the
+     * animation and the release check all move together. Two of those reading a scaled threshold
+     * and the third reading the configured one is how a gesture comes to commit a symbol the
+     * animation never showed.
+     */
+    private val flickDistance get() = config.flickDistanceRatio * geometry.keyHeight * flickScale
+
+    /**
+     * How much more vertical than horizontal a stroke must be to read as a flick.
+     *
+     * Scaled by the same multiplier as the distance, because it is the same question asked on the
+     * other axis: [GestureConfig.verticalDominance] is what separates a flick on `o` from gliding
+     * `ok`, and on a key where no `ok` is possible there is nothing for it to separate. A
+     * bottom-row flick that hooks sideways at the lift -- which the bank says real flicks do,
+     * several through 80 degrees -- should not be refused for want of a competing reading.
+     *
+     * It moves in the same direction as the distance, not the opposite one. Both are demands for
+     * proof, so a prior that says "less proof needed" must relax both; relaxing one while
+     * tightening the other would leave the total difficulty roughly unchanged and make the whole
+     * mechanism a no-op that looks like it is working.
+     */
+    private val verticalDominance get() = config.verticalDominance * flickScale
+
+    /**
+     * The glyph travel, deliberately *not* scaled.
+     *
+     * [GestureConfig.flickTravelRatio] is not a threshold and decides nothing -- it is the
+     * distance the symbol has to slide to reach the letter's place, which is a fact about where
+     * the view draws glyphs. Scaling it by a belief about the user's intent would make the
+     * animation run at different speeds in different sentences, which is the one thing a direct
+     * manipulation must never do: the symbol is supposed to sit under the thumb and be dragged.
+     */
     private val flickTravel get() = config.flickTravelRatio * geometry.keyHeight
+
+    /**
+     * How much harder or easier this key's flick is, as a multiple of the configured thresholds.
+     *
+     * Below 1 means the prior favours a flick, so less travel is demanded. Above 1 means it
+     * favours a word or a tap, so more is. Computed once per gesture at the press, and cached:
+     * it depends on the origin key and the context, neither of which can change while a finger
+     * is down, so recomputing it per move sample would burn work to get the same answer.
+     */
+    private var flickScale = 1f
+
+    /**
+     * Turns nats of bias into a threshold multiplier.
+     *
+     * Exponential rather than linear, and that is what makes the nats mean something: a bias is a
+     * log-odds, so adding a constant number of nats should multiply the demanded evidence by a
+     * constant factor, whatever the starting point. A linear map would make the same nat worth
+     * more at one end of the range than the other and would need a separate rule to stop it going
+     * negative.
+     */
+    private fun scaleFor(bias: Float): Float =
+        exp(-bias * config.flickPriorGain)
+            .coerceIn(config.flickPriorMinScale, config.flickPriorMaxScale)
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
     private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
@@ -494,7 +619,7 @@ class TouchFsm(
             // hook through 80 degrees at the lift, and the symbol must not fly home because the
             // thumb rolled sideways on its way off the glass.
             if (state == GestureState.PRESSED &&
-                dy <= config.verticalDominance * abs(now.x - start.x)
+                dy <= verticalDominance * abs(now.x - start.x)
             ) {
                 return 0f
             }
@@ -507,6 +632,10 @@ class TouchFsm(
         // the person meant, not one to throw away. See LayoutGeometry.keyForPress.
         val key = geometry.keyForPress(x, y) ?: return emptyList()
         origin = key
+        // Once per press, for the whole gesture. The key is now known and the context cannot
+        // change under a finger that is already down, so this is the moment the answer exists
+        // and the last moment it can change.
+        flickScale = scaleFor(prior.bias(key, geometry, context))
         val p = PathPoint(x, y, t)
         down = p
         path += p
@@ -580,7 +709,7 @@ class TouchFsm(
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x, y)
             GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
-            GestureState.BACKSPACE -> bulkDeleteIfSwipedUp(dy)
+            GestureState.BACKSPACE -> bulkDeleteIfSwiped(dy)
             GestureState.GLIDE_LIFTED, GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
     }
@@ -588,12 +717,12 @@ class TouchFsm(
     private fun onMoveWhilePressed(dx: Float, dy: Float): List<GestureOutput> {
         val key = origin ?: return emptyList()
         val isDownward = dy > 0
-        val verticallyDominant = abs(dy) > config.verticalDominance * abs(dx)
+        val verticallyDominant = abs(dy) > verticalDominance * abs(dx)
 
         if (key.key.type == KeyType.BACKSPACE) {
-            // The requirement is "hold, then swipe up", but a swipe up without the hold means
-            // the same thing and there is nothing else an upward swipe from backspace could be.
-            return bulkDeleteIfSwipedUp(dy)
+            // The requirement is "hold, then swipe", but a swipe without the hold means the same
+            // thing and there is nothing else a vertical swipe from backspace could be.
+            return bulkDeleteIfSwiped(dy)
         }
         if (key.key.type == KeyType.SPACE) return spaceFlick(dx, dy)
         if (isDownward && verticallyDominant && abs(dy) > flickDistance && key.key.secondary != null) {
@@ -609,17 +738,27 @@ class TouchFsm(
     }
 
     /**
-     * Clears the line, once. The gesture goes SPENT rather than back to PRESSED so that lifting
-     * the finger afterwards does not also delete a character, and so a wobbling finger that
-     * crosses the threshold repeatedly cannot clear line after line.
+     * Deletes the line above the cursor on an upward swipe, the word behind it on a downward
+     * one, once. The gesture goes SPENT rather than back to PRESSED so that lifting the finger
+     * afterwards does not also delete a character, and so a wobbling finger that crosses the
+     * threshold repeatedly cannot eat word after word.
+     *
+     * Both directions share [bulkDeleteDistance]: they are the same stroke on the same key and
+     * carry the same risk, so they ask the same commitment of the finger. Which one fires is
+     * decided by the sign of [dy] alone -- backspace has no secondary and no popup, so there is
+     * nothing else a vertical stroke from it could be competing with.
      */
-    private fun bulkDeleteIfSwipedUp(dy: Float): List<GestureOutput> {
-        if (dy > -bulkDeleteDistance) return emptyList()
+    private fun bulkDeleteIfSwiped(dy: Float): List<GestureOutput> {
+        val output = when {
+            dy <= -bulkDeleteDistance -> GestureOutput.DeleteLine
+            dy >= bulkDeleteDistance -> GestureOutput.BulkDelete
+            else -> return emptyList()
+        }
         val wasRepeating = state == GestureState.BACKSPACE
         state = GestureState.SPENT
         return buildList {
             if (wasRepeating) add(GestureOutput.BackspaceRepeatEnded)
-            add(GestureOutput.BulkDelete)
+            add(output)
         }
     }
 
@@ -627,7 +766,7 @@ class TouchFsm(
      * The three things a drag from the space bar can mean, decided in one place.
      *
      * Down puts the keyboard away; left and right squash the board toward that edge. All three
-     * go SPENT rather than back to PRESSED, for the reason [bulkDeleteIfSwipedUp] does: the
+     * go SPENT rather than back to PRESSED, for the reason [bulkDeleteIfSwiped] does: the
      * gesture has already done its work, and lifting afterwards must not also type a space.
      * SPENT is what makes each of these happen once however much the finger wobbles across the
      * threshold on its way off the glass.
@@ -991,6 +1130,10 @@ class TouchFsm(
         accentIndex = 0
         trackpadAnchor = null
         trackpadSpeed = 0f
+        // Back to neutral rather than to the last gesture's value: between gestures there is no
+        // origin key to have an opinion about, and a stale multiplier would be applied to the
+        // next press for the few events before onDown recomputes it.
+        flickScale = 1f
         strokeStarts.clear()
         lift = null
     }

@@ -62,6 +62,22 @@ class SpatialModel(
         val rect = geometry.letterKeys.getOrNull(letter - 'a') ?: return NEVER
         val dx = (x - rect.centerX) / geometry.keyUnit - offsetX
         val dy = (y - rect.centerY) / geometry.keyHeight - offsetY
+        return logLikelihood(dx, dy, sx, sy)
+    }
+
+    /**
+     * The same, from an offset [TapDecoder.Tap] already resolved against the keys the finger saw.
+     *
+     * This is the form the decoder uses. The pixels and the key rectangles were consumed at the
+     * moment of the press, so a held word can no longer be re-scored against a grid that has
+     * since moved -- see [TapDecoder.Tap].
+     */
+    fun logLikelihood(tap: TapDecoder.Tap, letter: Char, sx: Float, sy: Float): Float {
+        val d = tap.offsets.getOrNull(letter - 'a') ?: return NEVER
+        return logLikelihood(d[0], d[1], sx, sy)
+    }
+
+    private fun logLikelihood(dx: Float, dy: Float, sx: Float, sy: Float): Float {
         val zx = dx / sx
         val zy = dy / sy
         return -0.5f * (zx * zx + zy * zy)
@@ -92,6 +108,10 @@ class SpatialModel(
     fun rescueLogLikelihood(x: Float, y: Float, letter: Char, geometry: LayoutGeometry): Float =
         logLikelihood(x, y, letter, geometry, rescueSigmaX, rescueSigmaY)
 
+    /** The same, from a [TapDecoder.Tap] already resolved against the keys the finger saw. */
+    fun rescueLogLikelihood(tap: TapDecoder.Tap, letter: Char): Float =
+        logLikelihood(tap, letter, rescueSigmaX, rescueSigmaY)
+
     /**
      * The letters this tap could plausibly have meant, best first.
      *
@@ -102,31 +122,15 @@ class SpatialModel(
      * standing is therefore *pinned* -- it has no alternative reading and cannot be revised, which
      * is what keeps accurate typing from ever visibly changing under the finger.
      *
-     * On the measured sigmas, and the shipped lexicon's range of 13.0 nats, that band reaches
-     * 0.41 of a key width and 0.45 of a key height from where the thumb is expected to land --
-     * past the far edge of the drawn key in both directions. Only genuinely borderline taps, on
-     * the edge of a key or in the channel between two rows, come back with anything to decide.
+     * On the measured sigmas, and the shipped lexicon's range of 18.6 nats, that band reaches
+     * 0.34 of a key width and 0.38 of a key height from where the thumb is expected to land --
+     * still past the edge of the drawn key in both directions. Only genuinely borderline taps,
+     * on the edge of a key or in the channel between two rows, come back with anything to decide.
+     * A dead-centre press holds 45 nats over its sideways neighbour and 47 over the row above,
+     * so it is pinned with room to spare.
      */
-    fun candidates(
-        x: Float,
-        y: Float,
-        geometry: LayoutGeometry,
-        priorRange: Float,
-    ): List<Candidate> {
-        val all = ArrayList<Candidate>(4)
-        var best = NEVER
-        for (i in 0 until 26) {
-            if (geometry.letterKeys[i] == null) continue
-            val letter = 'a' + i
-            val score = logLikelihood(x, y, letter, geometry)
-            if (score > best) best = score
-            all += Candidate(letter, score)
-        }
-        val floor = best - priorRange
-        all.retainAll { it.logLikelihood >= floor }
-        all.sortByDescending { it.logLikelihood }
-        return all
-    }
+    fun candidates(tap: TapDecoder.Tap, priorRange: Float): List<Candidate> =
+        band(tap, priorRange, sigmaX, sigmaY)
 
     /**
      * The letters a tap could have meant if its *neighbours* vouch for it, best first.
@@ -151,23 +155,29 @@ class SpatialModel(
      * the first candidate on a tie gets the letter the user actually pressed.
      */
     fun rescueCandidates(
-        x: Float,
-        y: Float,
-        geometry: LayoutGeometry,
+        tap: TapDecoder.Tap,
         priorRange: Float,
         extraNats: Float,
+    ): List<Candidate> =
+        band(tap, priorRange + extraNats.coerceAtLeast(0f), rescueSigmaX, rescueSigmaY)
+
+    /** The letters within [width] nats of the best explanation of [tap], best first. */
+    private fun band(
+        tap: TapDecoder.Tap,
+        width: Float,
+        sx: Float,
+        sy: Float,
     ): List<Candidate> {
-        val floorWidth = priorRange + extraNats.coerceAtLeast(0f)
         val all = ArrayList<Candidate>(6)
         var best = NEVER
         for (i in 0 until 26) {
-            if (geometry.letterKeys[i] == null) continue
+            if (tap.offsets[i] == null) continue
             val letter = 'a' + i
-            val score = rescueLogLikelihood(x, y, letter, geometry)
+            val score = logLikelihood(tap, letter, sx, sy)
             if (score > best) best = score
             all += Candidate(letter, score)
         }
-        val floor = best - floorWidth
+        val floor = best - width
         all.retainAll { it.logLikelihood >= floor }
         all.sortByDescending { it.logLikelihood }
         return all

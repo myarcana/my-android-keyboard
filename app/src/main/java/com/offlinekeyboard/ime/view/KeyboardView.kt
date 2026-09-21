@@ -23,6 +23,7 @@ import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.TouchTrace
+import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.gesture.GestureState
@@ -300,6 +301,24 @@ class KeyboardView @JvmOverloads constructor(
 
     private var geometry: LayoutGeometry? = null
     private val config = GestureConfig()
+
+    /** Scores how plausible a flick is from a given key in a given context. See [FlickPrior]. */
+    private val flickPrior = FlickPrior()
+
+    /**
+     * What the editor looks like right now, for [FlickPrior].
+     *
+     * Set by the service whenever the caret moves, and read once per press. A property rather
+     * than a callback for the same reason [squash] is one: the view owns the touch stream and
+     * needs the answer synchronously at ACTION_DOWN, and reaching back into the service at that
+     * moment would put an editor round-trip inside the gesture path.
+     *
+     * Defaults to [FlickPrior.Context.UNKNOWN], so a service that has not set it -- or one whose
+     * editor declined to answer -- gets the thresholds the machine has always had rather than a
+     * guess made on its behalf.
+     */
+    var flickContext: FlickPrior.Context = FlickPrior.Context.UNKNOWN
+
     private val uiHandler = Handler(Looper.getMainLooper())
 
     private val pointers = mutableMapOf<Int, TouchFsm>()
@@ -1202,7 +1221,7 @@ class KeyboardView @JvmOverloads constructor(
                         "  down id=$id -> new press on " +
                             "${g.keyForPress(event.getX(i), event.getY(i))?.key?.id}",
                     )
-                    val fsm = TouchFsm(g, config)
+                    val fsm = TouchFsm(g, config, flickPrior, flickContext)
                     pointers[id] = fsm
                     emit(fsm.onDown(event.getX(i), event.getY(i), event.eventTime))
                     scheduleLongPress(id, fsm)

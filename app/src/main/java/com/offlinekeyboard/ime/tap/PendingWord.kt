@@ -1,5 +1,7 @@
 package com.offlinekeyboard.ime.tap
 
+import com.offlinekeyboard.ime.layout.LayoutGeometry
+
 /**
  * The run of letter taps that has not been settled yet, and the text it currently reads as.
  *
@@ -32,11 +34,22 @@ class PendingWord {
     val taps: List<TapDecoder.Tap> get() = entries.map { it.tap }
 
     /**
-     * Adds a letter tap. [literal] is the key drawn under the finger; [upper] is whether shift
-     * had it capitalised at the moment it was pressed.
+     * Adds a letter tap, resolved against the keys that were on screen when it was pressed.
+     *
+     * The geometry is consumed here and not kept. A pending word can outlive the key grid it was
+     * typed on -- a rotation, a split-screen drag, the navigation bar arriving, a one-handed
+     * squash -- and a buffer holding raw pixels would be silently re-scored against whatever grid
+     * happened to be current at the next keystroke. See [TapDecoder.Tap].
      */
-    fun add(x: Float, y: Float, literal: Char, upper: Boolean) {
-        entries += Entry(TapDecoder.Tap(x, y, literal), upper)
+    fun add(
+        x: Float,
+        y: Float,
+        literal: Char,
+        upper: Boolean,
+        geometry: LayoutGeometry,
+        model: SpatialModel = SpatialModel(),
+    ) {
+        entries += Entry(TapDecoder.Tap.of(x, y, literal, geometry, model), upper)
     }
 
     /**

@@ -269,10 +269,11 @@ to. "Rhys" typed accurately comes out as "Rhys" no matter how much likelier "Thi
 
 **A tap is pinned when the touch evidence against every other letter exceeds the entire dynamic
 range of the language model.** That range is not a tuned number: it is the whole corpus against
-one ordinary word, read off the lexicon at 13.0 nats. Past it, no word in the dictionary, however
-common, could buy the alternative back. On the measured sigmas that band reaches 0.41 of a key
-width and 0.45 of a key height from the aim point -- past the far edge of the drawn key in both
-directions. Ordinary typing pins every tap and the decoder never runs at all.
+the rarest thing the lexicon can say, read off the lexicon at 18.6 nats. Past it, no word in the
+dictionary, however common, could buy the alternative back. On the measured sigmas that band
+reaches 0.34 of a key width and 0.38 of a key height from the aim point -- still past the edge of
+the drawn key in both directions. Ordinary typing pins every tap and the decoder never runs at
+all. A dead-centre press holds 45 nats over its sideways neighbour and 47 over the row above.
 
 The scoring underneath has no thumb on the scale. `ln P(touch | letters)` from the spatial model,
 plus `ln P(letters)` from the lexicon, both in nats, both real. The literal reading gets no bonus
@@ -314,14 +315,25 @@ in the sense that matters.
 
 **Building it turned up a hard numeric wall, and the wall is the interesting part.** The prior gaps
 available to argue for a correction are tiny, because a non-word does not score zero -- it scores
-`oovLogPrior`, the deliberately generous floor that is what lets `rhys` be typed. Measured against
-the shipped lexicon:
+`oovLogPrior`, the floor that is what lets `rhys` be typed. Measured against the shipped lexicon:
 
 | correction | prior gain |
 |---|---|
-| `teavhers` → `teachers` | 3.7 nats |
-| `wprd` → `word` | 5.1 nats |
+| `teavhers` → `teachers` | 9.3 nats |
+| `wprd` → `word` | 10.8 nats |
 | `ot` → `it` | 1.4 nats |
+
+The first two are wider than they were, and the reason is a bug that sat in the floor itself.
+`oovLogPrior` was the median word *count*, but `logPrior` returns prefix *mass* -- the summed count
+of every word starting with a prefix. Two different quantities on two different scales, compared as
+though they were one, and the floor landed above the prefix mass of **18,355 of the 40,028 shipped
+spellings**. A made-up spelling therefore beat 45.9% of the real lexicon on prior alone, which is
+the one direction that actively hurts: it paid the rescue pass to move a rare real word *toward*
+nonsense. `aback` lost to an invented neighbour by 1.5 nats, clearing `RESCUE_MARGIN_NATS` without
+the touch term having any say. The floor is now the rarest mass the lexicon can report, so an
+unknown spelling ties with the least likely known one and never wins; `WordIndexTest` asserts that
+no real spelling scores below an invented one. Note what did *not* move: `ot` → `it` is a gap
+between two *real* readings, and those are exactly the cases the margin is sized against.
 
 Against that, at the shipped `sigma_x` of 0.122 the touch cost of moving a letter one key is 45.3
 nats dead-centre, and it crosses zero at drift 0.445 -- which is *also* where `keyForPress` flips
@@ -636,18 +648,60 @@ with the query. It fixes "birthday" (the cake, not the party popper) and breaks 
 "love", which both stop finding ❤️ and offer the heart *suit* instead. Two of the most-typed
 words in the language outrank one; frequency alone is the better rule.
 
-### Clearing the line, not the field
+### Deleting a word or a line, never the field
 
-Swipe up on backspace clears back to the start of the line. In a single-line field -- the
-common case -- there is no line break to stop at, so that is the whole field, which is what the
-requirement asks for. Starting from the beginning of a line there is nothing on it to clear, so
-it takes the line above instead, and repeating the gesture walks a paragraph away a line at a
-time.
+Backspace carries both bulk deletes, told apart by the direction of the swipe: **down** takes the
+word before the cursor, **up** clears back to the start of the line. Repeating either walks
+backwards a unit at a time.
 
-Deleting the entire field outright from anywhere was the first design and it is a trap: it is
-the only gesture on this keyboard that can destroy text the user cannot currently see, and
-there is no undo to answer for it. The threshold is also deliberately larger than the flick
-threshold (0.8 vs 0.45 key heights) -- a thumb drifting up off the key must not fire it.
+The word delete takes any run of spaces immediately behind the cursor, then the non-whitespace
+behind them. The line delete takes everything back to the newline and leaves the newline itself.
+
+The history matters, because the line-clear was removed once and has now come back. Deleting the
+*entire field* was the first design and is a trap: it is the only gesture here that can destroy
+text the user cannot currently see, and there is no undo. Clearing to the *start of the line* was
+the second, and was rejected as the same trap wearing a hat -- in a single-line field, the common
+case, there is no line break to stop at, so "the line" is once again the whole field. The third
+design kept only the word.
+
+The fourth, current design restores the line-clear as a *separate direction* rather than as a
+replacement, which is what answers the old objection. The argument against it was never that
+clearing a line is not worth doing -- it is that it should not be the thing a single easy flick
+does by accident when a word was meant. Giving each unit its own direction means the cheap,
+frequent delete and the expensive, rare one can no longer be confused for one another, and the
+one that destroys more is the one that requires deliberately stroking *up*, away from the board.
+The single-line-field concern is unchanged and accepted: in such a field the up-swipe does clear
+everything, which is now what the user asked for by choosing that direction over the other.
+
+Details that are easy to get wrong:
+
+- **Up and down share one distance threshold.** Same key, same stroke, same risk; only the sign
+  of the travel differs. Backspace has no secondary and no popup, so nothing else competes for a
+  vertical swipe from it.
+- **One delete per gesture, either kind.** The state machine goes SPENT the moment either fires,
+  so a finger that crosses up and swings back down does not also trigger the other, and a wobble
+  cannot eat word after word.
+- **The line delete keeps the newline.** Taking it too would pull the cursor onto the line above
+  and join two lines nobody asked to join. A cursor already on an empty line therefore deletes
+  nothing -- and unlike the held backspace, it is *not* coerced to make progress, because this
+  gesture is repeated by hand rather than by a timer that would spin forever against the break.
+
+- **It stops at a line break.** A word delete pauses at the start of each line rather than
+  joining it to the line above. Structure is the one thing here that retyping the word does not
+  put back.
+- **Spaces behind the deleted word survive.** `"hello   world   "` leaves `"hello   "` -- those
+  spaces were typed deliberately and are not part of the word.
+- **A selection wins, and an open pinyin buffer wins first.** Same precedence a plain backspace
+  uses: the selection is what the user pointed at, and inside a pinyin buffer the "word" is the
+  syllable being spelled, so the buffer goes rather than committed text behind it.
+
+The scan lives in `text/WordBoundary.kt` rather than in the service, for the reason
+`GraphemeCluster` does: it is the part worth testing, and `KeyboardService` cannot be
+instantiated in a JVM unit test. The held-backspace acceleration shares it, so the two gestures
+that delete a word cannot drift apart.
+
+The threshold stays deliberately larger than the flick threshold (0.8 vs 0.45 key heights) -- a
+thumb drifting up off the key must not fire it.
 
 ### The bar reads the editor, it does not remember what was typed
 
@@ -1029,6 +1083,60 @@ Note that the harness check cannot tell an intentional change from drift. The lo
 one recorded ACCENT replay as GLIDE, which is the fix working; a threshold moving under your feet
 would look identical in that report. Read the disagreements, do not just count them.
 
+### The flick threshold is not one number, it is one number per sentence — `gesture/FlickPrior`
+
+The four thresholds above are the same on every key and at every moment. The second half of that
+is the weaker claim: a downward stroke made after a space and the same stroke made in the middle
+of a word are not equally likely to have been a digit, and nothing in the machine knew it.
+
+`FlickPrior` returns a **log-odds bias in nats**, and `TouchFsm` spends it by scaling
+`flickDistanceRatio` and `verticalDominance` together, clamped to 0.45×–2.2×. Nats because
+`SpatialModel` and `WordIndex` already reason in them; a second, differently-scaled notion of
+confidence in the same keyboard is how two numbers that look comparable quietly stop being so.
+The scaling is exponential, so a constant number of nats multiplies the demanded evidence by a
+constant factor wherever it starts from. Both axes move together: they are two demands for the
+same proof, and relaxing one while tightening the other would leave the difficulty unchanged and
+make the whole mechanism a no-op that looks like it is working.
+
+| term | nats | when |
+|---|---|---|
+| `afterDigit` | +1.6 | the caret sits after a digit — typing `18` |
+| `wordInternalSymbol` | +1.1 | `'` and `-`, which cancel the mid-word penalty |
+| `boundaryDigit` | +0.7 | a digit wanted after a space or punctuation |
+| `midWord` | −0.9 | letters behind the caret, or a word being composed |
+| `noRoomBelow`, `roomBelow` | 0 | see below |
+
+The apostrophe exemption is not a nicety. `'` is the symbol most often wanted mid-word — `don't`,
+`it's`, `I'm` — so the context that makes `$` implausible is the exact context an apostrophe is
+*for*. Without it the mid-word rule would make the commonest flick in English harder, and the
+collision drill would never notice, because it types `'` from a standing start.
+
+**The per-key terms were the original idea, and the bank threw them out.** The argument was good:
+nothing can be glided downward out of `m`, so a stroke there has no competing reading, while `i`
+has `I'm` and `in` hanging under it. The measurement disagreed. Real flicks in the bank travel
+**0.13 to 1.05 key heights** against a threshold of 0.025 — distance is not the binding constraint
+on any key, so loosening it on `m` rescued nothing and tightening it on `i` only refused good
+flicks. Turned on, the two terms moved five recorded gestures and made **all five wrong** (`a`,
+`e`, `o`), while `m` did not move at all.
+
+The six missing `m` flicks this file cites above went missing at `flickDistanceRatio` **0.45**,
+eighteen times the current value, and were fixed by lowering it. Four `m` records still replay as
+taps, and they are not evidence of anything: their press coordinates land on `return` and `space`
+in today's geometry, so they were recorded on a layout this build no longer has.
+
+The terms are still in `Weights`, defaulted to zero, with the measurement beside them. A disproved
+term kept visible and inert is cheaper than rediscovering the argument and re-collecting the
+evidence — and the mechanism reads the room below a key from `LayoutGeometry` rather than from a
+row index, so it stays correct on a squashed board and is ready if a threshold ever does bind
+there.
+
+**The bank cannot score the half that survived.** A recorded path has no caret behind it, so
+`GestureReplay` replays under `NO_PRIOR` — every weight zero — which is the only honest way to
+reproduce a verdict reached by a build that had no prior. `reportFlickPrior` prints the shipped
+prior's score beside it and says in the report that the contextual terms are invisible to this
+bank. Settling them needs a session that records what the caret was sitting after, which is a
+change to the recording format and not to a threshold.
+
 ### The Gesture Lab as a daily habit -- `capture/LabDeck`, `capture/LabProgress`
 
 | | value | why |
@@ -1114,14 +1222,14 @@ letters.
 | `MEASURED_OFFSET_Y` | +0.204 key heights | the same; positive is down the screen |
 | `MEASURED_SIGMA_X` | 0.122 key widths | scatter about that point, not about the drawn centre |
 | `MEASURED_SIGMA_Y` | 0.130 key heights | 0.242 if measured about the drawn centre |
-| `priorRange` | 13.0 nats | derived: `ln(whole corpus) - ln(median word)` |
-| `oovLogPrior` | median word | the value of a spelling the lexicon has never seen |
+| `priorRange` | 18.6 nats | derived: `ln(whole corpus) - ln(rarest mass)` |
+| `oovLogPrior` | rarest mass the lexicon can report | the value of a spelling it has never seen |
 | `MIN_TAPS` | 2 | at one letter the prior is about the alphabet, not about a word |
 | `beamWidth` | 24 | a ceiling; a tap usually contributes one candidate and rarely three |
 | `REFIT_SIGMA_X` | 0.227 key widths | refit over 2031 taps; used **only** by the rescue pass |
 | `REFIT_SIGMA_Y` | 0.208 key heights | the same |
 | `RESCUE_REACH_NATS` | 20 nats | which letters get listed; the comparison does the refusing |
-| `RESCUE_MARGIN_NATS` | 1.0 nats | ceilinged by the prior gaps, which are 1.4-5.1 nats |
+| `RESCUE_MARGIN_NATS` | 1.0 nats | ceilinged by the real-vs-real prior gaps, the smallest 1.4 nats |
 | `MAX_RESCUES` | 2 | each substitution spends the certainty the next one rests on |
 
 Rerun `tools/fit_spatial.py` after any sitting with the Gesture Lab; the first four move with the
@@ -1136,7 +1244,23 @@ still collapses the pinning band -- see the section above.
 
 `RESCUE_MARGIN_NATS` is a ceiling, not a preference: a non-word scores `oovLogPrior` rather than
 zero, so the whole budget a correction has to spend is a few nats. A margin of 6 switches the
-feature off silently, which is how the number was arrived at.
+feature off silently, which is how the number was arrived at. The binding gaps are the ones
+between two *real* readings -- `ot` → `it` at 1.4 nats -- not the word-versus-non-word ones, which
+widened when the floor was corrected.
+
+**A tap is stored relative to the keys it was aimed at, never as pixels.** A pending word outlives
+the key grid it was typed on: a rotation, a split-screen drag, the navigation bar arriving, a
+one-handed squash flick. `TapDecoder.Tap` therefore resolves the geometry at the instant of the
+press and keeps only the per-letter offsets, and `read()` takes no geometry at all -- there is no
+later grid for it to consult. This is not a style choice; it is the fix for a real bug. The taps
+used to be raw pixels re-scored against whatever geometry was current at the *next* keystroke, so a
+resize mid-word shifted every letter sideways and the decoder returned the best word for keys
+nobody had pressed. `code` typed accurately came back as `vodr` -- both changed letters exactly one
+column right, the two that did not change being the ones whose right-neighbour swap spells nothing
+-- and it flipped in a single edit because the composing region is rewritten whole. Flushing on
+resize would have closed the one path anybody had thought of; making the geometry's lifetime end at
+the press closes all of them. `TapDecoderTest` pins it across eight widths and both squash
+directions.
 
 `MIN_TAPS` is the one that looks arbitrary and is not. At a single letter the prior is not about
 a word, it is about which letters English words begin with -- a fact about the dictionary rather

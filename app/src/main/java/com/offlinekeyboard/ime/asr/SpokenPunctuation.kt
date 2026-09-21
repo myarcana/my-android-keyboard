@@ -75,8 +75,103 @@ object SpokenPunctuation {
     fun apply(raw: String, script: Script): String {
         val stripped = stripModelPunctuation(raw)
         val spoken = replaceSpokenWords(stripped, script)
-        return tidySpacing(spoken).trim()
+        return capitaliseI(tidySpacing(spoken).trim())
     }
+
+    /**
+     * The mark a keyword-spotter command inserts, in the right script.
+     *
+     * [PunctuationCommands] holds the half-width/full-width choice, which the spoken language
+     * already decides; the only thing left is the Traditional quote form, which depends on the
+     * keyboard subtype rather than on what was said. Unknown ids yield an empty string, so a
+     * command present in the asset but not in the table adds nothing rather than crashing.
+     */
+    fun markFor(id: String, script: Script): String {
+        val mark = PunctuationCommands.markFor(id) ?: return ""
+        return quoted(mark, script)
+    }
+
+    /**
+     * Applies the transcript and the spotter's detections together.
+     *
+     * This is [apply] with the merge spliced into the middle of it, and the order is the whole
+     * design. [stripModelPunctuation] runs *first*, while the text is still nothing but words,
+     * and the detections are applied after. That way the strip only ever sees marks the model
+     * invented, and every mark the merge places is one the speaker asked for. Merging first
+     * would hand the strip a text in which the two are indistinguishable, and it would delete
+     * the speaker's marks along with the model's.
+     *
+     * With no detections this is exactly [apply], so a segment holding no commands -- or a
+     * device where the spotter failed to load -- takes the path that shipped before.
+     */
+    fun applyMerged(
+        transcript: CommandMerge.Transcript,
+        detections: List<CommandMerge.Detection>,
+        script: Script,
+    ): String {
+        if (detections.isEmpty()) return apply(transcript.text, script)
+
+        // Strip the model's invented punctuation *first*, while the text is still only words,
+        // and merge after. Doing it in this order is what keeps the distinction the whole
+        // feature rests on: once the merge has placed a mark, nothing downstream can tell it
+        // from one the model invented, so the strip has to have already run.
+        //
+        // The words are stripped rather than the joined text so that token timings stay aligned
+        // with the words the merge matches against.
+        val cleanTokens = transcript.tokens.map(::stripModelPunctuation)
+        val cleaned = CommandMerge.Transcript(
+            text = stripModelPunctuation(transcript.text),
+            tokens = cleanTokens,
+            timestamps = transcript.timestamps,
+        )
+        val merged = CommandMerge.merge(cleaned, detections, script)
+        // Spoken words are still honoured for any command the spotter missed.
+        val spoken = replaceSpokenWords(merged, script)
+        return capitaliseI(tidySpacing(spoken).trim())
+    }
+
+    /**
+     * Capitalises the English pronoun "I" when it stands alone as a word.
+     *
+     * SenseVoice returns lower-case text, so the pronoun arrives as "i" and reads as a typo in
+     * the one language where it is always a capital. This is deliberately the *only* casing rule
+     * here: sentence-initial capitalisation would need to know where sentences begin, and after
+     * [stripModelPunctuation] has removed the marks the speaker did not say, that is exactly the
+     * information no longer present.
+     *
+     * The boundaries are the point. "i" is a word only when no letter, digit or apostrophe
+     * touches it -- so "i'll" and "i'm" are caught by the contraction rule below rather than
+     * here, while the "i" in "naive" and the variable "i" in "i2c" are left alone. Han text is
+     * unaffected: a Latin "i" adjacent to Han characters is still a standalone Latin word.
+     */
+    private fun capitaliseI(text: String): String {
+        var result = STANDALONE_I.replace(text, "I")
+        result = CONTRACTED_I.replace(result) { m -> "I" + m.groupValues[1] }
+        return result
+    }
+
+    /**
+     * A bare "i": no letter, digit or apostrophe on either side.
+     *
+     * The apostrophe guards matter in both directions. Without the lookbehind, the "i" in
+     * "Sarah'i" would be rewritten; without the lookahead, "i'll" would become "I'll" here *and*
+     * again in [CONTRACTED_I], which is harmless only by luck. Keeping the two rules disjoint
+     * means each one is testable on its own.
+     */
+    private val STANDALONE_I =
+        Regex("(?<![\\p{L}\\p{N}'\\u2019])i(?![\\p{L}\\p{N}'\\u2019])")
+
+    /**
+     * "i" carrying a contraction: i'll, i'm, i've, i'd.
+     *
+     * Listed rather than matched as "apostrophe plus any letters", so that a transcription like
+     * "i'the" -- which is not a contraction of the pronoun -- is left as the model heard it.
+     * Both apostrophe forms are accepted because the model emits the typographic one and
+     * [stripModelPunctuation] preserves whichever arrived.
+     */
+    private val CONTRACTED_I =
+        Regex("(?<![\\p{L}\\p{N}'\\u2019])i(['\\u2019](?:ll|m|ve|d))(?![\\p{L}\\p{N}])",
+            RegexOption.IGNORE_CASE)
 
     /**
      * Removes the model's own punctuation, keeping the two marks that are part of words rather

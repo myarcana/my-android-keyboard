@@ -4,6 +4,7 @@ import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import com.offlinekeyboard.ime.layout.Squash
 import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -56,7 +57,7 @@ class TapDecoderTest {
         val x = rect.centerX + (model.offsetX + dx) * geometry.keyUnit
         val y = rect.centerY + (model.offsetY + dy) * geometry.keyHeight
         val id = geometry.keyForPress(x, y)!!.key.id
-        return TapDecoder.Tap(x, y, id[0])
+        return TapDecoder.Tap.of(x, y, id[0], geometry, model)
     }
 
     private fun taps(word: String): List<TapDecoder.Tap> = word.map { tap(it) }
@@ -75,7 +76,7 @@ class TapDecoderTest {
     fun `a word typed accurately is never re-read`() {
         val decoder = decoder() ?: return
         listOf("the", "keyboard", "typing", "and", "hello").forEach { word ->
-            assertNull("$word was re-read despite being typed accurately", decoder.read(taps(word), geometry))
+            assertNull("$word was re-read despite being typed accurately", decoder.read(taps(word)))
         }
     }
 
@@ -88,7 +89,7 @@ class TapDecoderTest {
         val decoder = decoder() ?: return
         listOf("rhys", "kade", "zamil", "qwertz").forEach { word ->
             assertEquals(word, literalOf(taps(word)))
-            assertNull("$word was re-read", decoder.read(taps(word), geometry))
+            assertNull("$word was re-read", decoder.read(taps(word)))
         }
     }
 
@@ -106,7 +107,7 @@ class TapDecoderTest {
         val decoder = decoder() ?: return
         val typed = listOf(tap('r', dx = 0.52f), tap('h'), tap('e'))
         assertEquals("rhe", literalOf(typed))
-        assertEquals("the", decoder.read(typed, geometry))
+        assertEquals("the", decoder.read(typed))
     }
 
     /**
@@ -129,7 +130,7 @@ class TapDecoderTest {
             listOf(edge, tap('h'), tap('e'), tap('r'), tap('e')),
         )
         grown.forEach { typed ->
-            val reading = decoder.read(typed, geometry)
+            val reading = decoder.read(typed)
             assertNotNull("the reading was given up at ${typed.size} letters", reading)
             assertTrue(
                 "expected a reading starting \"the\", got $reading",
@@ -155,7 +156,7 @@ class TapDecoderTest {
             for (dx in offsets) {
                 for (dy in offsets) {
                     val typed = listOf(tap(first, dx, dy), tap('e'), tap('r'))
-                    val reading = decoder.read(typed, geometry) ?: continue
+                    val reading = decoder.read(typed) ?: continue
                     assertEquals("wrong length for $reading", typed.size, reading.length)
                     assertTrue("$reading is not letters", reading.all { it in 'a'..'z' })
                     checked++
@@ -174,7 +175,7 @@ class TapDecoderTest {
     fun `a single tap is never re-read`() {
         val decoder = decoder() ?: return
         listOf(-0.45f, 0f, 0.45f).forEach { dx ->
-            assertNull(decoder.read(listOf(tap('r', dx = dx)), geometry))
+            assertNull(decoder.read(listOf(tap('r', dx = dx))))
         }
     }
 
@@ -217,7 +218,7 @@ class TapDecoderTest {
             tap('h'), tap('e'), tap('r'), tap('s'),
         )
         assertEquals("teavhers", literalOf(typed))
-        assertEquals("teachers", decoder.read(typed, geometry))
+        assertEquals("teachers", decoder.read(typed))
     }
 
     /**
@@ -241,7 +242,7 @@ class TapDecoderTest {
         val decoder = decoder() ?: return
         val typed = listOf(typo('o', 'i'), tap('t'))
         assertEquals("ot", literalOf(typed))
-        assertNull("two letters should not be enough to overrule the keys pressed", decoder.read(typed, geometry))
+        assertNull("two letters should not be enough to overrule the keys pressed", decoder.read(typed))
     }
 
     /**
@@ -253,7 +254,7 @@ class TapDecoderTest {
         val decoder = decoder() ?: return
         val typed = listOf(tap('w'), typo('p', 'o'), tap('r'), tap('d'))
         assertEquals("wprd", literalOf(typed))
-        assertEquals("word", decoder.read(typed, geometry))
+        assertEquals("word", decoder.read(typed))
     }
 
     /**
@@ -270,7 +271,7 @@ class TapDecoderTest {
             tap('h'), tap('e'), tap('r'), tap('s'),
         )
         assertEquals("teavhers", literalOf(typed))
-        assertNull("a squarely-pressed key was overridden", decoder.read(typed, geometry))
+        assertNull("a squarely-pressed key was overridden", decoder.read(typed))
     }
 
     // --- what the rescue pass is still not allowed to do ------------------------------------
@@ -284,7 +285,7 @@ class TapDecoderTest {
     fun `the rescue pass still leaves unknown words alone`() {
         val decoder = decoder() ?: return
         listOf("rhys", "kade", "zamil", "qwertz", "xyzzy").forEach { word ->
-            assertNull("$word was rescued into something else", decoder.read(taps(word), geometry))
+            assertNull("$word was rescued into something else", decoder.read(taps(word)))
         }
     }
 
@@ -298,7 +299,7 @@ class TapDecoderTest {
     fun `a correctly typed word is never swapped for a commoner one`() {
         val decoder = decoder() ?: return
         listOf("cad", "bat", "pin", "hot", "vane", "cot").forEach { word ->
-            assertNull("$word was swapped for a commoner word", decoder.read(taps(word), geometry))
+            assertNull("$word was swapped for a commoner word", decoder.read(taps(word)))
         }
     }
 
@@ -314,7 +315,7 @@ class TapDecoderTest {
         // only by moving a letter a whole row, which the reach is set below.
         val typed = listOf(typo('g', 'f'), tap('i'), tap('n'), tap('e'))
         assertEquals("gine", literalOf(typed))
-        val reading = decoder.read(typed, geometry)
+        val reading = decoder.read(typed)
         assertTrue(
             "expected a sideways rescue or none, got $reading",
             reading == null || reading == "fine",
@@ -343,7 +344,7 @@ class TapDecoderTest {
             tap('h'), tap('e'), typo('t', 'r'), tap('s'),
         )
         assertEquals("teavhets", literalOf(typed))
-        assertNull("a two-slip word was half-corrected", decoder.read(typed, geometry))
+        assertNull("a two-slip word was half-corrected", decoder.read(typed))
     }
 
     /** The one-letter-per-tap guarantee, restated over taps the rescue pass actually moves. */
@@ -357,9 +358,78 @@ class TapDecoderTest {
             listOf(tap('t'), tap('h'), tap('i'), typo('m', 'n'), tap('g'), tap('s')),
         )
         words.forEach { typed ->
-            val reading = decoder.read(typed, geometry) ?: return@forEach
+            val reading = decoder.read(typed) ?: return@forEach
             assertEquals("wrong length for $reading", typed.size, reading.length)
             assertTrue("$reading is not letters", reading.all { it in 'a'..'z' })
+        }
+    }
+
+    // --- the keys may move while a word is being typed ---------------------------------------
+
+    /**
+     * A word survives the keyboard being resized underneath it, which is the bug this pins.
+     *
+     * A pending word outlives the key grid it was typed on: a rotation, a split-screen drag, the
+     * navigation bar arriving, a one-handed squash flick. The taps were once stored as raw
+     * pixels and re-scored against whatever geometry was current at the *next* keystroke, so a
+     * resize mid-word shifted every letter sideways and the decoder returned the best word for
+     * keys nobody had pressed -- "code" typed accurately came back as "vodr", flipping in one go
+     * because the composing region is rewritten whole.
+     *
+     * [TapDecoder.Tap] now resolves the geometry at the moment of the press, so there is no later
+     * geometry for the decoder to consult and the failure cannot be expressed. Typing on one
+     * board and reading on another has to be indistinguishable from never having resized.
+     */
+    @Test
+    fun `a word is not re-read when the keyboard is resized mid-word`() {
+        val decoder = decoder() ?: return
+        // Every width a phone plausibly hands an IME: rotation, split screen, a resizable window.
+        listOf(1080f, 1008f, 960f, 900f, 840f, 800f, 720f, 640f).forEach { width ->
+            val resized = LayoutGeometry(IosLayouts.QWERTY_LOWER, width)
+            listOf("code", "the", "hello", "keyboard", "name").forEach { word ->
+                // Typed accurately on the board that was on screen at the time.
+                val typed = taps(word)
+                assertEquals(word, literalOf(typed))
+                // The last letter arrives after the window changed size. The earlier taps are
+                // the ones already held, and they must not be re-interpreted.
+                val afterResize = typed.dropLast(1) + run {
+                    val c = word.last()
+                    val rect = resized.letterKeys[c - 'a']!!
+                    val x = rect.centerX + model.offsetX * resized.keyUnit
+                    val y = rect.centerY + model.offsetY * resized.keyHeight
+                    TapDecoder.Tap.of(x, y, c, resized, model)
+                }
+                assertNull(
+                    "$word was re-read after a resize to ${width}px",
+                    decoder.read(afterResize),
+                )
+            }
+        }
+    }
+
+    /**
+     * The same for a one-handed squash, which moves the keys sideways without changing the width
+     * and was the other way a held word could be scored against a grid it was never typed on.
+     */
+    @Test
+    fun `a word is not re-read when the board is squashed mid-word`() {
+        val decoder = decoder() ?: return
+        listOf(Squash.LEFT, Squash.RIGHT).forEach { squash ->
+            val moved = LayoutGeometry(IosLayouts.QWERTY_LOWER, 1080f, squash = squash)
+            listOf("code", "the", "hello", "name").forEach { word ->
+                val typed = taps(word)
+                val afterFlick = typed.dropLast(1) + run {
+                    val c = word.last()
+                    val rect = moved.letterKeys[c - 'a']!!
+                    val x = rect.centerX + model.offsetX * moved.keyUnit
+                    val y = rect.centerY + model.offsetY * moved.keyHeight
+                    TapDecoder.Tap.of(x, y, c, moved, model)
+                }
+                assertNull(
+                    "$word was re-read after a $squash squash",
+                    decoder.read(afterFlick),
+                )
+            }
         }
     }
 }

@@ -18,17 +18,26 @@ class SpatialModelTest {
     private val geometry = LayoutGeometry(IosLayouts.QWERTY_LOWER, 1080f)
     private val model = SpatialModel()
 
-    /** The lexicon's real figure, from `WordIndex.of(lexicon).priorRange`. */
-    private val priorRange = 13.00f
+    /**
+     * The lexicon's real figure, from `WordIndex.of(lexicon).priorRange`.
+     *
+     * Wider than the 13.0 it used to be because [WordIndex.oovLogPrior] is now the rarest mass
+     * the lexicon can report rather than the median word count -- a floor measured in the same
+     * quantity it is compared against. A wider range makes this band *narrower*, so the pinning
+     * guarantee is strictly stronger than it was, not weaker.
+     */
+    private val priorRange = 18.62f
 
     private fun at(letter: Char, dx: Float, dy: Float): List<SpatialModel.Candidate> {
         val rect = geometry.letterKeys[letter - 'a']!!
-        return model.candidates(
+        val tap = TapDecoder.Tap.of(
             rect.centerX + (model.offsetX + dx) * geometry.keyUnit,
             rect.centerY + (model.offsetY + dy) * geometry.keyHeight,
+            letter,
             geometry,
-            priorRange,
+            model,
         )
+        return model.candidates(tap, priorRange)
     }
 
     @Test
@@ -47,12 +56,13 @@ class SpatialModelTest {
     @Test
     fun `the pinned band covers most of a key`() {
         // Bracketed rather than bounded, because the width of this band is the feature. A tap is
-        // pinned out to 0.41 key widths and 0.45 key heights from its aim point -- the far side
-        // of the drawn key in both directions -- and only past that is there a second reading.
-        assertEquals("pinned at 0.41 key widths out", 1, at('g', 0.41f, 0f).size)
-        assertTrue("but not at 0.42", at('g', 0.42f, 0f).size > 1)
-        assertEquals("pinned at 0.45 key heights out", 1, at('g', 0f, 0.45f).size)
-        assertTrue("but not at 0.46", at('g', 0f, 0.46f).size > 1)
+        // pinned out to 0.34 key widths and 0.38 key heights from its aim point -- still past the
+        // edge of the drawn key in both directions -- and only past that is there a second
+        // reading.
+        assertEquals("pinned at 0.34 key widths out", 1, at('g', 0.34f, 0f).size)
+        assertTrue("but not at 0.35", at('g', 0.35f, 0f).size > 1)
+        assertEquals("pinned at 0.37 key heights out", 1, at('g', 0f, 0.37f).size)
+        assertTrue("but not at 0.39", at('g', 0f, 0.39f).size > 1)
     }
 
     /**

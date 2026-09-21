@@ -85,6 +85,8 @@ class GestureBankReplayTest {
         println("  " + describe(defaults))
         println("  " + describe(base))
 
+        reportFlickPrior(records, base)
+
         val best = sweep(records)
         println()
         println("Best of ${best.evaluated} candidate threshold sets:")
@@ -155,6 +157,56 @@ class GestureBankReplayTest {
     /** What a record can be called in a report: its old prompt, or the text it produced. */
     private fun GestureRecord.label(): String =
         legacy?.promptId ?: sessionId?.let { "$it#$seq" } ?: id
+
+    /**
+     * What [FlickPrior] is worth, on the same bank and the same thresholds.
+     *
+     * The comparison is deliberately one-sided in what it can show. A replayed path carries no
+     * editor context -- the caret it was typed at is simply not in the file -- so only the
+     * *layout* half of the prior can be scored here: how much room there is below the key. The
+     * contextual half, which is the larger idea, is invisible to this bank and will stay
+     * invisible until a session is collected that records what the caret was sitting after.
+     *
+     * Saying that out loud in the report matters more than the number does. A reader who sees a
+     * gain here and assumes it covers the mid-word rule would be drawing a conclusion the data
+     * cannot support, which is the exact failure `docs/GESTURE_BANK.md` describes version 6 as
+     * having been built to stop.
+     */
+    private fun reportFlickPrior(records: List<GestureRecord>, base: GestureReplay.Score) {
+        val withPrior = GestureReplay.score(records, defaults, FlickPrior())
+        println()
+        println("With FlickPrior (shipped weights; the bank records no caret, so only the")
+        println("layout terms can move anything here -- and they ship at zero):")
+        println("  " + describe(withPrior))
+        println("  change: %+.1f points of balanced accuracy"
+            .format((withPrior.balanced - base.balanced) * 100))
+
+        // Which keys moved, and in which direction. A single total can hide a term that fixes
+        // one key by breaking another, and on a bank this small that is a real possibility
+        // rather than a hypothetical one.
+        val moved = GestureReplay.scorable(records).mapNotNull { record ->
+            val intent = record.legacy?.intent ?: return@mapNotNull null
+            val before = GestureReplay.intentOf(
+                GestureReplay.replay(record, defaults, GestureReplay.NO_PRIOR),
+            )
+            val after = GestureReplay.intentOf(
+                GestureReplay.replay(record, defaults, FlickPrior()),
+            )
+            if (before == after) null else Triple(record, before, after)
+        }
+        if (moved.isEmpty()) {
+            println("  no recorded gesture changes verdict")
+            return
+        }
+        val fixed = moved.count { (r, _, after) -> after == r.legacy?.intent }
+        val broken = moved.count { (r, before, _) -> before == r.legacy?.intent }
+        println("  ${moved.size} gestures change verdict: $fixed newly correct, $broken newly wrong")
+        moved.groupBy { (r, _, _) -> r.trace.startKeyId }.toSortedMap().forEach { (key, rows) ->
+            println("    $key: " + rows.joinToString(", ") { (r, before, after) ->
+                "${r.legacy?.intent?.name?.lowercase()} $before->$after"
+            })
+        }
+    }
 
     /** Where the collisions actually are, which is the part worth reading before tuning. */
     private fun reportPerKey(records: List<GestureRecord>) {

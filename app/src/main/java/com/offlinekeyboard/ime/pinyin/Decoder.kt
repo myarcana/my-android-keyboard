@@ -30,6 +30,14 @@ internal class Decoder(
      * Taiwan weight and 牛肉面 has none, not because the output was converted afterwards.
      */
     var traditional: Boolean = false,
+    /**
+     * Charged for spelling a span out character by character instead of using a word.
+     *
+     * A parameter rather than a constant so it can be swept in tests: it is the one number in
+     * here whose right value is an empirical question, and it is now load-bearing in a way it
+     * was not when single-character edges were escaping it entirely.
+     */
+    private val backoffPenalty: Float = BACKOFF,
 ) {
 
     /** One decoding of the input: the text, and how many syllables it consumed. */
@@ -75,7 +83,7 @@ internal class Decoder(
                     // pair of characters pays two small ones. The dictionary's word entry is
                     // strictly better evidence than assembling the same text character by
                     // character, and the penalty is what says so.
-                    val wordScore = unigram(word.weight) - if (word.backoff) BACKOFF else 0f
+                    val wordScore = unigram(word.weight) - if (word.backoff) backoffPenalty else 0f
                     val target = i + span
                     for (path in prefixes) {
                         val score = path.score + wordScore +
@@ -166,7 +174,7 @@ internal class Decoder(
                 // the bonus meant the keyboard recorded the choice and then ignored it.
                 val score = unigram(word.weight) +
                     (if (word.learned) LEARNED_BONUS else 0f) -
-                    (if (word.backoff) BACKOFF else 0f)
+                    (if (word.backoff) backoffPenalty else 0f)
                 offer(Candidate(word.text, span, score, word.learned))
             }
         }
@@ -229,12 +237,12 @@ internal class Decoder(
 
         // Single characters, so the lattice is connected at every position.
         //
-        // Multi-character words are the only entries in the word index, so a span of one
-        // syllable finds nothing there -- `tian` alone returns no word. Without a
-        // single-character edge the decoder cannot pass through that position at all, and a
-        // sentence containing one standalone character has no complete path: `womenshizhongguoren`
-        // could not reach 人 at the end and fell back to whatever multi-character junk did
-        // connect. These edges are what make an arbitrary sentence decodable.
+        // A span of one syllable often finds nothing in the word index -- `tian` alone returns no
+        // word. Without a single-character edge the decoder cannot pass through that position at
+        // all, and a sentence containing one standalone character has no complete path:
+        // `womenshizhongguoren` could not reach 人 at the end and fell back to whatever
+        // multi-character junk did connect. These edges are what make an arbitrary sentence
+        // decodable.
         if (ids.size == 1 && !Syllables.isInitial(ids[0])) {
             var added = 0
             for (entry in dict.charsFor(ids[0])) {
@@ -244,6 +252,54 @@ internal class Decoder(
                     out.add(Entry(entry.text, weight, false, backoff = true))
                     added++
                 }
+            }
+        }
+
+        // Spelling one syllable with one character is a backoff *however the entry was found*.
+        //
+        // [BACKOFF] is what stops a pair of very common characters outscoring the single word they
+        // spell, and the word index was letting entries past it. That index is not exclusively
+        // multi-character: the Taiwan model keeps single-character frequencies there too (是, 時,
+        // 十 all sit under the key `shi`), so those characters arrived from the block above as
+        // ordinary *words*, carrying no penalty, and the unpenalised copy is the one that won. In
+        // Traditional mode `shida` decoded to 是大 at -6.63 while the real word 師大 -- weight
+        // 30263, the commonest `shi da` entry in that model -- scored -11.10 and never appeared at
+        // all. The mainland model hid the bug entirely, because its single characters have no
+        // weight in the word index and the region filter dropped them.
+        //
+        // Swept over the whole list rather than fixed at each source, so no present or future
+        // caller can slip an unpenalised single-character edge past it, and the penalty is charged
+        // exactly once. A learned entry is exempt: the user's own correction is evidence in its own
+        // right, not a fallback.
+        if (ids.size == 1) {
+            for (i in out.indices) {
+                val entry = out[i]
+                if (!entry.learned && !entry.backoff && entry.text.length == 1) {
+                    out[i] = Entry(entry.text, entry.weight, false, backoff = true)
+                }
+            }
+        }
+
+        // The two sources overlap, so the same character can now be present twice. Keep one copy
+        // of each: a duplicate edge is not merely wasted work, it crowds the beam with paths that
+        // decode to identical text.
+        //
+        // A learned entry always wins, whatever its weight. It carries the [LEARNED_BONUS] and the
+        // flag that hoists a correction to the front of the bar, so choosing by weight alone threw
+        // the correction away -- the user's own choice of 她 for `ta` came back as the plain
+        // dictionary entry and the keyboard ignored what it had just been taught.
+        if (out.size > 1) {
+            val best = LinkedHashMap<String, Entry>(out.size)
+            for (entry in out) {
+                val prior = best[entry.text]
+                val better = prior == null ||
+                    (entry.learned && !prior.learned) ||
+                    (entry.learned == prior.learned && entry.weight > prior.weight)
+                if (better) best[entry.text] = entry
+            }
+            if (best.size != out.size) {
+                out.clear()
+                out.addAll(best.values)
             }
         }
         return out
@@ -473,6 +529,12 @@ internal class Decoder(
          * Large enough that a genuine two-character word beats the best pair of characters that
          * spells it, small enough that a name or rare compound the dictionary lacks is still
          * reachable -- which is the whole reason the character edges exist.
+         *
+         * The value is unchanged, but it now applies to edges that were escaping it (see
+         * [wordsFor]), so it was re-swept against both models rather than assumed. 師大 holds the
+         * top spot for `shida` down to 2.5 and loses to the character pair 是大 at 2.0; the
+         * sentences that motivated the penalty are stable from 3.5 up. 6.0 sits above that range
+         * with margin on both sides, so it is kept.
          */
         private const val BACKOFF = 6.0f
 

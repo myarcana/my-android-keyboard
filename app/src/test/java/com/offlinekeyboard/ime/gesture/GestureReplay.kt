@@ -19,13 +19,45 @@ object GestureReplay {
     fun layoutFor(id: String): Layout? = IosLayouts.byId(id)
 
     /**
+     * A prior with every weight at zero: the state machine as it behaved before [FlickPrior]
+     * existed.
+     *
+     * Needed because the bank is a record of what *older builds* decided, and the harness check
+     * holds replay to exactly that. A recorded path carries no editor context and never could --
+     * the caret it was made at is not in the file -- so the only honest way to reproduce an old
+     * verdict is to replay it under a prior that has no opinion at all. Scoring the same bank
+     * with [FlickPrior] then measures the change, which is the comparison the report wants.
+     */
+    val NO_PRIOR = FlickPrior(
+        FlickPrior.Weights(
+            noRoomBelow = 0f,
+            roomBelow = 0f,
+            midWord = 0f,
+            afterDigit = 0f,
+            boundaryDigit = 0f,
+            wordInternalSymbol = 0f,
+        ),
+    )
+
+    /**
      * The verdict [config] would reach for this gesture, or null if it was recorded on a layout
      * this build no longer has.
+     *
+     * [prior] defaults to [NO_PRIOR] rather than to the shipping one, and the asymmetry is
+     * deliberate: every existing caller is asking "what did the phone decide", which is a
+     * question about a build that had no prior. A caller that wants to know what the *current*
+     * keyboard would decide passes one in and says so.
      */
-    fun replay(record: GestureRecord, config: GestureConfig): GestureVerdict? {
+    fun replay(
+        record: GestureRecord,
+        config: GestureConfig,
+        prior: FlickPrior = NO_PRIOR,
+    ): GestureVerdict? {
         val layout = layoutFor(record.trace.layoutId) ?: return null
         val geometry = LayoutGeometry(layout, record.trace.widthPx)
-        val fsm = TouchFsm(geometry, config)
+        // No context: a recorded path has no editor behind it. See FlickPrior.Context.UNKNOWN,
+        // which is exactly zero for that reason.
+        val fsm = TouchFsm(geometry, config, prior)
         val path = record.path
         val down = path.firstOrNull() ?: return null
         val boundaries = record.trace.strokeStarts.toSet()
@@ -187,13 +219,17 @@ object GestureReplay {
     fun scorable(records: List<GestureRecord>): List<GestureRecord> =
         records.filter { it.voidReason == null && it.legacy?.promptId?.startsWith("word:") == false }
 
-    fun score(records: List<GestureRecord>, config: GestureConfig): Score {
+    fun score(
+        records: List<GestureRecord>,
+        config: GestureConfig,
+        prior: FlickPrior = NO_PRIOR,
+    ): Score {
         val correct = mutableMapOf<GestureIntent, Int>()
         val total = mutableMapOf<GestureIntent, Int>()
         scorable(records).forEach { record ->
             val intent = record.legacy?.intent ?: return@forEach
             total[intent] = (total[intent] ?: 0) + 1
-            if (intentOf(replay(record, config)) == intent) {
+            if (intentOf(replay(record, config, prior)) == intent) {
                 correct[intent] = (correct[intent] ?: 0) + 1
             }
         }

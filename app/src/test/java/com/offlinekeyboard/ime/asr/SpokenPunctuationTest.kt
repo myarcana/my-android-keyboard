@@ -101,6 +101,55 @@ class SpokenPunctuationTest {
         assertEquals("yes, please", en("yes Comma please"))
     }
 
+    // --- the pronoun "I" ------------------------------------------------------------------
+
+    @Test
+    fun `a standalone i is capitalised`() {
+        assertEquals("I think so", en("i think so"))
+        assertEquals("what I said", en("what i said"))
+        assertEquals("me and I", en("me and i"))
+    }
+
+    @Test
+    fun `a contracted i is capitalised`() {
+        assertEquals("I'll be late", en("i'll be late"))
+        assertEquals("I'm here", en("i'm here"))
+        assertEquals("I've done it", en("i've done it"))
+        assertEquals("I'd rather not", en("i'd rather not"))
+    }
+
+    @Test
+    fun `an i inside a word is left alone`() {
+        // The whole reason the rule is anchored to word boundaries.
+        assertEquals("naive is a word", en("naive is a word"))
+        assertEquals("it is convenient", en("it is convenient"))
+        assertEquals("brilliant", en("brilliant"))
+    }
+
+    @Test
+    fun `an already capital I is unchanged`() {
+        assertEquals("I know", en("I know"))
+    }
+
+    @Test
+    fun `the pronoun is capitalised next to spoken punctuation`() {
+        // The rule runs after the mark is inserted, so the "i" is standalone by then.
+        assertEquals("yes, I agree", en("yes comma i agree"))
+        assertEquals("wait. I forgot", en("wait period i forgot"))
+    }
+
+    @Test
+    fun `a lone i is capitalised beside Han text`() {
+        // Auto language detection code-switches mid-segment; the Latin word is still a word.
+        assertEquals("我說 I know", cn("我說 i know"))
+    }
+
+    @Test
+    fun `a non-contraction after i is left alone`() {
+        // Only the four real contractions are pronoun forms.
+        assertEquals("I", en("i"))
+    }
+
     @Test
     fun `nothing said means nothing added`() {
         assertEquals("", en(""))

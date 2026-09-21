@@ -14,7 +14,20 @@ models/
 asr-bench/
 
 # Dictation runtime and models: 290 MB, fetched by tools/fetch_asr_runtime.sh.
-app/src/main/assets/asr/
+#
+# The contents are excluded rather than the directory itself: git does not descend into an
+# excluded directory, so the negation below would have no effect written the other way round.
+app/src/main/assets/asr/*
+
+# ...except the punctuation keywords, which are generated source rather than a fetched model:
+# 1 KB of text written by tools/build_punctuation_keywords.py, read by PunctuationKeywordsTest,
+# and the contract the keyword spotter's ids are matched against. Committing it means the test
+# suite runs on a checkout that has not fetched the 290 MB of weights.
+!app/src/main/assets/asr/punctuation_keywords.txt
+
+# The pronunciation dictionary is build-time input for that generator, 3.2 MB, and arrives
+# inside the keyword-spotter tarball rather than being authored here.
+tools/asr_bench/en.phone
 
 # The swipe decoder runtime and models: built and fetched by tools/fetch_swipe_runtime.sh.
 app/src/main/assets/swipe/

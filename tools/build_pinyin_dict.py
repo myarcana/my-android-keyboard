@@ -188,7 +188,8 @@ def mcbopomofo_frequencies(path: str) -> dict:
     return out
 
 
-def mcbopomofo_entries(path: str, base_path: str, freqs: dict, stats: dict):
+def mcbopomofo_entries(path: str, base_path: str, freqs: dict, stats: dict,
+                       simplified_only: frozenset = frozenset()):
     """
     Yields (word, [pinyin syllables], tw_weight) for the Taiwan model.
 
@@ -199,6 +200,24 @@ def mcbopomofo_entries(path: str, base_path: str, freqs: dict, stats: dict):
     A word with no corpus count still enters at weight 1: it is a real Traditional word that
     merely went unseen, and dropping it would make the Taiwan model *smaller* than the
     Simplified one it is meant to replace for those users.
+
+    **[simplified_only] is what keeps the Taiwan model Traditional.** `BPMFBase.txt` is a
+    reading table, not a Traditional word list: it covers everything writable in bopomofo and
+    tags each character by charset, so 12,149 of its 26,535 lines are `utf8` rather than `big5`
+    and include the ordinary Simplified forms -- 师, 时, 实, 国, 这, 会, 对, 学. Admitting those
+    put Simplified characters into the Taiwan model at the floor weight (1 count rescaled to 88),
+    which is small but *non-zero*, and non-zero is the only thing the decoder tests when it asks
+    whether a word exists in the model it is scoring. The visible effect was that a Taiwan user
+    typing `shida` got 是大 and 十大 assembled from character edges while 師大 -- a real word with
+    a real corpus count, 342 occurrences, the highest-weighted `shi da` entry in the Taiwan
+    model -- never reached the bar at all.
+
+    Filtered against OpenCC's `STCharacters.txt` rather than the charset tag, because the tag
+    answers a different question. `big5` means "encodable in Big5", which excludes rare
+    Traditional characters that belong in the model, while `utf8` lumps Simplified forms together
+    with rare Traditional ones -- filtering on it would both drop real Traditional characters and
+    keep Simplified ones. STCharacters names the characters that *are* Simplified, which is the
+    question being asked. The caller narrows it further; see [build].
     """
     for path_name, is_base in ((base_path, True), (path, False)):
         with open(path_name, encoding="utf-8") as f:
@@ -222,11 +241,41 @@ def mcbopomofo_entries(path: str, base_path: str, freqs: dict, stats: dict):
                 if len(readings) != len(word):
                     stats["misaligned"] = stats.get("misaligned", 0) + 1
                     continue
+                # A Simplified character is not part of the Taiwan model, whatever its reading.
+                # Checked per character so a phrase carrying one is dropped too: a mixed-script
+                # entry is not a word anybody types in Traditional.
+                if any(ch in simplified_only for ch in word):
+                    stats["simplified"] = stats.get("simplified", 0) + 1
+                    continue
                 syls = bopomofo.reading(readings)
                 if syls is None:
                     stats["unconvertible"] = stats.get("unconvertible", 0) + 1
                     continue
                 yield word, syls, max(freqs.get(word, 0), 1)
+
+
+def all_opencc_values(path: str) -> dict:
+    """
+    Reads an OpenCC table keeping *every* alternative, as `key -> [values]`.
+
+    [opencc_table] keeps only the first because conversion must be deterministic. Deciding
+    whether a character is exclusively Simplified needs the whole list instead: 台 converts to
+    臺 檯 颱 台, and it is the last of those -- the self-mapping -- that says 台 is also a form
+    Traditional writes.
+    """
+    out: dict = {}
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split("\t")
+            if len(parts) < 2:
+                continue
+            key, values = parts[0], parts[1].split()
+            if key and values:
+                out[key] = values
+    return out
 
 
 def opencc_table(path: str) -> dict:
@@ -330,14 +379,30 @@ def build(work: str, out_path: str, max_entries: int) -> None:
     scale = CN_CORPUS_TOTAL / TW_CORPUS_TOTAL
     stats: dict = {}
     n_tw = 0
+    # The Simplified characters BPMFBase also carries, excluded from the Taiwan model; see
+    # [mcbopomofo_entries]. Read here rather than reusing the conversion table built further
+    # down, because that one is composed with the Taiwan-variant mappings and this needs the
+    # plain question "is this character Simplified".
+    #
+    # A character that appears among its *own* conversions is not exclusively Simplified and must
+    # stay: OpenCC lists 台 -> 臺 檯 颱 台, and 台 is the form Taiwan actually writes -- 台灣 has
+    # 24,111 occurrences in phrase.occ where 臺灣 has none. Excluding every STCharacters key took
+    # 203 such shared forms (台, 万, 丑, 只, 后, 同) out of the Taiwan model and cost it 台灣 and
+    # 台北. Only keys with no self-mapping are dropped, which is exactly the set that has a
+    # distinct Traditional spelling to be converted into.
+    simplified_only = frozenset(
+        key for key, values in all_opencc_values(paths["STCharacters.txt"]).items()
+        if key not in values
+    )
     for word, syls, weight in mcbopomofo_entries(
-        paths["BPMFMappings.txt"], paths["BPMFBase.txt"], tw_freqs, stats
+        paths["BPMFMappings.txt"], paths["BPMFBase.txt"], tw_freqs, stats, simplified_only
     ):
         offer((word, " ".join(syls)), max(int(weight * scale), 1), REGION_TW)
         n_tw += 1
     log(f"  McBopomofo: {n_tw} usable "
         f"({stats.get('unconvertible', 0)} unconvertible readings, "
-        f"{stats.get('misaligned', 0)} misaligned)")
+        f"{stats.get('misaligned', 0)} misaligned, "
+        f"{stats.get('simplified', 0)} Simplified)")
     log(f"  words: {len(words)} keyed entries "
         f"({sum(1 for v in words.values() if v[REGION_TW])} in the Taiwan model, "
         f"{sum(1 for v in words.values() if v[REGION_CN])} in the mainland one)")

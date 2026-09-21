@@ -28,7 +28,14 @@ class WordIndex private constructor(
     private val order: IntArray,
     /** Running total of corpus counts over [order]; `cumulative[i]` excludes `order[i]`. */
     private val cumulative: DoubleArray,
-    /** ln of the count given to a spelling the lexicon has never heard of. */
+    /**
+     * ln of the mass given to a spelling the lexicon has never heard of.
+     *
+     * The rarest mass the lexicon itself can report, so an unknown spelling is as likely as the
+     * least likely known one and never more likely than a real one. Measured in prefix mass,
+     * which is the quantity [logPrior] returns and therefore the only one it can honestly be
+     * compared against.
+     */
     val oovLogPrior: Float,
     /**
      * The widest gap in nats the prior can open between any two readings.
@@ -66,10 +73,11 @@ class WordIndex private constructor(
     /**
      * ln of the corpus count of everything [span] covers, or [oovLogPrior] when it covers nothing.
      *
-     * The floor is what lets a name be typed. An unknown spelling is not impossible, it is
-     * ordinary -- people type names, handles and abbreviations constantly -- so it is scored as an
-     * ordinary word of the language rather than as an impossibility, and a real word can only
-     * outbid it by however much more common than ordinary it is.
+     * The floor is what lets a name be typed. An unknown spelling is not impossible -- people
+     * type names, handles and abbreviations constantly -- so it is scored as the rarest thing
+     * the lexicon can say rather than as an impossibility. That keeps `rhys` and `zamil`
+     * typable while ensuring no real spelling is ever outbid by an invented one, which is the
+     * direction the old median-word floor had backwards.
      */
     fun logPrior(span: Span): Float =
         if (span.isEmpty) oovLogPrior else ln(cumulative[span.hi] - cumulative[span.lo]).toFloat()
@@ -116,11 +124,23 @@ class WordIndex private constructor(
             val cumulative = DoubleArray(order.size + 1)
             for (i in order.indices) cumulative[i + 1] = cumulative[i] + counts[i]
 
-            // The median word, as the value of an unknown spelling. A percentile rather than a
-            // tuned constant: "as likely as an ordinary word" is a statement about the lexicon,
-            // so it is read off the lexicon and a different word list moves it.
-            val sorted = counts.clone().also { it.sort() }
-            val oov = if (sorted.isEmpty()) 1.0 else sorted[sorted.size / 2]
+            // The value of an unknown spelling, and it has to be measured in the quantity it
+            // will be *compared against*. That quantity is prefix mass, not a word count.
+            //
+            // The median word count was the wrong measurement for the right idea. A word's own
+            // count and the summed count of everything starting with a prefix are different
+            // numbers on different scales, and the median word sat above the prefix mass of 45.9%
+            // of the shipped lexicon -- so a made-up spelling outscored nearly half of all real
+            // ones on prior alone. That is backwards, and it is exactly the direction that hurts:
+            // it paid the rescue pass to move a rare real word toward nonsense. `aback` lost to
+            // an invented spelling by 1.5 nats, clearing RESCUE_MARGIN_NATS on its own.
+            //
+            // The floor is the smallest thing the lexicon can actually say instead. An unknown
+            // spelling is then exactly as likely as the rarest known one -- still "ordinary
+            // enough to be typed", which is what lets `rhys` and `zamil` through, but never
+            // better than a real spelling. No word in the lexicon now loses to nonsense.
+            val smallestCount = counts.minOrNull() ?: 1.0
+            val oov = if (counts.isEmpty()) 1.0 else smallestCount
             val total = cumulative.last()
 
             return WordIndex(

@@ -43,6 +43,18 @@ private const val MIN_SILENCE_SECONDS = 0.35f
 private const val MAX_SPEECH_SECONDS = 25f
 
 /**
+ * How long to read and throw away before trusting the microphone, and before telling the user it
+ * is listening.
+ *
+ * `AudioRecord.startRecording()` is asynchronous: it returns once the request is lodged, not once
+ * the input path is carrying audio. Until it is, `read()` returns immediately with buffered junk.
+ * 120 ms covers the gap on the hardware this was tested against while staying under the time it
+ * takes to move a thumb off the key and draw breath, so nothing a speaker could physically have
+ * said yet lands inside it.
+ */
+private const val WARMUP_DISCARD_NANOS = 120_000_000L
+
+/**
  * Offline dictation: microphone in, text out, nothing leaves the process.
  *
  * SenseVoice runs with **automatic language detection** rather than being told the keyboard's
@@ -63,13 +75,37 @@ private const val MAX_SPEECH_SECONDS = 25f
  */
 class Dictation(private val context: Context) {
 
-    enum class State { IDLE, LOADING, LISTENING, TRANSCRIBING }
+    /**
+     * [STARTING] and [LOADING] are both "not listening yet"; they differ only in whether the wait
+     * is long enough to be worth naming. LOADING means the model is still being read off disk and
+     * can take seconds. STARTING means only the microphone is being opened -- a fraction of a
+     * second, and deliberately silent in the UI.
+     *
+     * Neither is [LISTENING], and that distinction is the point: LISTENING is a promise that
+     * audio is being captured, which the user acts on by beginning to speak.
+     */
+    enum class State { IDLE, LOADING, STARTING, LISTENING, TRANSCRIBING }
 
     interface Listener {
         fun onStateChanged(state: State)
 
-        /** A finished segment. Called on the main thread, once per pause in speech. */
-        fun onText(text: String)
+        /**
+         * A finished segment. Called on the main thread, once per pause in speech.
+         *
+         * [transcript] carries the token timings alongside the text, and [detections] the
+         * punctuation commands the keyword spotter heard in the same audio. The two are
+         * delivered together because they only mean anything joined: a detection knows a command
+         * was spoken but not where, and the transcript knows where every word is but cannot tell
+         * a command from a word. [SpokenPunctuation.applyMerged] puts them together.
+         *
+         * [detections] is empty when the spotter is unavailable, which makes the merged path
+         * degrade to exactly the text-only behaviour that shipped before it existed.
+         */
+        fun onText(
+            transcript: CommandMerge.Transcript,
+            detections: List<CommandMerge.Detection>,
+        )
+
         fun onUnavailable(reason: Reason)
     }
 
@@ -86,6 +122,13 @@ class Dictation(private val context: Context) {
      * retry, which would stall dictation for seconds.
      */
     @Volatile private var zhRecognizer: OfflineRecognizer? = null
+
+    /**
+     * The command channel. Optional in the same way [zhRecognizer] is: a repair layered on a
+     * working recogniser, so a device where it fails to load still dictates, just with spoken
+     * punctuation left to word matching.
+     */
+    @Volatile private var spotting: KeywordSpotting? = null
     @Volatile private var vad: Vad? = null
     @Volatile private var recording = false
     private var worker: Thread? = null
@@ -126,6 +169,9 @@ class Dictation(private val context: Context) {
                 Log.e(TAG, "no forced-zh recognizer; code-switch repair disabled", t)
                 null
             }
+            // Loaded here for the same reason: it runs inside a segment's processing, so paying
+            // for it there would stall dictation mid-sentence. 5 MB against the 239 MB above.
+            spotting = KeywordSpotting(assets).takeIf { it.load() }
             vad = Vad(
                 assetManager = assets,
                 config = VadModelConfig(
@@ -143,6 +189,8 @@ class Dictation(private val context: Context) {
             Log.e(TAG, "failed to load dictation models", t)
             recognizer = null
             zhRecognizer = null
+            spotting?.release()
+            spotting = null
             vad = null
             false
         }
@@ -180,8 +228,15 @@ class Dictation(private val context: Context) {
             return
         }
         recording = true
-        // LOADING until the models are up; on a warm start run() moves straight to LISTENING.
-        setState(if (recognizer == null) State.LOADING else State.LISTENING)
+        // Never LISTENING here: the microphone is not open yet, and only run() knows when it is.
+        // Saying so early is what made the first words go missing -- the user reads "Listening",
+        // speaks, and is talking to a stream that has not started.
+        //
+        // STARTING rather than LOADING when the model is already warm, because all that remains
+        // then is opening the microphone. That is brief enough that "Loading dictation..." would
+        // flash and vanish, which looks like a glitch; STARTING carries no message at all and
+        // leaves the strip as it was until LISTENING replaces it.
+        setState(if (recognizer == null) State.LOADING else State.STARTING)
         worker = thread(name = "dictation") { run(listener) }
     }
 
@@ -193,6 +248,8 @@ class Dictation(private val context: Context) {
         stop()
         worker?.join(1000)
         worker = null
+        spotting?.release()
+        spotting = null
     }
 
     private fun run(listener: Listener) {
@@ -202,7 +259,15 @@ class Dictation(private val context: Context) {
             setState(State.IDLE)
             return
         }
-        val detector = vad ?: return
+        // load() returning true means this is non-null; the branch is unreachable in practice,
+        // but bailing out without clearing `recording` would wedge the engine in a state where
+        // the microphone key does nothing at all, so it clears up after itself like the rest.
+        val detector = vad ?: run {
+            recording = false
+            post { listener.onUnavailable(Reason.MODEL_FAILED) }
+            setState(State.IDLE)
+            return
+        }
         detector.reset()
 
         val minBuffer = AudioRecord.getMinBufferSize(
@@ -232,9 +297,23 @@ class Dictation(private val context: Context) {
 
         try {
             recorder.startRecording()
-            setState(State.LISTENING)
             val pcm = ShortArray(VAD_WINDOW)
             val samples = FloatArray(VAD_WINDOW)
+            // The stream is not live when startRecording() returns. The first reads come back
+            // with whatever the capture pipeline had lying in the buffer -- often a burst of
+            // stale or near-silent samples delivered instantly -- and the hardware needs a
+            // moment before it is really carrying the room. Feeding that to the VAD is what
+            // clipped the opening words: it either took the junk for speech and cut a segment
+            // before the sentence started, or took it for silence and armed the gate late.
+            //
+            // So: drop it, and only then say LISTENING. The prompt now means the microphone is
+            // actually open, which is what a user speaking the instant they read it relies on.
+            val primeUntil = System.nanoTime() + WARMUP_DISCARD_NANOS
+            while (recording && System.nanoTime() < primeUntil) {
+                if (recorder.read(pcm, 0, pcm.size) <= 0) break
+            }
+            if (!recording) return
+            setState(State.LISTENING)
             while (recording) {
                 val read = recorder.read(pcm, 0, pcm.size)
                 if (read <= 0) continue
@@ -264,11 +343,58 @@ class Dictation(private val context: Context) {
             detector.pop()
             if (segment.samples.isEmpty()) continue
             setState(State.TRANSCRIBING)
-            val text = transcribe(engine, segment.samples)
-            if (text.isNotBlank()) post { listener.onText(text) }
+            val transcript = transcribe(engine, segment.samples)
+            // The same audio, through the other recogniser. Runs after the transcription rather
+            // than on another thread: the spotter is a 3M-parameter model against SenseVoice's
+            // 239 MB, so the cost is noise next to the decode that just happened, and keeping
+            // them sequential means no lock is needed around a segment's two results.
+            val detections = spotting?.detect(segment.samples, SAMPLE_RATE).orEmpty()
+            logSegment(segment.samples.size, transcript.text, detections)
+            if (transcript.text.isNotBlank() || detections.isNotEmpty()) {
+                post { listener.onText(transcript, detections) }
+            }
             if (recording) setState(State.LISTENING)
         }
     }
+
+    /**
+     * Records what the VAD actually cut and what the model made of it.
+     *
+     * This exists to settle one specific question: whether a spoken punctuation command ends up
+     * alone in its own segment. [MIN_SILENCE_SECONDS] is 0.35 s so that a mid-sentence language
+     * switch gets its own language decision, and a punctuation command is bracketed by the same
+     * kind of hesitation -- so the same cut may be isolating commands too. SenseVoice is not a
+     * streaming model and decodes each segment whole, so a command alone in a short segment is
+     * decoded with none of the surrounding sentence as context, which is the condition under
+     * which "comma" is most likely to come back as "coma" or "comm".
+     *
+     * That is a hypothesis about the user's speech, not something readable from the source, and
+     * it decides where the fix belongs: a short segment holding one near-miss word argues for
+     * changing segmentation, while a near-miss inside a long segment argues for an alias table
+     * in [SpokenPunctuation] instead. `wordCount` is what separates the two.
+     *
+     * Logged at debug, so it is off unless asked for:
+     *
+     *     adb shell setprop log.tag.Dictation DEBUG
+     *     adb logcat -s Dictation
+     */
+    private fun logSegment(
+        sampleCount: Int,
+        text: String,
+        detections: List<CommandMerge.Detection>,
+    ) {
+        if (!Log.isLoggable(TAG, Log.DEBUG)) return
+        val seconds = sampleCount.toFloat() / SAMPLE_RATE
+        val words = text.trim().split(WHITESPACE).filter { it.isNotEmpty() }
+        val fired = detections.joinToString(",") { "%s@%.2f".format(it.id, it.seconds) }
+        Log.d(
+            TAG,
+            "segment %.2fs wordCount=%d keywords=[%s] text=%s"
+                .format(seconds, words.size, fired, text.trim()),
+        )
+    }
+
+    private val WHITESPACE = Regex("\\s+")
 
     /**
      * Decodes one segment, repairing the code-switch failure when it shows.
@@ -277,25 +403,30 @@ class Dictation(private val context: Context) {
      * text carries the romanised signature, and only replaces it when it is actually better --
      * so a segment the model already got right costs exactly one decode, as before.
      */
-    private fun transcribe(engine: OfflineRecognizer, samples: FloatArray): String {
+    private fun transcribe(engine: OfflineRecognizer, samples: FloatArray): CommandMerge.Transcript {
         val auto = decode(engine, samples)
-        if (!CodeSwitch.suspectsMissedChinese(auto.text, auto.lang)) return auto.text
+        if (!CodeSwitch.suspectsMissedChinese(auto.text, auto.lang)) return auto.transcript
 
-        val zh = zhRecognizer ?: return auto.text
+        val zh = zhRecognizer ?: return auto.transcript
         val forced = try {
             decode(zh, samples)
         } catch (t: Throwable) {
             Log.e(TAG, "forced-zh retry failed", t)
-            return auto.text
+            return auto.transcript
         }
         val chosen = CodeSwitch.choose(auto.text, forced.text)
         if (chosen != auto.text) {
             Log.i(TAG, "code-switch repair applied (auto lang=${auto.lang})")
         }
-        return chosen
+        // Whichever text won, its own tokens and timings go with it: the merge matches
+        // detections against these words, and pairing one decode's text with another's
+        // timings would put the marks in the wrong places.
+        return if (chosen == auto.text) auto.transcript else forced.transcript
     }
 
-    private class Decoded(val text: String, val lang: String)
+    private class Decoded(val transcript: CommandMerge.Transcript, val lang: String) {
+        val text: String get() = transcript.text
+    }
 
     private fun decode(engine: OfflineRecognizer, samples: FloatArray): Decoded {
         val stream = engine.createStream()
@@ -303,7 +434,14 @@ class Dictation(private val context: Context) {
             stream.acceptWaveform(samples, SAMPLE_RATE)
             engine.decode(stream)
             val result = engine.getResult(stream)
-            Decoded(result.text, result.lang)
+            Decoded(
+                CommandMerge.Transcript(
+                    text = result.text,
+                    tokens = result.tokens.toList(),
+                    timestamps = result.timestamps.toList(),
+                ),
+                result.lang,
+            )
         } finally {
             stream.release()
         }

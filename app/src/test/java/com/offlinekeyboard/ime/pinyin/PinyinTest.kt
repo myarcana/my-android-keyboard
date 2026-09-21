@@ -174,6 +174,86 @@ class PinyinTest {
         assertEquals("123", script.toTraditional("123"))
     }
 
+    // --- the Taiwan model is Traditional -----------------------------------------------------
+
+    /** The decoder as a Taiwan subtype drives it. */
+    private val twDecoder = Decoder(dict, null, traditional = true)
+
+    private fun twTop(input: String, n: Int = 1): List<String> =
+        twDecoder.candidates(input, 20).take(n).map { it.text }
+
+    @Test
+    fun `a taiwan word beats the characters that spell it`() {
+        // 師大 is the commonest `shi da` word in the Taiwan model (weight 30263, against 十大 at
+        // 15839), and it was absent from the bar entirely: the single characters 是 and 大 were
+        // being added twice, once as penalised character edges and once as unpenalised word
+        // entries, because the Taiwan model keeps single-character frequencies in the *word*
+        // index. The unpenalised pair 是大 then scored -6.63 against 師大's -11.10 and a real
+        // word lost to two characters that do not form one.
+        assertEquals("師大", twTop("shida").first())
+    }
+
+    @Test
+    fun `the taiwan model holds no simplified characters`() {
+        // BPMFBase is a bopomofo reading table, not a Traditional word list: 12,149 of its lines
+        // are tagged utf8 rather than big5 and include ordinary Simplified forms. Admitting them
+        // gave 师, 时, 实 a small but *non-zero* Taiwan weight, and non-zero is the only thing the
+        // decoder tests when asking whether a word exists in the model it is scoring.
+        val simplified = mapOf(
+            "shi" to listOf("师", "时", "实"),
+            "da" to listOf("达"),
+            "guo" to listOf("国"),
+            "zhe" to listOf("这"),
+            "hui" to listOf("会"),
+            "dui" to listOf("对"),
+            "xue" to listOf("学"),
+            "ruan" to listOf("软"),
+        )
+        for ((syllable, characters) in simplified) {
+            val id = Syllables.readings(syllable).first().ids[0]
+            val readings = dict.charsFor(id)
+            for (character in characters) {
+                val entry = readings.firstOrNull { it.text == character } ?: continue
+                assertEquals("$character has a Taiwan weight", 0, entry.tw)
+            }
+        }
+    }
+
+    @Test
+    fun `forms shared by both scripts stay in the taiwan model`() {
+        // The filter that removes Simplified characters must not remove 台: OpenCC lists it as a
+        // Simplified key (台 -> 臺 檯 颱 台) yet it maps to *itself* too and is the form Taiwan
+        // actually writes -- 台灣 has 24,111 corpus occurrences where 臺灣 has none. Dropping every
+        // STCharacters key cost the Taiwan model 台灣 and 台北.
+        assertEquals("台灣", twTop("taiwan").first())
+        assertEquals("台北", twTop("taibei").first())
+    }
+
+    @Test
+    fun `taiwan sentences still decode`() {
+        // Charging the backoff penalty where it had been escaping changes every character path,
+        // so the sentences that motivated the penalty have to be re-checked in this model.
+        assertEquals("牛肉麵", twTop("niuroumian").first())
+        assertEquals("時間", twTop("shijian").first())
+        assertEquals("今天天氣很好", twTop("jintiantianqihenhao").first())
+        assertEquals("北京大學", twTop("beijingdaxue").first())
+        assertEquals("我們是中國人", twTop("womenshizhongguoren").first())
+        assertEquals("高雄", twTop("gaoxiong").first())
+    }
+
+    @Test
+    fun `the mainland model is unaffected by the taiwan fixes`() {
+        // Both fixes are meant to be invisible here: the mainland model never had the Simplified
+        // characters removed from it, and its single characters carry no word-index weight, so no
+        // backoff edge changed.
+        assertEquals("十大", first("shida"))
+        assertEquals("时间", first("shijian"))
+        assertEquals("今天天气很好", first("jintiantianqihenhao"))
+        assertEquals("我们是中国人", first("womenshizhongguoren"))
+        assertEquals("软件", first("ruanjian"))
+        assertEquals("鼠标", first("shubiao"))
+    }
+
     // --- learning ----------------------------------------------------------------------------
 
     @Test

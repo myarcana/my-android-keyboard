@@ -1,5 +1,7 @@
 package com.offlinekeyboard.ime.tap
 
+import com.offlinekeyboard.ime.layout.IosLayouts
+import com.offlinekeyboard.ime.layout.LayoutGeometry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -8,8 +10,12 @@ import org.junit.Test
 /** That a re-reading changes which letter a tap was without disturbing anything else about it. */
 class PendingWordTest {
 
+    private val geometry = LayoutGeometry(IosLayouts.QWERTY_LOWER, 1080f)
+
     private fun word(literals: String, upper: Set<Int> = emptySet()) = PendingWord().apply {
-        literals.forEachIndexed { i, c -> add(i.toFloat(), 0f, c, upper = i in upper) }
+        literals.forEachIndexed { i, c ->
+            add(i.toFloat(), 0f, c, upper = i in upper, geometry = geometry)
+        }
     }
 
     @Test

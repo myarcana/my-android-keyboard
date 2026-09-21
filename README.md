@@ -118,7 +118,8 @@ echo "sdk.dir=/opt/homebrew/share/android-commandlinetools" > local.properties
 - **Phase 0 — toolchain and skeleton: complete.** Builds, installs, offline guarantee
   enforced and negative-tested.
 - **Phase 1 — iOS layout and the gesture state machine: complete.** Flick-down symbols, the
-  spacebar trackpad with 2D cursor and selection, and hold-backspace-swipe-up. Thresholds fitted
+  spacebar trackpad with 2D cursor and selection, and hold-backspace with swipe-up to clear the
+  line and swipe-down to delete a word. Thresholds fitted
   to a bank of recorded gestures rather than by feel: `docs/GESTURE_BANK.md`.
 - **Phase 2 — glide typing: complete.** FUTO Swipe's neural models through the vendored
   `swipe-library`, chosen over the Kotlin decoder written first by scoring both on the same
