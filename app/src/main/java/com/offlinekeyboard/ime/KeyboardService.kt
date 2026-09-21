@@ -73,6 +73,8 @@ private const val PREF_SQUASH = "squash"
  * long way past moves quickly, which is how dragging a selection to the edge of a window behaves
  * everywhere else.
  */
+/** How long a trackpad start waits for a caret report before holding a composition for one. */
+private const val ANCHOR_PROBE_MS = 60L
 private const val EDGE_SCROLL_SLOWEST_MS = 260L
 private const val EDGE_SCROLL_FASTEST_MS = 45L
 /** Distance past the edge, in pixels, at which the fastest rate is reached. */
@@ -252,6 +254,13 @@ class KeyboardService : InputMethodService() {
     private var caretTop = Float.NaN
     private var caretBottom = 0f
     private var lineHeight = 0f
+    /**
+     * Distance between one line and the next, measured from real vertical steps. Not the same
+     * as [lineHeight], which is the caret's own height: with line spacing -- a web textarea is
+     * 59px of caret on a 72px pitch -- a marker half a caret below one line is still more than
+     * half a caret above the next, both lines claim it, and the caret flips between them.
+     */
+    private var linePitch = 0f
     private var charWidth = 0f
 
     /** Arrow keys sent but not yet reflected in a CursorAnchorInfo update. */
@@ -335,6 +344,34 @@ class KeyboardService : InputMethodService() {
     /** Last reported selection spans, so steering can run on a pan as well as on an update. */
     private var lastSelStart = -1
     private var lastSelEnd = -1
+
+    /** The selection as onUpdateSelection last gave it, for apps whose anchor info omits it. */
+    private var editorSelStart = -1
+    private var editorSelEnd = -1
+
+    /**
+     * The focused editor only reports its caret while text is being composed, so the trackpad
+     * has to hold a composing region open to see where the caret is. Firefox is the case in
+     * point: it answers requestCursorUpdates with true and then sends nothing, not even for
+     * CURSOR_UPDATE_IMMEDIATE, unless a composition exists -- with one, every IMMEDIATE request
+     * comes back within a few milliseconds with the exact caret position. Learned per field,
+     * so only the first drag in it pays the probe.
+     */
+    private var anchorNeedsComposition = false
+    /** The composing region is ours, held only so the caret gets reported; release it after. */
+    private var composingForAnchor = false
+
+    /**
+     * Run shortly after the trackpad starts. An app that reports at all answers the IMMEDIATE
+     * request well within this; one that has not is taken to need a composition.
+     */
+    private val anchorProbe = Runnable {
+        if (trackpadActive && markerX.isNaN() && !composingForAnchor) {
+            trace("no caret report: holding a composition to get one")
+            anchorNeedsComposition = true
+            holdCompositionForAnchor()
+        }
+    }
 
     /** Debug only: stands in for the second finger, which adb cannot send. */
     private val debugSelectReceiver = object : BroadcastReceiver() {
@@ -658,6 +695,10 @@ class KeyboardService : InputMethodService() {
         // focused -- the app changed something about it -- and the chips on screen are still
         // that field's, so only a genuinely new field clears them.
         if (!restarting) clearInlineSuggestions()
+        if (!restarting) anchorNeedsComposition = false
+        if (!restarting) linePitch = 0f
+        editorSelStart = info?.initialSelStart ?: -1
+        editorSelEnd = info?.initialSelEnd ?: -1
         tapDecodingAllowed = allowsTapDecoding(info)
         shift = ShiftState.OFF
         syncChineseMode()
@@ -704,6 +745,15 @@ class KeyboardService : InputMethodService() {
             (candidatesStart < 0 || newSelStart != newSelEnd || newSelEnd != candidatesEnd)
         ) {
             flushPending()
+        }
+        editorSelStart = newSelStart
+        editorSelEnd = newSelEnd
+        // Such an app reports nothing on its own when the caret moves; every move has to be
+        // followed by asking.
+        if (trackpadActive && composingForAnchor) {
+            currentInputConnection?.requestCursorUpdates(
+                InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
+            )
         }
         if (!trackpadActive) refreshCandidates()
     }
@@ -1544,6 +1594,7 @@ class KeyboardService : InputMethodService() {
     /** One line per event, so a whole gesture can be reconstructed exactly from logcat. */
     private fun trace(message: String) {
         if (DEBUG_GESTURES) android.util.Log.d("TP", message)
+        com.offlinekeyboard.ime.capture.TouchTrace.log(this, "TP $message")
     }
 
     private fun startTrackpad() {
@@ -1559,6 +1610,7 @@ class KeyboardService : InputMethodService() {
             InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
         )
         if (DEBUG_GESTURES) android.util.Log.d(TAG, "requestCursorUpdates -> $ok")
+        trace("requestCursorUpdates -> $ok")
         markerX = Float.NaN
         markerCenterY = Float.NaN
         caretX = Float.NaN
@@ -1566,7 +1618,31 @@ class KeyboardService : InputMethodService() {
         pendingHorizontal = 0
         pendingVertical = 0
         verticalStuckDir = 0
+        if (anchorNeedsComposition) holdCompositionForAnchor()
+        else handler.postDelayed(anchorProbe, ANCHOR_PROBE_MS)
         updateIndicator()
+    }
+
+    /**
+     * Marks one character as composing, without changing any text, so that an app which only
+     * reports its caret during a composition reports it. The pending word was flushed when the
+     * trackpad started, so no composition of ours is displaced.
+     */
+    private fun holdCompositionForAnchor() {
+        val ic = currentInputConnection ?: return
+        val caret = editorSelStart.takeIf { it >= 0 } ?: return
+        // Any character will do: the report carries the caret position regardless of where the
+        // composition is. One that exists is all that matters.
+        val (from, to) = when {
+            caret > 0 -> 0 to 1
+            ic.getTextAfterCursor(1, 0)?.isNotEmpty() == true -> caret to caret + 1
+            else -> return // an empty field has nowhere to move the caret to anyway
+        }
+        ic.setComposingRegion(from, to)
+        composingForAnchor = true
+        ic.requestCursorUpdates(
+            InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
+        )
     }
 
     private fun stopTrackpad() {
@@ -1574,6 +1650,11 @@ class KeyboardService : InputMethodService() {
         trackpadActive = false
         scrollPinned = false
         handler.removeCallbacks(edgeScrollTick)
+        handler.removeCallbacks(anchorProbe)
+        if (composingForAnchor) {
+            composingForAnchor = false
+            currentInputConnection?.finishComposingText()
+        }
         markerX = Float.NaN
         markerCenterY = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
@@ -1619,7 +1700,7 @@ class KeyboardService : InputMethodService() {
      * key acts on it, and is re-applied once the new position is reported.
      */
     private fun extendSelection(dy: Float): Boolean {
-        val lh = lineHeight.takeIf { it > 1f } ?: return false
+        val lh = pitch().takeIf { it > 1f } ?: return false
         selectionBankY += dy
         // One line change at a time: the next arrow must act on the position the previous one
         // produced, which is not known until the app reports it.
@@ -1773,7 +1854,17 @@ class KeyboardService : InputMethodService() {
                 "insH=${info.insertionMarkerHorizontal} insT=${info.insertionMarkerTop} " +
                 "markerY=$markerCenterY",
         )
+        trace(
+            "ANCHOR sel=[${info.selectionStart},${info.selectionEnd}] " +
+                "comp=[${info.composingTextStart},${info.composingText?.length}] " +
+                "insH=${info.insertionMarkerHorizontal} insT=${info.insertionMarkerTop} " +
+                "insB=${info.insertionMarkerBottom} " +
+                "cb0=${info.getCharacterBounds(info.composingTextStart)}",
+        )
         val point = caretPoint(info) ?: return
+        // Firefox fills in the caret's position but leaves the selection at -1.
+        val selStart = info.selectionStart.takeIf { it >= 0 } ?: editorSelStart
+        val selEnd = info.selectionEnd.takeIf { it >= 0 } ?: editorSelEnd
 
         // A rightward step that landed on a lower row wrapped: wherever the caret was before it
         // is where this text wraps. Remember it, so no further step tries to cross.
@@ -1797,7 +1888,7 @@ class KeyboardService : InputMethodService() {
         )
         val previousX = caretX
         val previousTop = caretTop
-        if (info.selectionStart == info.selectionEnd) caretOffset = info.selectionStart
+        if (selStart == selEnd) caretOffset = selStart
 
         (point[3] - point[1]).takeIf { it > 1f }?.let { lineHeight = it }
 
@@ -1813,12 +1904,27 @@ class KeyboardService : InputMethodService() {
             // still on screen, so screen position says "did not move" for the one case where it
             // moved the most -- which latched vertical movement off during every scroll.
             if (pendingVertical != 0 && pendingFromOffset >= 0) {
-                val movedInText = info.selectionStart != pendingFromOffset
-                verticalStuckDir = if (movedInText) 0 else if (pendingVertical > 0) 1 else -1
+                val movedInText = selStart != pendingFromOffset
+                val sameRow = abs(point[1] - previousTop) < 1f
+                // Firefox, like macOS, answers up on the first row by going to the start of the
+                // text and down on the last by going to the end. That moves the caret in the text
+                // but not between rows, which is exactly what a scroll looks like -- and taking
+                // it for one sent a repeating scroll of arrows into a field with nowhere to go.
+                // Landing on the very end of the text on the same row means the edge, not a scroll.
+                val hitTextEdge = movedInText && sameRow && (
+                    (pendingVertical < 0 && selStart == 0) ||
+                        (pendingVertical > 0 &&
+                            currentInputConnection?.getTextAfterCursor(1, 0).isNullOrEmpty())
+                    )
+                verticalStuckDir = if (movedInText && !hitTextEdge) 0 else if (pendingVertical > 0) 1 else -1
                 // Moved in the text but not on screen: the editor is scrolling underneath a
                 // pinned caret. Its reported position will not close the error, so vertical
                 // movement has to be handed to the rate-limited scroll instead of chased.
-                scrollPinned = movedInText && abs(point[1] - previousTop) < 1f
+                scrollPinned = movedInText && sameRow && !hitTextEdge
+                if (movedInText && pendingHorizontal == 0) {
+                    val pitch = abs(point[1] - previousTop) / abs(pendingVertical)
+                    if (pitch > lineHeight * 0.8f && pitch < lineHeight * 3f) linePitch = pitch
+                }
             }
 
             // Deliberately no attempt to move the marker with the scrolling text. Doing so
@@ -1849,8 +1955,8 @@ class KeyboardService : InputMethodService() {
             markerCenterY = caretTop + lineHeight / 2f
         }
 
-        lastSelStart = info.selectionStart
-        lastSelEnd = info.selectionEnd
+        lastSelStart = selStart
+        lastSelEnd = selEnd
 
         updateIndicator()
         updateEdgeScroll()
@@ -1873,7 +1979,7 @@ class KeyboardService : InputMethodService() {
         if (!scrollPinned || !trackpadActive) return 0
         if (markerCenterY.isNaN() || caretTop.isNaN()) return 0
         val lh = lineHeight.takeIf { it > 1f } ?: return 0
-        val lines = (markerCenterY - (caretTop + lh / 2f)) / lh
+        val lines = (markerCenterY - (caretTop + lh / 2f)) / pitch()
         return when {
             lines > 0.5f -> 1
             lines < -0.5f -> -1
@@ -1947,7 +2053,7 @@ class KeyboardService : InputMethodService() {
         val meta = 0
 
         val lh = lineHeight.takeIf { it > 1f } ?: return
-        val lines = ((markerCenterY - (caretTop + lh / 2f)) / lh).roundToInt().coerceIn(-12, 12)
+        val lines = ((markerCenterY - (caretTop + lh / 2f)) / pitch()).roundToInt().coerceIn(-12, 12)
         if (lines != 0) {
             trace(
                 "VWANT lines=$lines vStuck=$verticalStuckDir " +
@@ -2044,6 +2150,9 @@ class KeyboardService : InputMethodService() {
         val right = if (learnedHere) rowRightEdge else editorRight
         return !right.isNaN() && caretX + margin >= right
     }
+
+    /** Line-to-line distance: measured once a vertical step has shown it, the caret's height until then. */
+    private fun pitch(): Float = linePitch.takeIf { it > 1f } ?: lineHeight
 
     private fun effectiveCharWidth(): Float =
         charWidth.takeIf { it > 0f } ?: (lineHeight.takeIf { it > 1f } ?: 40f) * 0.33f

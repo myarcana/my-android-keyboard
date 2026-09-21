@@ -1156,6 +1156,30 @@ analyse` prints what the lifts actually looked like -- duration and distance, mi
 the window -- plus the statistic that decides whether the leniency is helping at all: how well
 rejoined glides decode compared with uninterrupted ones.
 
+### Trackpad in Firefox: caret reports need a composition
+
+Firefox (GeckoView) returns `true` from `requestCursorUpdates` and then sends no
+`CursorAnchorInfo` at all -- not for `IMMEDIATE`, not while monitoring -- unless a composition
+exists. The trackpad seeds its marker from the first report, so in every web textarea it was
+completely inert. With any composing region in place, each `IMMEDIATE` request is answered in
+about 5 ms with the exact caret position; the report does not arrive by itself when the caret
+moves, only when asked.
+
+So if nothing has reported 60 ms after the trackpad starts, one character is marked composing
+(`setComposingRegion`, no text changes), a fresh `IMMEDIATE` request follows every
+`onUpdateSelection`, and the region is finished when the drag ends. The need is remembered per
+field. Its reports leave `selectionStart/End` at -1, so offsets come from `onUpdateSelection`.
+
+Two things this exposed, both general:
+
+- **Line pitch is not caret height.** Vertical steering divided by the caret's height (59px)
+  while the textarea's lines are 72px apart, so a marker between two lines was claimed by both
+  and the caret flipped up and down every few milliseconds. The pitch is now measured from real
+  vertical steps.
+- **Up on the first row goes to offset 0** in Firefox (and down on the last to the end). Moved in
+  the text, same row -- which is what a scroll looks like, so it set off the repeating edge
+  scroll. Landing on the end of the text is now read as the edge.
+
 ### Trackpad gain and acceleration
 
 Base gains are the multiplier the acceleration curve leaves untouched at low speed, so they are
