@@ -27,6 +27,12 @@ private const val TAG = "KeywordSpotting"
  * Everything here is optional. The spotter is a repair on top of a working recogniser: if the
  * model is missing or fails to load, [detect] returns nothing and dictation behaves exactly as
  * it did before, with spoken punctuation handled by [SpokenPunctuation]'s word matching alone.
+ *
+ * "Optional" has to be enforced before the native call, not around it. Loading happens in C++,
+ * where a malformed keywords file does not raise a Java exception but calls `abort()` -- which
+ * no `catch` here can intercept and which kills the IME process, so the user sees the keyboard
+ * disappear while typing. [keywordsFileIsSafe] is what keeps a failure in this optional feature
+ * from being fatal to the keyboard.
  */
 class KeywordSpotting(private val assets: AssetManager) {
 
@@ -50,12 +56,45 @@ class KeywordSpotting(private val assets: AssetManager) {
     val available: Boolean get() = spotter != null
 
     /**
+     * Whether the keywords file can be handed to the native parser without aborting.
+     *
+     * `catch (Throwable)` below is not the safety net it looks like. sherpa-onnx parses this
+     * file in C++, and a token it cannot resolve is dispatched on its first character: `:` is a
+     * boost score, `#` a threshold, `@` the id. The first two call `std::stof` on the rest of
+     * the token, so `#` alone -- a comment marker the format does not have -- throws
+     * `std::invalid_argument` through the JNI frame. That is not a Java exception: it reaches
+     * `abort()` and takes the input method process down mid-keystroke, with the keyboard
+     * vanishing from the screen. The file ships generated and validated, so this is the second
+     * line of defence rather than the first; it costs one pass over 22 short lines.
+     */
+    private fun keywordsFileIsSafe(): Boolean = try {
+        assets.open(KEYWORDS).bufferedReader().useLines { lines ->
+            lines.withIndex().all { (index, line) ->
+                val bad = line.split(' ', '\t')
+                    .firstOrNull { it.isNotEmpty() && (it[0] == ':' || it[0] == '#') }
+                if (bad != null) {
+                    Log.e(
+                        TAG,
+                        "$KEYWORDS line ${index + 1} starts a token with '${bad[0]}', which the " +
+                            "native parser reads as a number and aborts on; skipping the spotter",
+                    )
+                }
+                bad == null
+            }
+        }
+    } catch (t: Throwable) {
+        Log.e(TAG, "cannot read $KEYWORDS", t)
+        false
+    }
+
+    /**
      * Loads the model. Returns false if it is unavailable, which is not an error: the caller
      * carries on without it.
      */
     @Synchronized
     fun load(): Boolean {
         spotter?.let { return true }
+        if (!keywordsFileIsSafe()) return false
         return try {
             spotter = KeywordSpotter(
                 assetManager = assets,

@@ -80,6 +80,16 @@ if ! adb shell true >/dev/null 2>&1; then
     exit 1
 fi
 
+# --- gradle home --------------------------------------------------------------------------
+# Gradle writes its wrapper caches under $GRADLE_USER_HOME, default ~/.gradle. On a sandboxed
+# box /root is not writable, and the wrapper fails with "Could not create parent directory for
+# lock file" -- before any build output, and in a way that says nothing about sandboxing. The
+# workspace copy is the one the documented build uses, so prefer it when it exists.
+if [[ -z "${GRADLE_USER_HOME:-}" && -d "$REPO/../.gradle-home" ]]; then
+    GRADLE_USER_HOME=$(cd "$REPO/../.gradle-home" && pwd)
+    export GRADLE_USER_HOME
+fi
+
 ./gradlew --quiet assembleDebug
 
 # ColorOS blocks installs behind a confirmation screen unless the verifier is off; see NOTES.md.
