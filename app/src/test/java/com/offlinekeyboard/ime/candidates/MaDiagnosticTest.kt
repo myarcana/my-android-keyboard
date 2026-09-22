@@ -2,6 +2,7 @@ package com.offlinekeyboard.ime.candidates
 
 import com.offlinekeyboard.ime.pinyin.Decoder
 import com.offlinekeyboard.ime.pinyin.PinyinDict
+import com.offlinekeyboard.ime.pinyin.ScriptMode
 import com.offlinekeyboard.ime.pinyin.UserDict
 import java.io.File
 import org.junit.Test
@@ -11,7 +12,7 @@ class MaDiagnosticTest {
     fun `what the bar actually shows for ma`() {
         val index = File("src/main/assets/emoji_en.tsv").inputStream().use(EmojiIndex::load)
         val dict = File("src/main/assets/pinyin.bin").inputStream().use(PinyinDict::load)
-        val decoder = Decoder(dict, UserDict(null), false)
+        val decoder = Decoder(dict, UserDict(null), ScriptMode.SIMPLIFIED)
 
         for (q in listOf("ma", "hao", "ni", "wo", "niuroumian")) {
             val hits = index.search(q)

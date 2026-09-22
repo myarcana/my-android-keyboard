@@ -358,6 +358,17 @@ class KeyboardView @JvmOverloads constructor(
      */
     private var accentPopup: Pair<KeyRect, Int>? = null
 
+    /**
+     * The key with an upward flick armed on it, and what that flick would do.
+     *
+     * Held so the key can show what releasing would commit -- the gesture opens no popup, so
+     * without this the only feedback is the buzz, and a hand that has armed copy by accident has
+     * no way to see it before lifting. Cleared by [GestureOutput.UpFlickDisarmed] and by the
+     * highlight going out at the end of every gesture, so a committed flick leaves nothing
+     * behind.
+     */
+    private var armedUpFlick: Pair<String, PopupEntry>? = null
+
     private var glidePath: List<PathPoint> = emptyList()
     private var trackpadActive = false
     private var selecting = false
@@ -776,6 +787,20 @@ class KeyboardView @JvmOverloads constructor(
         val secondary = rect.key.secondary
         if (text.isBlank() && secondary == null) return
 
+        // An armed upward flick replaces the key's contents outright, rather than crowding a
+        // badge in beside them. Releasing now types neither the letter nor the secondary, so
+        // showing either would be advertising an outcome the release will not produce.
+        val armedEntry = armedUpFlick?.takeIf { it.first == rect.key.id }?.second
+        if (armedEntry != null) {
+            if (lift > 0f) {
+                canvas.save()
+                canvas.translate(0f, -lift)
+            }
+            drawArmedUpFlick(canvas, g, t, rect, armedEntry)
+            if (lift > 0f) canvas.restore()
+            return
+        }
+
         // How far this key is through the flick, 0 at rest.
         val flick = motion?.pull ?: 0f
         // Everything from here is drawn in the key's own coordinates and then carried up bodily
@@ -839,6 +864,45 @@ class KeyboardView @JvmOverloads constructor(
 
         if (flick > 0f) canvas.restore()
         if (lift > 0f) canvas.restore()
+    }
+
+    /**
+     * The badge on a key whose upward flick is armed.
+     *
+     * Covers the key rather than sitting beside it. The gesture has already taken the key away
+     * from typing -- releasing now runs the action instead of committing the letter -- so the
+     * key showing its letter unchanged would be advertising the one thing that will not happen.
+     *
+     * An action is drawn as the icon the popup uses, and an accent as the character it would
+     * type, so the badge shows the same thing the long press shows for the same entry. A
+     * language cannot appear here: [com.offlinekeyboard.ime.layout.Key.flickUp] refuses it.
+     */
+    private fun drawArmedUpFlick(
+        canvas: Canvas,
+        g: LayoutGeometry,
+        t: Theme,
+        rect: KeyRect,
+        entry: PopupEntry,
+    ) {
+        val size = g.keyUnit * 0.52f
+        when (entry) {
+            is PopupEntry.Action -> {
+                icon.color = t.text
+                icon.strokeWidth = g.keyUnit * 0.06f
+                KeyIcons.drawAction(canvas, entry.action, rect.centerX, rect.centerY, size, icon)
+            }
+            is PopupEntry.Accent -> {
+                label.color = t.text
+                label.textSize = size
+                canvas.drawText(
+                    entry.text,
+                    rect.centerX,
+                    rect.centerY - (label.descent() + label.ascent()) / 2f,
+                    label,
+                )
+            }
+            is PopupEntry.Language, PopupEntry.Blank -> Unit
+        }
     }
 
     private fun drawGlideTrail(canvas: Canvas, g: LayoutGeometry, t: Theme) {
@@ -1367,7 +1431,14 @@ class KeyboardView @JvmOverloads constructor(
         var repaint = false
         outputs.forEach { out ->
             when (out) {
-                is GestureOutput.KeyHighlighted -> { highlightedKeyId = out.keyId; repaint = true }
+                is GestureOutput.KeyHighlighted -> {
+                    highlightedKeyId = out.keyId
+                    // Every gesture ends with the highlight going out, which makes this the one
+                    // place guaranteed to run however the flick finished -- committed,
+                    // abandoned, or cancelled by the system taking the touch stream away.
+                    if (out.keyId == null) armedUpFlick = null
+                    repaint = true
+                }
                 is GestureOutput.CommitPrimary -> tick()
                 is GestureOutput.CommitSecondary -> tick()
                 is GestureOutput.CommitAccent -> tick()
@@ -1376,6 +1447,17 @@ class KeyboardView @JvmOverloads constructor(
                 is GestureOutput.SpecialKey -> tick()
                 GestureOutput.FlickPreviewCleared -> repaint = true
                 is GestureOutput.FlickPreview -> repaint = true
+                // The upward flick arms with the finger mid-stroke and nothing on screen to show
+                // for it -- no popup opens, and the key it belongs to is under the hand. The
+                // buzz is the whole acknowledgement, and it is the long-press one rather than a
+                // tick because it means the same thing that one does: lifting now no longer
+                // types the letter. Nothing is committed here; the release decides.
+                is GestureOutput.UpFlickArmed -> {
+                    armedUpFlick = out.keyId to out.entry
+                    longPressTick()
+                    repaint = true
+                }
+                GestureOutput.UpFlickDisarmed -> { armedUpFlick = null; repaint = true }
                 is GestureOutput.ShowAccents -> {
                     geometry().keyRects.firstOrNull { it.key.id == out.keyId }?.let {
                         accentPopup = it to 0

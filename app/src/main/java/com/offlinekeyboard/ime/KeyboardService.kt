@@ -46,6 +46,7 @@ import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
+import com.offlinekeyboard.ime.glide.GlideRejections
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.EditAction
@@ -172,6 +173,15 @@ class KeyboardService : InputMethodService() {
     /** Loaded off the main thread: 40,000 words is a fifth of a second the keyboard cannot wait. */
     private var glide: GlideEngine? = null
     private var glideLoading = false
+
+    /**
+     * Words a glide has had rejected, so re-gliding in the same place offers the next candidate.
+     *
+     * Lives here rather than inside the engine because the evidence it runs on is not available
+     * there: what the decoder returned is one half, and what the user then did to the field is
+     * the other. See [GlideRejections].
+     */
+    private val glideRejections = GlideRejections()
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
 
@@ -607,9 +617,18 @@ class KeyboardService : InputMethodService() {
         // read, and until it lands the bar is emoji-only rather than empty, which is exactly how
         // the keyboard behaved before this existed.
         val session = pinyin ?: PinyinSession(this).also { pinyin = it }
-        // Which language model the decoder scores against. In English there is no Chinese
-        // subtype to read it from, so the Traditional model is chosen by the same setting the
-        // user would use to get Traditional in Chinese mode.
+        // Which language model the decoder scores against.
+        //
+        // In a Chinese subtype the user has declared a script and gets exactly that one. In
+        // English nothing has been declared, so the bar ranks both scripts against each other
+        // instead of guessing one -- see [PinyinSession.englishMode].
+        //
+        // That guess used to be `preferTraditional()`, and it could not return true on a default
+        // install: it reports a preference only when Traditional is enabled and Simplified is
+        // not, but both Chinese subtypes are declared in `method.xml` and are implicitly enabled
+        // together, so the English bar was permanently Simplified-only. Ranking both removes the
+        // guess rather than correcting it.
+        session.englishMode = !chineseMode
         session.traditional = if (chineseMode) isTraditionalSubtype() else preferTraditional()
         // refreshCandidates on arrival, so the bar fills as soon as the dictionary lands
         // rather than waiting for the next keystroke.
@@ -767,6 +786,10 @@ class KeyboardService : InputMethodService() {
         // drew belongs in the field it was drawn over rather than in whatever is focused next.
         keyboardView?.finishPendingGlide()
         flushPending()
+        // Rejections are about a word in a place in *this* field. The next field has its own
+        // text at the same offsets, and carrying refusals into it would demote a candidate on
+        // the strength of something the user said about a different document.
+        glideRejections.clear()
         endSelection()
         stopTrackpad()
         stopBackspaceRepeat()
@@ -780,6 +803,9 @@ class KeyboardService : InputMethodService() {
         super.onStartInputView(info, restarting)
         // A word held over from the last field must not follow the focus into this one.
         flushPending()
+        // Nor may a rejection recorded against an offset in the last field, where the same
+        // offset now names entirely different text. See [onFinishInputView].
+        if (!restarting) glideRejections.clear()
         // Nor may a login offered for the last one. `restarting` means the same field is still
         // focused -- the app changed something about it -- and the chips on screen are still
         // that field's, so only a genuinely new field clears them.
@@ -839,6 +865,11 @@ class KeyboardService : InputMethodService() {
         }
         editorSelStart = newSelStart
         editorSelEnd = newSelEnd
+        // After the selection fields are up to date, because it reads the field relative to
+        // where the caret now is. This is the one place that sees the result of every edit,
+        // whoever made it, which is why the delete that takes a glided word back is recognised
+        // here rather than in the code that performs each kind of delete.
+        noticeGlideEdit()
         // Such an app reports nothing on its own when the caret moves; every move has to be
         // followed by asking.
         if (trackpadActive && composingForAnchor) {
@@ -898,9 +929,46 @@ class KeyboardService : InputMethodService() {
         val token = window?.window?.attributes?.token
         if (LanguageMenu.switchTo(this, token, languageId)) return
 
-        // Nothing worked. Cycling is not what was asked for, but it is the one thing an IME can
-        // always do, and it is nearer the request than leaving the language unchanged.
-        switchToNextInputMethod(false)
+        // Nothing worked. Where the user asked for one of *our* languages, the recovery stays
+        // inside this keyboard: cycling out to Gboard because a subtype switch was refused is
+        // further from the request than changing nothing, not nearer it. Only a request that was
+        // already "leave for another keyboard" is allowed to fall back to leaving.
+        if (subtype != null) cycleOwnSubtype() else switchToNextInputMethod(false)
+    }
+
+    /**
+     * A tap on the globe: the next language *of this keyboard*, wrapping at the end.
+     *
+     * Deliberately not `switchToNextInputMethod`. That call asks the system for the next
+     * destination and the system counts other keyboards among them, so on a phone with Gboard
+     * installed the very first tap left this IME entirely -- the one outcome a tap on the globe
+     * should never have. Even `switchToNextInputMethod(true)`, which claims to stay within the
+     * current IME, returns false and falls through to another keyboard once it believes there is
+     * no next subtype, which is exactly the state a device is in when only one of our subtypes
+     * has been enabled in Settings.
+     *
+     * So the ring is walked here instead, over the enabled subtypes this keyboard declares.
+     * Leaving for another keyboard remains available, but only through the deliberate act of
+     * holding the key and sliding to it -- never by a tap.
+     *
+     * With a single enabled subtype there is nowhere to go and the tap does nothing, which is
+     * honest: the fix for that is enabling another language, not silently changing keyboard.
+     */
+    private fun cycleOwnSubtype() {
+        val imm = getSystemService(InputMethodManager::class.java) ?: return
+        val info = runCatching { imm.enabledInputMethodList }.getOrNull().orEmpty()
+            .firstOrNull { it.packageName == packageName } ?: return
+        val subtypes = runCatching { imm.getEnabledInputMethodSubtypeList(info, true) }
+            .getOrNull().orEmpty()
+        if (subtypes.size < 2) return
+
+        val current = runCatching { imm.currentInputMethodSubtype }.getOrNull()
+        val index = subtypes.indexOfFirst { it.hashCode() == current?.hashCode() }
+        val next = subtypes[(index + 1).mod(subtypes.size)]
+
+        // Same call the menu prefers, and for the same reason: it needs no window token and no
+        // permission that has been tightened since.
+        runCatching { switchInputMethod(info.id, next) }
     }
 
     private fun handleOutputs(outputs: List<GestureOutput>) {
@@ -1204,30 +1272,132 @@ class KeyboardService : InputMethodService() {
      * between two glided words; only this one leaves the caret against the last letter, where
      * backspace deletes a character of the word just typed instead of an invisible space, and
      * where the emoji bar is still looking at a word rather than at nothing.
+     *
+     * The word taken is the best candidate **that has not already been rejected here**. Deleting
+     * a glided word is how the user says the decoder guessed wrong, and the next glide in that
+     * place moves down the ranking rather than repeating the guess -- see [GlideRejections],
+     * which owns that memory and the wrap-around when the candidates run out.
      */
     private fun commitGlide(completed: GestureOutput.GlideCompleted): String? {
         // A glide writes a whole word of its own; the tapped one before it is finished.
         flushPending()
         val decoder = glide ?: return null
         val view = keyboardView ?: return null
-        val word = decoder.decode(completed.path, view.currentGeometry).firstOrNull()
-            ?: return null
+        val candidates = decoder.decode(completed.path, view.currentGeometry)
         val ic = currentInputConnection ?: return null
 
-        val cased = if (shift == ShiftState.OFF) word else word.replaceFirstChar { it.uppercase() }
         val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
         val needsSpace = before != null && !before.isWhitespace() && before !in OPENERS
+        // Where the word itself will start, which is past the space when one is going in. This
+        // is the position the rejection memory is keyed on, and it is read *before* the edit so
+        // it names the same place on every retry: a retyped word replaces the last one exactly,
+        // so its start is fixed while its end moves with the length of whatever was chosen.
+        //
+        // Asked of the editor rather than taken from [editorSelStart], which is only as fresh as
+        // the last onUpdateSelection -- and the delete that precedes a retry is followed
+        // immediately by the retry itself, so on a quick thumb the callback has not arrived and
+        // the cached offset still describes the text *before* the deletion. Keying on that would
+        // file the rejection under a position the word was never at, and the cycle would stall
+        // on the second candidate. See [beginSelection] for the same fallback in the same order.
+        val caret = currentCaret()
+        val start = if (caret < 0) -1 else if (needsSpace) caret + 1 else caret
+        val word = glideRejections.next(start, candidates) ?: return null
+
+        val cased = if (shift == ShiftState.OFF) word else word.replaceFirstChar { it.uppercase() }
         val written = if (needsSpace) " $cased" else cased
         ic.beginBatchEdit()
         ic.commitText(written, 1)
         ic.endBatchEdit()
         typed(written)
+        // Recorded as committed, not as accepted: whether this was the wanted word is decided by
+        // what the user does next, and a delete arriving shortly is exactly the case this exists
+        // for. A position we could not locate (-1) is still tracked so the *word* can be matched
+        // when it is deleted; it simply shares one bucket with every other unlocatable glide.
+        // Both spellings: `cased` is what the field now contains and what a delete has to be
+        // measured against, `word` is how the ranking spells it and so what gets struck off.
+        glideRejections.committed(start, written = cased, candidate = word)
         if (shift == ShiftState.ONE_SHOT) {
             shift = ShiftState.OFF
             applyLayout()
         }
         refreshCandidates()
         return cased
+    }
+
+    /**
+     * The caret offset right now, or -1 if the field will not say.
+     *
+     * Asks the editor first and falls back to the cached selection, which is the opposite order
+     * from most reads here and is deliberate: the callers are the glide-rejection pair, and both
+     * run immediately after an edit that the asynchronous callbacks have not yet reported. A
+     * collapsed caret only; a selection has no single position and neither caller means anything
+     * against one.
+     */
+    private fun currentCaret(): Int {
+        val ic = currentInputConnection ?: return -1
+        val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+        if (extracted != null) {
+            val start = extracted.startOffset.coerceAtLeast(0) + extracted.selectionStart
+            val end = extracted.startOffset.coerceAtLeast(0) + extracted.selectionEnd
+            if (extracted.selectionStart >= 0 && start == end) return start
+        }
+        return if (editorSelStart >= 0 && editorSelStart == editorSelEnd) editorSelStart else -1
+    }
+
+    /**
+     * Decides whether the glided word that was just typed is still in the field, and tells
+     * [GlideRejections] which it was.
+     *
+     * Called after every edit rather than from inside the delete paths, and that is the point:
+     * "by any method" is the requirement, and there are many methods. A plain backspace, a held
+     * backspace that has accelerated into whole words, the swipe-down and swipe-up bulk deletes,
+     * a selection typed over, the app's own undo, a delete performed by a hardware keyboard or by
+     * another IME sharing the field -- instrumenting each one would mean finding each one, and
+     * the ones reached from outside this class could not be instrumented at all. Reading the
+     * field is the single check that covers all of them, because it asks about the outcome
+     * instead of the cause.
+     *
+     * Three outcomes, and the middle one is the reason this is not a one-line check:
+     *
+     *  - **The word is still there.** The guess was right and the user has moved on -- typed
+     *    more, added a space, tapped elsewhere. The question asked at that spot is settled, so
+     *    [GlideRejections.acceptedAt] drops the refusals recorded against it; leaving them would
+     *    demote a candidate for some later sentence that reuses the offset.
+     *  - **Part of it is still there.** A character-at-a-time backspace is mid-flight. Nothing is
+     *    decided yet -- the user may stop and retype the tail by hand, which is not a complaint
+     *    about the decoder -- so this waits and says nothing.
+     *  - **It is gone.** That is the rejection.
+     */
+    private fun noticeGlideEdit() {
+        val (start, word) = glideRejections.pendingCommit() ?: return
+        val ic = currentInputConnection ?: return
+        val caret = editorSelStart.takeIf { it >= 0 } ?: return
+        if (start < 0) return
+        if (caret < start + word.length) {
+            // The caret is inside or before the word's span, so the field cannot still hold all
+            // of it. Read what survives between the word's start and the caret.
+            val kept = if (caret <= start) "" else ic.getTextBeforeCursor(caret - start, 0) ?: return
+            // A prefix of the word is a delete in progress; wait for it to land somewhere.
+            if (kept.isNotEmpty() && word.startsWith(kept)) return
+            glideRejections.rejectLast()
+            return
+        }
+        // The caret is past where the word ends, so the whole span is readable. Ask for exactly
+        // it -- offset by however far the caret has since moved on -- and compare.
+        val span = ic.getTextBeforeCursor(caret - start, 0) ?: return
+        if (!(span.length >= word.length && span.startsWith(word))) {
+            // The span was overwritten rather than deleted back through: a selection replaced,
+            // an autocorrect, an undo that swapped the text. The word is gone all the same.
+            glideRejections.rejectLast()
+            return
+        }
+        // The word survives. That is only *acceptance* once the user has done something further
+        // -- the caret has moved beyond the word, so more text has been typed or the caret was
+        // put elsewhere. The moment the glide itself lands the caret sits exactly at the word's
+        // end, and calling this acceptance there would clear the very rejections being
+        // accumulated: every delete-and-retry would reset to the first candidate and the chain
+        // the user is walking could never get past the second word.
+        if (caret > start + word.length) glideRejections.acceptedAt(start)
     }
 
     /**
@@ -1279,7 +1449,7 @@ class KeyboardService : InputMethodService() {
             KeyType.SHIFT -> toggleShift()
             KeyType.BACKSPACE -> backspace()
             KeyType.MODE_SWITCH -> switchPlane(keyId)
-            KeyType.GLOBE -> switchToNextInputMethod(false)
+            KeyType.GLOBE -> cycleOwnSubtype()
             KeyType.MIC -> toggleDictation()
             KeyType.RETURN -> pressReturn()
             else -> Unit

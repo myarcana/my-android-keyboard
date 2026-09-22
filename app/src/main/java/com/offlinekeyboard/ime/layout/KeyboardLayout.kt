@@ -68,6 +68,25 @@ data class Key(
     val popupPrimary: Int get() = popupLayout.primary
 
     /**
+     * What an upward flick from this key does, or null when it does nothing.
+     *
+     * The same entry a long press opens on and releasing commits -- deliberately *derived* from
+     * [popupLayout] rather than declared per key. The two gestures are one promise ("this key
+     * also does that") offered at two speeds: hold if you want to look first, flick if you
+     * already know. Declaring it twice is how they would come to disagree, and the disagreement
+     * would be silent, because nothing downstream compares them.
+     *
+     * The language menu is excluded. Its primary is the *next* language rather than a fixed
+     * destination -- see [languagePopup] -- so a flick would mean something different every time
+     * it was made, which is the one thing a gesture meant to be learned by the hand must not do.
+     */
+    val flickUp: PopupEntry? get() {
+        if (languages.isNotEmpty()) return null
+        val layout = popupLayout
+        return layout.entries.getOrNull(layout.primary)?.takeIf { it != PopupEntry.Blank }
+    }
+
+    /**
      * The popup's entries and which of them is the primary, decided together.
      *
      * One computation returning both, because they are two halves of one arrangement and
@@ -143,18 +162,39 @@ data class Key(
  * above it than beside it, the globe being pinned near the left edge of the bottom row.
  */
 enum class PopupShape {
-    /** Wraps into rows of up to [PopupGrid.MAX_COLUMNS], each cell one key wide. Accents. */
+    /** Wraps into rows as wide as the room beside the key allows, each cell one key wide. Accents. */
     GRID,
 
     /** A single column of wide cells, selected by sliding up and down. The language menu. */
     COLUMN,
 }
 
+/**
+ * How much room a popup row has above a given key, in whole cells.
+ *
+ * Measured once from the key's position and then used for both halves of the layout -- how many
+ * entries share the primary's row, and where the primary sits in it. See [PopupGrid.rowRoom].
+ */
+data class RowRoom(
+    /** Cells that fit in one row, the primary's own included. */
+    val perRow: Int,
+    /** How many of them sit left of the primary, which is zero on the leftmost keys. */
+    val leftOfPrimary: Int,
+)
+
 /** A popup's entries in the order they are laid out, and which one sits under the thumb. */
 data class PopupLayout(
     val entries: List<PopupEntry>,
     val primary: Int,
     val shape: PopupShape = PopupShape.GRID,
+    /**
+     * How many cells wide the arrangement is, where it has already been decided.
+     *
+     * Null until the entries have been fitted to a key's surroundings -- a bare reading order has
+     * no width. [PopupGrid.arrangeForThumb] fills it in, and [PopupGrid.of] uses it rather than
+     * re-deriving the width from the entry count, which is how the two once disagreed.
+     */
+    val columns: Int? = null,
 )
 
 data class Row(val keys: List<Key>)

@@ -107,7 +107,51 @@ object UnifiedCandidates {
         }
 
         out.sortByDescending { it.score }
-        return out.take(limit)
+        return withoutFiller(out.take(limit), query.length)
+    }
+
+    /**
+     * Drops trailing candidates that are only in the bar because the bar had room.
+     *
+     * The ranker had no floor: it sorted by score and took [limit], so whatever was left over
+     * filled the strip however bad it was. For `danta` that meant seven of twelve slots going to
+     * single characters -- 但, 單, 石, 擔 -- that read `dan` and ignore `ta` entirely. Each had
+     * already been charged the full [COVERAGE_PENALTY] and sat 6 to 9 nats below the real
+     * answers; the penalty was working, there was simply nothing else to show and no rule saying
+     * that "nothing else" is the better answer.
+     *
+     * Two things are cut, and only ever from the tail:
+     *
+     *  - **Partial readings, once a complete one exists.** If any candidate explains everything
+     *    typed, one explaining a prefix is a worse answer to the same question rather than a
+     *    different question, and the user can reach it by typing less. This is the rule that
+     *    removes 但/單/石, and it fires only when a full-coverage candidate is actually present,
+     *    so input no word covers (a name, a rare compound) still fills the bar from its floor.
+     *  - **Anything [FILLER_GAP] nats behind the leader**, whatever its coverage. A candidate
+     *    three orders of magnitude less likely than the best one is not a suggestion.
+     *
+     * [MIN_SUGGESTIONS] are always kept, so the strip never collapses to one item and a
+     * genuinely ambiguous input keeps its alternatives.
+     */
+    private fun withoutFiller(ranked: List<Suggestion>, queryLength: Int): List<Suggestion> {
+        if (ranked.size <= MIN_SUGGESTIONS) return ranked
+        val best = ranked.first().score
+        // "Complete" is measured against the letters typed, not against the longest span some
+        // candidate happened to reach: an input whose every reading is partial would otherwise
+        // treat its longest partial one as complete and cut all the others against it.
+        val complete = ranked.any { it.kind != Kind.EMOJI && it.consumes >= queryLength }
+        return ranked.filterIndexed { i, s ->
+            when {
+                i < MIN_SUGGESTIONS -> true
+                // Emoji are never filler: they answer a different question from the Chinese
+                // half and are already scored on the shared scale, so a bar that is
+                // deliberately emoji-only (`happy`) survives this untouched.
+                s.kind == Kind.EMOJI -> true
+                best - s.score > FILLER_GAP -> false
+                complete && s.consumes < queryLength -> false
+                else -> true
+            }
+        }
     }
 
     /** A Chinese candidate as the decoder produced it: text, its log-probability, and its span. */
@@ -196,6 +240,21 @@ object UnifiedCandidates {
 
     /** Charged for input a Chinese reading does not explain, in nats. See [chineseScore]. */
     private const val COVERAGE_PENALTY = 18f
+
+    /** Kept regardless of the filler floor, so the strip is never bare. See [withoutFiller]. */
+    private const val MIN_SUGGESTIONS = 3
+
+    /**
+     * How far behind the best candidate a suggestion may sit before it is not worth a slot.
+     *
+     * In nats, so 7 is "about a thousand times less likely than the leader". Sized from the
+     * `danta` bar, where the real answers sat within 1.7 nats of each other (-13.24 to -14.91)
+     * and the filler began at -16.14, a 2.9-nat step below the last real one. Anything this far
+     * down is a different kind of thing rather than a close second. Deliberately generous: this
+     * is the backstop for candidates that are merely bad, while the coverage rule in
+     * [withoutFiller] is what removes the specific case of a partial reading.
+     */
+    private const val FILLER_GAP = 7f
 
     /**
      * The log-probability below which a query is not treated as an English word at all.

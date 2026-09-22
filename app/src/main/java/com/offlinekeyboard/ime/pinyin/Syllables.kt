@@ -50,20 +50,39 @@ internal object Syllables {
      * Fuzzy pinyin pairs, applied symmetrically.
      *
      * These are the confusions of Mandarin speakers whose own dialect does not make the
-     * distinction -- southern speakers typing `zhongguo` as `zongguo`, `chi` as `ci`. Enabled
-     * unconditionally: a fuzzy match is only ever *added* as a lower-ranked alternative, so a
-     * typist who makes no such confusion sees the same first candidate either way, while one who
-     * does gets a keyboard that works. The cost is a handful of extra lattice edges.
+     * distinction -- southern speakers typing `zhongguo` as `zongguo`, `chi` as `ci`.
+     *
+     * **The set is the one Gboard ships enabled, and that is not an aesthetic choice.** The
+     * previous list applied every pair it could think of, on the reasoning that "a fuzzy match is
+     * only ever *added* as a lower-ranked alternative, so a typist who makes no such confusion
+     * sees the same first candidate either way". That premise is false, and `danta` is the proof:
+     * 当他 (`dang ta`) is 27x commoner than 蛋挞 (`dan ta`), so the `ang`/`an` rule let a word the
+     * user did not spell outrank every word they did. A fixed penalty cannot fix this in general
+     * because the frequency gap it must cover is unbounded -- the only reliable lever is not
+     * generating the confusion at hand.
+     *
+     * Read off a real device (`dumpsys input_method`, Gboard's live Pinyin config), the
+     * reference implementation enables `z/zh`, `c/ch`, `s/sh`, `an/ang`, `en/eng`, `in/ing` and
+     * disables `l/n`, `f/h`, `r/l`, `k/g`, `ian/iang`, `uan/uang` -- behind a master switch that
+     * itself defaults to off. Three of the rules dropped here (`n`/`l`, `f`/`h`, `r`/`l`) were
+     * ones Gboard ships disabled: they are the widest of the confusions, roughly doubling the
+     * lattice, and they are what made `lan` mean 南 and `fu` mean 湖 for every typist rather
+     * than for the minority who conflate them.
+     *
+     * The six kept are the retroflex trio and the three nasal finals, which are the genuinely
+     * common southern confusions. They stay on unconditionally rather than behind a setting,
+     * because this keyboard has no settings screen for them yet; [Decoder.FUZZY_PENALTY] prices
+     * them, and the pricing is now doing a job sized to fit.
      *
      * Written as initial and final rewrites because that is how they apply: `zh`->`z` is only a
      * confusion at the start of a syllable, `ang`->`an` only at the end.
      */
     private val FUZZY_INITIALS = arrayOf(
-        "zh" to "z", "ch" to "c", "sh" to "s", "n" to "l", "f" to "h", "r" to "l",
+        "zh" to "z", "ch" to "c", "sh" to "s",
     )
 
     private val FUZZY_FINALS = arrayOf(
-        "ang" to "an", "eng" to "en", "ing" to "in", "iang" to "ian", "uang" to "uan",
+        "ang" to "an", "eng" to "en", "ing" to "in",
     )
 
     /** [SyllableTable.ALL] as a set, for membership tests during segmentation. */

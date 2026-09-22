@@ -1,6 +1,7 @@
 package com.offlinekeyboard.ime.layout
 
 import kotlin.math.ceil
+import kotlin.math.max
 import kotlin.math.min
 
 /**
@@ -13,16 +14,23 @@ import kotlin.math.min
  *
  * Two rules give the layout its shape:
  *
- * **The primary sits under the thumb.** Holding `c` should copy on release, with nothing to aim
- * at, so the popup is positioned to put [primaryIndex]'s cell over the key's centre rather than
- * to centre the popup as a whole. For a key with no action the primary is the middle entry, which
- * is the same thing as centring -- so accent popups keep the placement they have always had.
+ * **The primary is pinned over its key.** Holding `c` should copy on release with nothing to aim
+ * at, so the primary's cell is placed on the key's centre and the rest of the row is filled
+ * outward from it. The width of the popup is therefore an *output* of where the key is, not an
+ * input -- see [rowRoom] and [arrangeForThumb].
  *
- * **The finger decides, not the anchor.** Against the screen edge the popup has to be pushed back
- * inwards, and the primary then is not under the thumb any more; there is nowhere for it to be.
- * What must not happen is the popup claiming otherwise, so the opening selection is always
- * [entryAt] of the finger's real position. The anchor decides where the popup is drawn; the
- * finger alone decides what is selected.
+ * That ordering is the whole design, and the alternative is what used to be here: a row of a
+ * fixed five cells, slid sideways until it fit on screen, after which something had to work out
+ * which cell had happened to end up over the key. Near the ends of the board the answer was
+ * decided by which side of a cell boundary the key's centre fell on -- so on `a` the popup put
+ * `ä` under the left 42% of the key, and a long press there selected the accent instead of
+ * select-all. Pinning first means the question never arises: the primary covers the key by
+ * construction, for the key's whole width.
+ *
+ * **The finger decides.** The opening selection is always [entryAt] of the finger's real
+ * position, never an assumed slot. Placement decides where the popup is drawn; the finger alone
+ * decides what is selected, and because the primary now covers the whole key the two agree
+ * wherever on the key the press began.
  */
 data class PopupGrid(
     val entries: List<PopupEntry>,
@@ -118,92 +126,138 @@ data class PopupGrid(
         fun popupGap(geometry: LayoutGeometry): Float = POPUP_GAP * geometry.keyHeight
 
         /**
-         * How many entries may sit in one row before the popup wraps into a grid.
+         * How many cells fit in one popup row, and how many of them sit left of the primary.
          *
-         * A row of accents is read at a glance and crossed with one slide, which is why iOS uses
-         * one and why this stays a row for the common case. It stops working when the row gets
-         * long: eight accents on `o` span most of the keyboard, so the popup has to be shoved
-         * away from the key it belongs to, and the far end is an awkward reach across the hand
-         * that is holding the key down. Wrapping keeps the popup near its key and puts every
-         * entry within a short move in some direction.
+         * This is the whole layout decision, and it is made in the only order that does not need
+         * a search: the primary's cell is *pinned* directly over the key, and the row then fills
+         * outward into whatever space the screen actually has. Width is an output.
          *
-         * Five is the widest row that still fits beside a key pressed at either end of the board
-         * without clamping -- ten key units wide overall, against the twelve the layout has.
+         * The previous version fixed the width first -- always five cells -- then slid that rigid
+         * block sideways until it fit on screen and tried to work out which cell luck had left
+         * over the key. That is what produced the `ä`-under-`a` bug: on the leftmost key the
+         * block could not be centred, and the cell that ended up over the key was decided by
+         * which side of a cell boundary the key's centre happened to fall on. Nothing needs
+         * discovering here, because nothing was ever moved: the primary is over the key by
+         * construction, so [entryAt] over the key is the primary for the full width of the key.
+         *
+         * Both counts are returned together because they are one fact. The caller needs the row
+         * width to wrap and the left count to know where the primary sits in it, and deriving
+         * either from the other is how they came apart before.
          */
-        const val MAX_COLUMNS = 5
+        fun rowRoom(key: KeyRect, geometry: LayoutGeometry): RowRoom {
+            val cell = geometry.keyUnit
+            // The primary's cell, centred on the key and then nudged inside the bounds. The nudge
+            // only ever binds on a key whose own centre is within half a cell of the wall, where
+            // the cell would otherwise hang off the board.
+            val primaryLeft = (key.centerX - cell / 2f)
+                .coerceIn(geometry.popupLeftBound, geometry.popupRightBound - cell)
+            // Whole cells that fit each side of it. Truncation is the point: a partial cell is
+            // not a target, so it is not offered.
+            val left = ((primaryLeft - geometry.popupLeftBound) / cell).toInt().coerceAtLeast(0)
+            val right = ((geometry.popupRightBound - (primaryLeft + cell)) / cell)
+                .toInt().coerceAtLeast(0)
+            return RowRoom(perRow = left + right + 1, leftOfPrimary = left)
+        }
 
         /**
-         * Arranges entries into rows with the primary in the *bottom* row, nearest the thumb,
-         * and reports where the primary ended up.
+         * Arranges entries into rows, the primary pinned in the bottom row over its own key.
          *
-         * Built outward from the primary rather than by chunking the list and shuffling rows.
-         * Chunking first fixes which entries share a row before anything knows where the primary
-         * is, so every attempt to move it afterwards changed its column as well as its row and
-         * the popup opened on a neighbour. Here the bottom row is laid out first -- the primary
-         * with as many of its neighbours as fit around it -- and whatever is left stacks above in
-         * order. The primary's position is then known by construction instead of recovered by
-         * arithmetic.
+         * The rule is: put the primary above the key, fill the rest of the row outward from it
+         * for as long as there are cells on the board, and only start a second row once the row
+         * is genuinely full. Reading order is preserved -- entries declared before the primary
+         * sit to its left, those after it to its right -- so a slide goes where the eye expects.
          *
-         * Returning the new index rather than letting the caller work it out again is the point:
-         * it only means anything relative to this arrangement.
+         * Where one side of the key is walled the other absorbs the surplus rather than forcing
+         * a row that is not needed: on this layout every key has ten or more cells beside it, so
+         * every popup the keyboard ships is a single row. That is the improvement over the
+         * previous fixed five-cell row, which wrapped `o` and `i` and Enter into grids while
+         * most of the board sat empty, and had to hunt for which cell had ended up over the key.
          *
-         * A popup that fits on one row is returned untouched, which is every accent popup of five
-         * or fewer and every single-action key.
+         * When a row really does fill, the *short* row is the top one, furthest from the thumb:
+         * cells are indexed row-major, so a ragged row has to be first for the plain division in
+         * [cellLeft] and [entryAt] to keep agreeing.
          */
         fun arrangeForThumb(
             entries: List<PopupEntry>,
             primaryIndex: Int,
-            /**
-             * Which column the popup can actually put under the thumb, if the caller knows.
-             *
-             * Near the ends of the keyboard the popup has to be pushed back on screen, and the
-             * column the primary would like -- the middle -- is then somewhere else entirely. On
-             * `a`, the leftmost key, only column 0 ever lands under the finger. Choosing the
-             * column here, where the entries are still being arranged, is what lets the primary
-             * reach the thumb anyway; positioning alone cannot fix it, because the popup has
-             * nowhere left to move.
-             */
-            preferredColumn: Int? = null,
+            room: RowRoom,
         ): PopupLayout {
-            val columns = min(entries.size.coerceAtLeast(1), MAX_COLUMNS)
-            if (entries.size <= columns) return PopupLayout(entries, primaryIndex)
+            if (entries.isEmpty()) return PopupLayout(entries, 0)
+            val perRow = room.perRow.coerceAtLeast(1)
 
-            // The bottom row takes the primary and the entries either side of it, keeping it as
-            // near the wanted column as the ends of the list allow.
-            val half = preferredColumn ?: ((columns - 1) / 2)
-            val start = (primaryIndex - half).coerceIn(0, entries.size - columns)
-            val bottom = entries.subList(start, start + columns)
-            val above = entries.filterIndexed { i, _ -> i < start || i >= start + columns }
+            // How many of the primary's row-mates sit each side of it.
+            //
+            // Each side has its own hard ceiling: the cells that physically exist that side of
+            // the key, and the entries that fall that side of the primary in the declared order.
+            // Bounding the two separately is the point -- [RowRoom.perRow] is the total across
+            // both, so spending it without asking which side the room is on is what ran `i`'s
+            // popup off the right edge while eight unusable cells sat to its left.
+            val roomLeft = room.leftOfPrimary
+            val roomRight = room.perRow - 1 - roomLeft
+            val before = primaryIndex
+            val after = entries.size - 1 - primaryIndex
 
-            // Cells are indexed row-major from a full grid, so a row that is not full has to be
-            // the *first* one for every later row to line up -- and the bottom row, the one the
-            // thumb is on, must be full. Padding the top row keeps the arithmetic in [cellLeft]
-            // and [entryAt] a plain division while leaving the short row where it shows least.
-            val padding = (columns - above.size % columns) % columns
+            // Each side takes its own entries first, then absorbs whatever the other could not
+            // place -- which moves the primary along the row instead of starting a new one.
+            //
+            // The absorption is symmetric, and both directions are needed. `a` sits at the left
+            // wall with no cells to its left and nine free to its right, so its four leading
+            // accents follow the primary and all nine entries fit the one row they have room for.
+            // `o` is the mirror at the right wall, and pulls its trailing accents to the left.
+            // Without this a popup wrapped whenever the entries sat lopsidedly around the
+            // primary, stacking rows while cells stood empty beside the key. Wrapping is what is
+            // left only once the far side has genuinely run out too.
+            val leftOwn = min(roomLeft, before)
+            val rightOwn = min(roomRight, after)
+            val rightFill = min(roomRight, min(after + (before - leftOwn), perRow - 1 - leftOwn))
+            val leftFill = min(roomLeft, min(before + (after - rightOwn), perRow - 1 - rightFill))
+
+            // The row as a list of *indices* into [entries], so that working out what is left
+            // over afterwards is exact. Comparing entries by value would confuse two equal
+            // accents, and by identity would rely on boxing -- indices are the only honest key.
+            //
+            // Reading order is preserved within each group. The primary keeps its place, the
+            // entries nearest it on each side fill that side, and an overflowing side's surplus
+            // continues on the other -- the leading ones after the primary, the trailing ones
+            // before it -- so the row still reads left to right and only the split point moves.
+            val takenBefore = min(before, leftFill)
+            val takenAfter = min(after, rightFill)
+            val wrapAfter = rightFill - takenAfter   // leading entries pushed right
+            val wrapBefore = leftFill - takenBefore  // trailing entries pulled left
+            val rowIndices =
+                (primaryIndex + 1 + takenAfter until primaryIndex + 1 + takenAfter + wrapBefore) +
+                    (primaryIndex - takenBefore until primaryIndex) +
+                    listOf(primaryIndex) +
+                    (primaryIndex + 1..primaryIndex + takenAfter) +
+                    (0 until wrapAfter)
+            val inRow = rowIndices.toSet()
+
+            val bottom = rowIndices.map { entries[it] }
+            // Anything the row could not take stacks above, in declared order.
+            val above = entries.indices.filter { it !in inRow }.map { entries[it] }
+
+            // The width every row is indexed by. The primary's row is the widest that fits, so it
+            // sets the grid's width; [cellLeft] and [entryAt] are a plain division by this, so a
+            // row above may not be wider. Reported rather than recomputed by the caller, because
+            // it is decided here and disagreeing about it is how the highlight and the commit
+            // came apart before.
+            val width = bottom.size
+
+            // Where the primary landed in the row it was built into. Counted from the groups that
+            // precede it rather than from [leftFill], which is the room it was *offered* -- the
+            // two differ whenever a side absorbed the other's surplus, and taking the wrong one
+            // is how the popup opened on a neighbour.
+            val primaryInRow = wrapBefore + takenBefore
+
+            if (above.isEmpty()) return PopupLayout(bottom, primaryInRow, columns = width)
+
+            // The ragged row is the top one, so pad the front.
+            val padding = (width - above.size % width) % width
             return PopupLayout(
                 List(padding) { PopupEntry.Blank } + above + bottom,
-                padding + above.size + (primaryIndex - start),
+                padding + above.size + primaryInRow,
+                columns = width,
             )
-        }
-
-        /**
-         * The column that will end up under the key's centre, once clamping has had its say.
-         *
-         * For a key with room either side this is the middle column, and the popup is simply
-         * centred. Against the ends of the keyboard the popup cannot be centred -- it would hang
-         * off the screen -- so it gets pushed inward, and the column over the thumb is whichever
-         * one the push leaves there. Asking the question in that order, rather than picking a
-         * column and hoping, is what keeps the primary reachable on `a` and `p`.
-         */
-        fun thumbColumn(key: KeyRect, count: Int, geometry: LayoutGeometry): Int {
-            val columns = min(count.coerceAtLeast(1), MAX_COLUMNS)
-            val width = columns * geometry.keyUnit
-            val middle = (columns - 1) / 2
-            val ideal = key.centerX - (middle + 0.5f) * geometry.keyUnit
-            val maxLeft = geometry.popupRightBound - width
-            if (maxLeft < geometry.popupLeftBound) return middle
-            val left = ideal.coerceIn(geometry.popupLeftBound, maxLeft)
-            return ((key.centerX - left) / geometry.keyUnit).toInt().coerceIn(0, columns - 1)
         }
 
         /**
@@ -343,26 +397,30 @@ data class PopupGrid(
         fun of(key: KeyRect, geometry: LayoutGeometry): PopupGrid {
             val flat = key.key.popupLayout
             if (flat.shape == PopupShape.COLUMN) return column(key, flat, geometry)
-            val wanted = thumbColumn(key, flat.entries.size, geometry)
-            val (entries, primaryIndex) =
-                arrangeForThumb(flat.entries, flat.primary, wanted)
+            val room = rowRoom(key, geometry)
+            val arranged = arrangeForThumb(flat.entries, flat.primary, room)
+            val entries = arranged.entries
+            val primaryIndex = arranged.primary
 
             val count = entries.size.coerceAtLeast(1)
-            val columns = min(count, MAX_COLUMNS)
-            val rows = ceil(count / columns.toFloat()).toInt()
             val cellWidth = geometry.keyUnit
             val cellHeight = geometry.keyHeight * 1.15f
+            // The width the arrangement actually used, not the room it was offered: where one
+            // side of the key is walled the row is narrower than [RowRoom.perRow], and indexing
+            // by the larger number would place cells past the edge of the board.
+            val columns = (arranged.columns ?: count).coerceAtLeast(1)
+            val rows = ceil(count / columns.toFloat()).toInt()
 
             val anchorCol = primaryIndex % columns
             val anchorRow = primaryIndex / columns
-            val width = columns * cellWidth
-            val idealLeft = key.centerX - (anchorCol + 0.5f) * cellWidth
-            val maxLeft = geometry.popupRightBound - width
-            val left = if (maxLeft < geometry.popupLeftBound) {
-                geometry.popupLeftBound
-            } else {
-                idealLeft.coerceIn(geometry.popupLeftBound, maxLeft)
-            }
+
+            // The primary's cell is pinned over the key, and the grid's origin follows from it.
+            // No horizontal clamp: [rowRoom] already counted only cells that fit, so a grid built
+            // from that count is inside the bounds by construction. Clamping here is what used to
+            // slide the popup out from under its own primary.
+            val primaryLeft = (key.centerX - cellWidth / 2f)
+                .coerceIn(geometry.popupLeftBound, geometry.popupRightBound - cellWidth)
+            val left = primaryLeft - anchorCol * cellWidth
 
             // The anchor row sits just above the key, and any further rows stack upward from
             // there, so adding rows never pushes the primary away from the thumb.

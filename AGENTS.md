@@ -110,6 +110,35 @@ DERP relay at ~300-750 ms and roughly 170 KB/s. Consequences worth planning arou
   retry loop, and do a sequence of device commands in **one** shell rather than one per command.
 - For rapid iteration, USB from the Mac is dramatically faster and has none of this.
 
+## Enabled subtypes are device state, and reinstalling does not fix them
+
+Installing the APK declares the three subtypes in `method.xml`; it does not *enable* them. Which
+ones are active lives in `Settings.Secure.enabled_input_methods`, as hashes appended to each IME
+id after a semicolon. A freshly enabled keyboard often gets only one, and the symptom is two
+different bugs that look unrelated: the globe key's hold menu is missing languages, and a *tap*
+on the globe jumps straight to another keyboard, because the system finds no next subtype within
+this IME and looks outside it.
+
+Read the current state, and note that ours had no hashes at all while Gboard had three:
+
+```sh
+adb -s 100.121.46.71:5555 shell "settings get secure enabled_input_methods"
+adb -s 100.121.46.71:5555 shell "dumpsys input_method | grep -E 'rank=[0-9]+ item='"
+```
+
+The `rank=` lines are the authoritative switching list -- that is what the globe walks. The
+subtype hashes are stable per declaration and visible as `mSubtypeHashCode` in the same dumpsys
+output. For this app they are `-104537768` (en_US), `2045602146` (zh_TW), `-139230659` (zh_CN):
+
+```sh
+adb -s 100.121.46.71:5555 shell "settings put secure enabled_input_methods \
+  'com.offlinekeyboard.ime/.KeyboardService;-104537768;2045602146;-139230659:<other IMEs unchanged>'"
+```
+
+Preserve the other IMEs verbatim; the setting is the whole list, not a patch. The hashes change
+if a subtype's declared attributes change, so re-read them from dumpsys after editing
+`method.xml` rather than reusing the values above.
+
 ## Verifying a deploy actually worked
 
 `pm list packages` only proves an install happened at some point -- it was misleading once

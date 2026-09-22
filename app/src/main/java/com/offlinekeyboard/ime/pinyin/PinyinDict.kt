@@ -39,11 +39,23 @@ internal class PinyinDict private constructor(
      */
     class Word(val text: String, val cn: Int, val tw: Int) {
         fun weightFor(traditional: Boolean): Int = if (traditional) tw else cn
+
+        /**
+         * The weight to rank by in [mode], with the two corpora put on one scale.
+         *
+         * Zero means "no corpus this mode reads contains this word", which is the same signal
+         * [weightFor] gives for a single model -- so the callers that drop zero-weight entries
+         * keep working unchanged when the mode reads both.
+         */
+        fun rankWeightIn(mode: ScriptMode): Int = mode.rankWeightOf(cn, tw)
     }
 
     /** A single character reading and its weight in each model. */
     class CharEntry(val text: String, val cn: Int, val tw: Int) {
         fun weightFor(traditional: Boolean): Int = if (traditional) tw else cn
+
+        /** See [Word.rankWeightIn]. */
+        fun rankWeightIn(mode: ScriptMode): Int = mode.rankWeightOf(cn, tw)
     }
 
     /** The Simplified-to-Traditional tables, handed to [Script]. */
@@ -77,7 +89,11 @@ internal class PinyinDict private constructor(
      * by syllable id, so every key sharing a prefix is one contiguous run and this is two binary
      * searches -- the same trick [com.offlinekeyboard.ime.tap.WordIndex] uses over letters.
      */
-    fun wordsWithPrefix(ids: IntArray, limit: Int = 32, traditional: Boolean = false): List<Word> {
+    fun wordsWithPrefix(
+        ids: IntArray,
+        limit: Int = 32,
+        mode: ScriptMode = ScriptMode.SIMPLIFIED,
+    ): List<Word> {
         if (ids.isEmpty()) return emptyList()
         val lo = lowerBound(ids)
         val out = ArrayList<Word>(limit)
@@ -93,14 +109,16 @@ internal class PinyinDict private constructor(
             if (!startsWith(keyIds, ids)) break
             for (word in readMembers(keyOffsets[i], limit)) {
                 scanned++
-                if (word.weightFor(traditional) > 0) out.add(word)
+                if (word.rankWeightIn(mode) > 0) out.add(word)
                 if (out.size >= limit) break
             }
             i++
         }
         // Ranked in the model that is actually in play, or a Taiwan user's abbreviation would be
-        // resolved by mainland frequencies.
-        out.sortByDescending { it.weightFor(traditional) }
+        // resolved by mainland frequencies. In [ScriptMode.BOTH] the two columns are put on one
+        // scale first, so a Taiwan-only word is ranked by how common it is in Taiwanese writing
+        // rather than by a raw count from a corpus 2.5x smaller.
+        out.sortByDescending { it.rankWeightIn(mode) }
         return out
     }
 

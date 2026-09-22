@@ -177,7 +177,7 @@ class PinyinTest {
     // --- the Taiwan model is Traditional -----------------------------------------------------
 
     /** The decoder as a Taiwan subtype drives it. */
-    private val twDecoder = Decoder(dict, null, traditional = true)
+    private val twDecoder = Decoder(dict, null, ScriptMode.TRADITIONAL)
 
     private fun twTop(input: String, n: Int = 1): List<String> =
         twDecoder.candidates(input, 20).take(n).map { it.text }
@@ -252,6 +252,69 @@ class PinyinTest {
         assertEquals("我们是中国人", first("womenshizhongguoren"))
         assertEquals("软件", first("ruanjian"))
         assertEquals("鼠标", first("shubiao"))
+    }
+
+    // --- both scripts at once, for the English bar ---------------------------------------------
+
+    /** The decoder as the English suggestion bar drives it: no script has been declared. */
+    private val bothDecoder = Decoder(dict, null, ScriptMode.BOTH)
+
+    private fun bothTop(input: String, n: Int = 12): List<String> =
+        bothDecoder.candidates(input, 24).take(n).map { it.text }
+
+    @Test
+    fun `both scripts reach the english bar for the same letters`() {
+        // The requirement this mode exists for. In English mode nothing has told the keyboard
+        // which Chinese the user writes, so Simplified and Traditional are competing hypotheses
+        // about the letters and both must be offerable. A single-model decode can only ever show
+        // one of these two.
+        val miantiao = bothTop("miantiao")
+        assertTrue("面条 missing from $miantiao", "面条" in miantiao)
+        assertTrue("麵條 missing from $miantiao", "麵條" in miantiao)
+
+        val mian = bothTop("mian")
+        assertTrue("面 missing from $mian", "面" in mian)
+        assertTrue("麵 missing from $mian", "麵" in mian)
+    }
+
+    @Test
+    fun `a taiwan word outranks rarer mainland ones on its own corpus`() {
+        // The point of normalising each column by its own corpus total rather than by a shared
+        // constant. 師大 has tw=30,263 and 师大 has cn=51,915, so on raw weights the mainland word
+        // looks commoner -- but the Taiwan corpus is 2.5x smaller (2.28e9 against 5.63e9), and
+        // against its own corpus 師大 is the more probable word. A shared denominator gets this
+        // backwards and buries the Traditional form.
+        val shida = bothTop("shida")
+        val taiwan = shida.indexOf("師大")
+        val mainland = shida.indexOf("师大")
+        assertTrue("師大 missing from $shida", taiwan >= 0)
+        assertTrue("师大 missing from $shida", mainland >= 0)
+        assertTrue("師大 ($taiwan) should outrank 师大 ($mainland) in $shida", taiwan < mainland)
+    }
+
+    @Test
+    fun `ranking both scripts does not invent character pairs`() {
+        // The backoff penalty has to keep applying across both corpora at once. Reading two
+        // models doubles the single-character edges available at every position, and an
+        // unpenalised pair of very common characters would outscore the real word: `shida` must
+        // not decode to 是大, which no corpus contains as a word.
+        val shida = bothTop("shida", 3)
+        assertFalse("是大 should not be offered: $shida", "是大" in shida)
+        assertEquals("十大", shida.first())
+    }
+
+    @Test
+    fun `the chinese subtypes still see one script each`() {
+        // Cross-script ranking is scoped to the English bar. A user who picked a Chinese subtype
+        // has declared their script, and a bar mixing the two would be noise -- so the other
+        // model must stay filtered out here, exactly as before.
+        val tw = twDecoder.candidates("miantiao", 24).map { it.text }
+        assertTrue("麵條 missing from the Taiwan bar", "麵條" in tw)
+        assertFalse("面条 leaked into the Taiwan bar: $tw", "面条" in tw)
+
+        val cn = decoder.candidates("miantiao", 24).map { it.text }
+        assertTrue("面条 missing from the mainland bar", "面条" in cn)
+        assertFalse("麵條 leaked into the mainland bar: $cn", "麵條" in cn)
     }
 
     // --- learning ----------------------------------------------------------------------------

@@ -22,14 +22,19 @@ internal class Decoder(
     private val dict: PinyinDict,
     private val userDict: UserDict? = null,
     /**
-     * Which language model to score against.
+     * Which language model(s) to score against.
      *
      * Not a display setting: the dictionary holds a mainland Simplified model and a native
      * Taiwan Traditional one side by side, and this chooses which corpus's frequencies the
      * Viterbi pass uses. A Taiwan user typing `niuroumian` gets 牛肉麵 because that word has a
      * Taiwan weight and 牛肉面 has none, not because the output was converted afterwards.
+     *
+     * [ScriptMode.BOTH] reads both corpora and normalises each by its own total, so the two
+     * scripts compete instead of one being filtered away. That is the English bar's mode, where
+     * nothing has told the keyboard which Chinese the user writes; a Chinese subtype still picks
+     * one model, because there the user has said.
      */
-    var traditional: Boolean = false,
+    var mode: ScriptMode = ScriptMode.SIMPLIFIED,
     /**
      * Charged for spelling a span out character by character instead of using a word.
      *
@@ -38,6 +43,12 @@ internal class Decoder(
      * was not when single-character edges were escaping it entirely.
      */
     private val backoffPenalty: Float = BACKOFF,
+    /**
+     * Charged per fuzzily-matched syllable. A parameter for the same reason
+     * [backoffPenalty] is: its right value is an empirical question about how often a
+     * typist means a respelling rather than the syllable they actually typed.
+     */
+    private val fuzzyPenalty: Float = FUZZY_PENALTY,
 ) {
 
     /** One decoding of the input: the text, and how many syllables it consumed. */
@@ -83,7 +94,7 @@ internal class Decoder(
                     // pair of characters pays two small ones. The dictionary's word entry is
                     // strictly better evidence than assembling the same text character by
                     // character, and the penalty is what says so.
-                    val wordScore = unigram(word.weight) - if (word.backoff) backoffPenalty else 0f
+                    val wordScore = word.logProb - if (word.backoff) backoffPenalty else 0f
                     val target = i + span
                     for (path in prefixes) {
                         val score = path.score + wordScore +
@@ -138,9 +149,13 @@ internal class Decoder(
         // 1. Full decodings, over the few best readings. A fuzzy reading is charged here rather
         // than in the segmenter so that it competes on the same scale as everything else.
         val full = ArrayList<Candidate>()
+        // Tracked alongside, because which reading produced a candidate is not recoverable from
+        // the candidate: the budget below spends exact and fuzzy decodings differently.
+        val fromFuzzy = HashSet<String>()
         for (reading in readings.take(MAX_READINGS)) {
-            val penalty = reading.fuzzyCount * FUZZY_PENALTY
+            val penalty = reading.fuzzyCount * fuzzyPenalty
             for (candidate in decode(reading, limit)) {
+                if (reading.fuzzyCount > 0) fromFuzzy.add(candidate.text)
                 full.add(
                     Candidate(
                         candidate.text,
@@ -160,7 +175,68 @@ internal class Decoder(
         // with no 北京 anywhere -- so a phrase could be typed whole or not at all, and committing
         // it a word at a time was impossible. The alternatives past the first few are near
         // duplicates of each other anyway; what a user wants next is a shorter commit.
-        full.take(FULL_DECODINGS).forEach(::offer)
+        //
+        // **A respelling is held behind the literal readings while those are any good.**
+        //
+        // The reference keyboards are why. Asked for `danta`, iOS offers 蛋塔 蛋撻 蛋鴨 淡雅 三亞
+        // 反壓 and Gboard offers 但他 蛋塔 蛋撻 但她 但它: neither shows 当他 anywhere, though it
+        // reads `dang ta` and is 27x commoner than 蛋挞, so on frequency alone it would lead.
+        // They are not weighing it and finding it wanting -- they are not offering it, because
+        // the user did not type `dang`. A fixed penalty cannot express that: the gap it must
+        // cover is unbounded.
+        //
+        // But ordering fuzzy *strictly* last is wrong in the other direction, and `zongguo` is
+        // the proof -- its exact readings are 总过, 总国, 宗过, all junk, and 中国 is reachable
+        // only by respelling `zong` as `zhong`. Demoting it unconditionally buries the one good
+        // answer.
+        //
+        // The distinction is not exact-versus-fuzzy but *whether the input reads acceptably as
+        // typed*, and the test is the best literal reading against the best respelling. If the
+        // literal one is already competitive, the respellings are demoted wholesale: the user
+        // spelled something real and does not need to be second-guessed. If it is far behind,
+        // the letters do not parse and the respelling is the answer, so nothing is demoted.
+        //
+        // The margin is what makes this a measurement rather than a rule of thumb, and the
+        // inputs separate cleanly on it:
+        //
+        //     danta     best exact 但他 -13.2  vs best fuzzy 当他 -14.0   -> literal wins, hold
+        //     zhidao    best exact 知道  -9.3  vs        自导 -17.8       -> literal wins, hold
+        //     zongguo   best exact 总过 -27.0  vs        中国 -13.3       -> 13.7 behind, allow
+        //     sengri    best exact 色女工日 -23.6 vs     生日 -13.5       -> 10.1 behind, allow
+        //     sanghai   best exact 桑海 -15.3  vs        上海 -13.3       ->  2.0 behind, allow
+        //
+        // Note what this is *not*: a test of how tightly the literal readings cluster. `zongguo`
+        // has three of them within 1.24 nats of each other and every one is junk, so cohesion
+        // says "the input parses" exactly when it does not.
+        val exact = ArrayList<Candidate>(FULL_DECODINGS)
+        val deferred = ArrayList<Candidate>(FULL_DECODINGS)
+        for (candidate in full) {
+            if (candidate.text in fromFuzzy) deferred.add(candidate) else exact.add(candidate)
+        }
+        val bestExact = exact.firstOrNull()?.score
+        val bestFuzzy = deferred.firstOrNull()?.score
+        val literalIsEnough = bestExact != null &&
+            (bestFuzzy == null || bestExact >= bestFuzzy - LITERAL_MARGIN)
+        if (literalIsEnough) {
+            // Respellings go behind the literal readings that are *worth having*, and no
+            // further. Demoting them behind the whole literal list was too blunt: `cifan` reads
+            // exactly as 此番 (-12.1) and then as nothing -- 此方案, 次方案, 此法案 are
+            // assembled junk at -19 and worse -- so pushing the respelling 吃饭 (-13.5) behind
+            // all of them spent the budget on rubbish and dropped the second-best answer in the
+            // bar entirely.
+            //
+            // A literal reading blocks a respelling only while it is within [LITERAL_GOOD] nats
+            // of the best literal one; past that it is an artefact of the lattice rather than a
+            // reading anybody wants, and it competes on score like anything else. `danta` keeps
+            // 但他 蛋挞 但她 但它 ahead of 当他 because all four are real words within 2.2 nats;
+            // `cifan` yields second place to 吃饭 because its literal tail is 7 nats down.
+            val lead = exact.first().score
+            val (good, weak) = exact.partition { it.score >= lead - LITERAL_GOOD }
+            val rest = (weak + deferred).sortedByDescending { it.score }
+            (good + rest).take(FULL_DECODINGS).forEach(::offer)
+        } else {
+            full.take(FULL_DECODINGS).forEach(::offer)
+        }
 
         // 2. Prefix words: every proper prefix of the best reading, longest first.
         val primary = readings.first()
@@ -172,7 +248,7 @@ internal class Decoder(
                 // pass. A one-syllable correction -- the commonest kind, choosing between
                 // homophones of `ta` -- arrives as a prefix candidate, and scoring it without
                 // the bonus meant the keyboard recorded the choice and then ignored it.
-                val score = unigram(word.weight) +
+                val score = word.logProb +
                     (if (word.learned) LEARNED_BONUS else 0f) -
                     (if (word.backoff) backoffPenalty else 0f)
                 offer(Candidate(word.text, span, score, word.learned))
@@ -183,7 +259,11 @@ internal class Decoder(
         val firstId = primary.ids.firstOrNull()
         if (firstId != null) {
             for (entry in charactersFor(firstId).take(CHAR_FLOOR)) {
-                offer(Candidate(entry.text, 1, unigram(entry.weightFor(traditional))))
+                // Scored against whichever corpus this mode reads, so a Traditional-only
+                // character reaches the floor in [ScriptMode.BOTH] at its Taiwan probability
+                // rather than being dropped for having no mainland weight.
+                val logProb = mode.logProbOf(entry.cn, entry.tw) ?: continue
+                offer(Candidate(entry.text, 1, logProb))
             }
         }
 
@@ -212,20 +292,23 @@ internal class Decoder(
      */
     private fun wordsFor(ids: IntArray): List<Entry> {
         val out = ArrayList<Entry>(8)
-        userDict?.wordsFor(ids)?.forEach { out.add(Entry(it.text, it.weight, learned = true)) }
-        if (ids.any(Syllables::isInitial)) {
-            for (word in expandAbbreviation(ids)) {
-                out.add(Entry(word.text, word.weightFor(traditional), false))
-            }
-        } else {
-            for (word in dict.wordsFor(ids)) {
-                out.add(Entry(word.text, word.weightFor(traditional), false))
-            }
+        userDict?.wordsFor(ids)?.forEach {
+            // A learned word has no corpus behind it, so it is normalised against the mainland
+            // total simply to put it on the same scale as everything else; [LEARNED_BONUS] is
+            // what actually carries its weight.
+            out.add(Entry(it.text, unigram(it.weight), learned = true, rankWeight = it.weight))
         }
-        // A word the model in play does not have is not a candidate in it. This is the line that
-        // keeps 牛肉面 out of a Taiwan user's bar and 牛肉麵 out of a mainland user's, now that
-        // both live on the same syllable key.
-        out.retainAll { it.learned || it.weight > 0 }
+        val words = if (ids.any(Syllables::isInitial)) expandAbbreviation(ids) else dict.wordsFor(ids)
+        for (word in words) {
+            // Null means no corpus this mode reads has the word, which is what drops 牛肉面 from a
+            // Taiwan user's bar and 牛肉麵 from a mainland user's, now that both live on the same
+            // syllable key. In [ScriptMode.BOTH] nothing is dropped for being the other script:
+            // each word is scored against its own corpus and the two compete.
+            val logProb = mode.logProbOf(word.cn, word.tw) ?: continue
+            out.add(Entry(word.text, logProb, false, rankWeight = word.rankWeightIn(mode)))
+        }
+        // Learned entries aside, everything here now exists in a corpus this mode reads.
+        out.retainAll { it.learned || it.rankWeight > 0 }
         // A word occupying a span of n syllables must be n characters long. The dictionary only
         // holds entries where those agree, but an abbreviation is a *prefix* query and will
         // happily return 婀娜 for a single `n`, which then covers one syllable with two
@@ -247,9 +330,17 @@ internal class Decoder(
             var added = 0
             for (entry in dict.charsFor(ids[0])) {
                 if (added >= CHAR_EDGES) break
-                val weight = entry.weightFor(traditional)
-                if (entry.text.length == 1 && weight > 0) {
-                    out.add(Entry(entry.text, weight, false, backoff = true))
+                val logProb = mode.logProbOf(entry.cn, entry.tw)
+                if (entry.text.length == 1 && logProb != null) {
+                    out.add(
+                        Entry(
+                            entry.text,
+                            logProb,
+                            false,
+                            backoff = true,
+                            rankWeight = entry.rankWeightIn(mode),
+                        ),
+                    )
                     added++
                 }
             }
@@ -275,7 +366,13 @@ internal class Decoder(
             for (i in out.indices) {
                 val entry = out[i]
                 if (!entry.learned && !entry.backoff && entry.text.length == 1) {
-                    out[i] = Entry(entry.text, entry.weight, false, backoff = true)
+                    out[i] = Entry(
+                        entry.text,
+                        entry.logProb,
+                        false,
+                        backoff = true,
+                        rankWeight = entry.rankWeight,
+                    )
                 }
             }
         }
@@ -294,7 +391,7 @@ internal class Decoder(
                 val prior = best[entry.text]
                 val better = prior == null ||
                     (entry.learned && !prior.learned) ||
-                    (entry.learned == prior.learned && entry.weight > prior.weight)
+                    (entry.learned == prior.learned && entry.logProb > prior.logProb)
                 if (better) best[entry.text] = entry
             }
             if (best.size != out.size) {
@@ -343,8 +440,8 @@ internal class Decoder(
             prefixes = next.asSequence()
                 .map { prefix ->
                     prefix to (
-                        dict.wordsWithPrefix(prefix, ABBREVIATION_PROBE, traditional)
-                            .firstOrNull()?.weightFor(traditional) ?: 0
+                        dict.wordsWithPrefix(prefix, ABBREVIATION_PROBE, mode)
+                            .firstOrNull()?.rankWeightIn(mode) ?: 0
                         )
                 }
                 .filter { it.second > 0 }
@@ -360,8 +457,8 @@ internal class Decoder(
         for (key in prefixes) {
             out.addAll(dict.wordsFor(key, 4))
         }
-        out.retainAll { it.weightFor(traditional) > 0 }
-        out.sortByDescending { it.weightFor(traditional) }
+        out.retainAll { it.rankWeightIn(mode) > 0 }
+        out.sortByDescending { it.rankWeightIn(mode) }
         return out.take(ABBREVIATION_RESULTS)
     }
 
@@ -371,12 +468,12 @@ internal class Decoder(
             dict.syllableSpellings.withIndex()
                 .filter { it.value[0] == letter }
                 .flatMap { dict.charsFor(it.index) }
-                .filter { it.weightFor(traditional) > 0 }
-                .sortedByDescending { it.weightFor(traditional) }
+                .filter { it.rankWeightIn(mode) > 0 }
+                .sortedByDescending { it.rankWeightIn(mode) }
         } else {
             dict.charsFor(id)
-                .filter { it.weightFor(traditional) > 0 }
-                .sortedByDescending { it.weightFor(traditional) }
+                .filter { it.rankWeightIn(mode) > 0 }
+                .sortedByDescending { it.rankWeightIn(mode) }
         }
 
     /**
@@ -391,11 +488,16 @@ internal class Decoder(
      * As a probability the arithmetic comes out right on its own. Every word costs something
      * (all weights are below the corpus total, so every term is negative), a common word costs
      * little and a rare one a lot, and a path is charged for each word it uses. 时间 at ~5e5 out
-     * of ~2e9 costs about -8.3; the four junk words cost -13 each. The sentence with fewer,
+     * of ~5.6e9 costs about -9.3; the four junk words cost far more. The sentence with fewer,
      * commoner words wins for the same reason it is more probable.
+     *
+     * **Only for weights that have no corpus of their own** -- the user dictionary. Dictionary
+     * entries are normalised by [ScriptMode] against the corpus they actually came from, because
+     * with two corpora in play a single shared denominator silently favours one of them; see
+     * [ScriptMode.CN_TOTAL].
      */
     private fun unigram(weight: Int): Float =
-        ln((weight + 1).toFloat() / CORPUS_TOTAL)
+        ln((weight + 1).toFloat() / ScriptMode.CN_TOTAL)
 
     /**
      * How much the pairing of two adjacent characters is worth.
@@ -458,21 +560,47 @@ internal class Decoder(
         }
     }
 
+    /**
+     * One lattice edge: some text, and what it costs.
+     *
+     * Carries a **log-probability rather than a raw weight**, which is the structural half of
+     * cross-script ranking. While one corpus was ever read, a weight was enough -- every score
+     * divided by the same denominator, so ordering by weight and ordering by log-probability were
+     * the same ordering. Reading two corpora breaks that: `cn=51,915` and `tw=30,263` are
+     * normalised by totals 2.5x apart, so the comparison is only meaningful *after* division.
+     * Normalising at construction means no later code can compare two entries on the wrong scale.
+     *
+     * [rankWeight] survives alongside it for the places that genuinely want a raw-ish magnitude
+     * (deduplication prefers the heavier of two identical texts); it is already scaled across
+     * corpora by [ScriptMode.rankWeightOf].
+     */
     private class Entry(
         val text: String,
-        val weight: Int,
+        val logProb: Float,
         val learned: Boolean,
         /** True for a single character used as a fallback rather than a dictionary word. */
         val backoff: Boolean = false,
+        val rankWeight: Int = 0,
     )
 
     companion object {
         /**
-         * Paths kept per lattice position. Four is enough that the right sentence survives an
-         * unpromising start and small enough that decoding stays instant on a phone; the cost is
-         * linear in this number times the words at each position.
+         * Paths kept per lattice position. The cost is linear in this number times the words at
+         * each position, so it buys candidates at a very cheap rate on inputs this short.
+         *
+         * **Four was silently a cap on homophones, not just on sentences.** The beam is meant to
+         * stop an unpromising *start* from being pruned before the sentence that needs it, and
+         * four is ample for that. But every reading of one span lands in the same cell: the five
+         * words on the `dan ta` key -- 但他, 蛋挞, 但她, 但它, 蛋塔 -- are five paths to the same
+         * position, so a fifth homophone could not survive whatever its score. 蛋塔 was being
+         * discarded here, before any cap or ranking ran, which is why raising [FULL_DECODINGS]
+         * alone did nothing for it: the candidate had never existed to be cut.
+         *
+         * Eight covers the homophone families that actually occur -- the crowded two-syllable
+         * keys run to five or six words a mainland corpus and a Taiwan one can contribute to
+         * together -- while staying far below the point where decoding is noticeable.
          */
-        private const val BEAM = 4
+        private const val BEAM = 8
 
         /** Longest dictionary word, in syllables. Matches the builder's MAX_WORD_LEN. */
         private const val MAX_WORD_SYLLABLES = 12
@@ -488,17 +616,28 @@ internal class Decoder(
         private const val MAX_READINGS = 16
 
         /**
-         * Denominator for [unigram], in the weights' own units.
+         * Charged per fuzzily-matched syllable, in nats.
          *
-         * The sum of the dictionary's weights, near enough: the exact figure does not matter
-         * because a constant factor shifts every full-length decoding equally. What it must be
-         * is *larger than any single weight*, so that every word's log-probability is negative
-         * and a path is always charged for adding one.
+         * This is the price of assuming the user did *not* type what they meant. It was 2.3
+         * ("ten times less likely"), which is far too cheap once the frequency gap between two
+         * real words exceeds 10x -- and in a corpus this skewed that is common. `danta` was the
+         * case that exposed it: 当他 (`dang ta`, weight 256000) is 27x commoner than 蛋挞
+         * (`dan ta`, 9235), so at 2.3 the respelling won by about a nat and the top two
+         * candidates for an exactly-spelled input were both misspellings of it. A typist who
+         * spells a real syllable correctly should not have to scroll past the keyboard's guess
+         * that they meant a different one.
+         *
+         * Swept over inputs of both kinds (see FuzzySpellingTest). The exact readings of
+         * `danta` clear 当他 at 3.5 and hold from there up. The inputs fuzzy matching exists to
+         * serve -- `zongguo`, `cifan`, `sengri`, `yingwen`, `zhidao` -- keep their answer at
+         * rank 1 across the whole range, because those win on frequency rather than on a thin
+         * margin; that is what makes raising this safe. The ceiling is around 6, where the
+         * penalty starts crowding fuzzy readings out of the *bar* rather than off the top:
+         * `cifan` drops 吃饭 below 次方, and `shanghai` and `xianzai` begin admitting junk
+         * like 闪光和蔼 and 贤哉 in the freed slots. 4.0 is the middle of 3.5-5.0, with margin
+         * on both sides.
          */
-        private const val CORPUS_TOTAL = 2e9f
-
-        /** Charged per fuzzily-matched syllable, in nats. Roughly "ten times less likely". */
-        private const val FUZZY_PENALTY = 2.3f
+        private const val FUZZY_PENALTY = 4.0f
 
         /** A word the user has chosen before is worth this much extra. */
         /**
@@ -544,8 +683,41 @@ internal class Decoder(
          * The first is what space commits and is nearly always the answer; the next few are the
          * genuine alternative readings. Everything past that is a variation on one of them and
          * is worth less than the ability to commit a prefix.
+         *
+         * Six rather than five because a two-syllable input can have more real readings than
+         * that: `danta` has four exact ones (但他, 蛋挞, 但她, 但它) plus the Taiwan 蛋塔, and at
+         * five the last of them fell off the end while a respelling held a slot. The extra slot
+         * is spent on a reading of what was typed, never on another guess that it was mistyped
+         * -- respellings are ordered behind every literal reading -- and the ranker's own filler
+         * floor now trims the tail, so this cannot re-open the `beijingdaxue` crowding the cap
+         * was introduced to stop.
          */
-        private const val FULL_DECODINGS = 5
+        private const val FULL_DECODINGS = 6
+
+        /**
+         * How far behind the best respelling the best literal reading may fall and still
+         * suppress it, in nats.
+         *
+         * Zero: the literal reading must be at least as good. Measured rather than chosen --
+         * across the inputs that exercise both directions (`danta`, `zhidao`, `yingwen`,
+         * `cifan` on one side; `zongguo`, `sengri`, `sanghai` on the other) the margin that
+         * classifies every one correctly is 0 or 1, and anything from 2 up starts letting
+         * respellings be suppressed on inputs that only read sensibly as a respelling. Zero is
+         * the principled end of that range: "what you typed is at least as likely as what I
+         * think you meant" is exactly when second-guessing is unwarranted.
+         */
+        private const val LITERAL_MARGIN = 0f
+
+        /**
+         * How far below the best literal reading another literal reading still outranks a
+         * respelling, in nats.
+         *
+         * Four, from the middle of the 3-to-6 band that classifies every probed input
+         * correctly. Below 3 a genuine homophone family starts to break up; at 8 the junk tail
+         * of `cifan` (此方案, 次方案 at -19) begins outranking 吃饭 again, which is the failure
+         * this bound exists to prevent. Four is comfortably inside.
+         */
+        private const val LITERAL_GOOD = 4f
 
         private const val PREFIX_WORDS = 6
         private const val CHAR_FLOOR = 8

@@ -129,6 +129,45 @@ data class GestureConfig(
      */
     val flickToGlideRatio: Float = 2.5f,
     /**
+     * Upward travel that runs the key's [com.offlinekeyboard.ime.layout.Key.flickUp], as a
+     * fraction of key height.
+     *
+     * Deliberately far stricter than [flickDistanceRatio] -- three quarters of a key against
+     * three pixels -- and the asymmetry is the whole design. Downward has nothing to compete
+     * with: below the letters is the bottom of the board, so three pixels of deliberate downward
+     * movement can only mean the secondary. Upward is where *words* go. Every glide that starts
+     * on the bottom row leaves its first key heading up, so an upward gesture read as generously
+     * as the downward one would fire copy in the middle of gliding "cat".
+     *
+     * 0.75 is a starting point chosen for the shape of the gesture, *not* fitted to the bank the
+     * way [flickDistanceRatio] was -- the bank holds no upward flicks yet, because until now
+     * there was no such gesture to record. It is deliberately on the demanding side for that
+     * reason: the cost of asking too much is a flick that has to be repeated, and the cost of
+     * asking too little is an action fired in the middle of a word. Once
+     * `docs/GESTURE_BANK.md` has upward strokes in it, this is the number to revisit, and
+     * `GestureBankReplayTest` is where the evidence should be made to speak.
+     *
+     * The real separation is not this number alone -- see [upFlickToGlideRatio], which lets a
+     * stroke that keeps going take the word after all.
+     */
+    val upFlickDistanceRatio: Float = 0.75f,
+    /**
+     * Path length that abandons an armed upward flick and takes the glide instead, as a fraction
+     * of key width.
+     *
+     * The upward mirror of [flickToGlideRatio], and smaller than it on purpose. A downward flick
+     * is the likelier reading of a downward stroke and gets the benefit of the doubt for 2.5 key
+     * widths; an upward stroke that has already travelled a key and a half is a word being
+     * written, because the actions are single commands and no hand needs a three-key run-up to
+     * ask for one.
+     *
+     * This is what makes the gesture safe to offer on every key that has a popup. The distance
+     * above decides when the action becomes *possible*; this decides when the word wins anyway,
+     * and nothing is committed in between -- so a glide is never interrupted by an action it
+     * merely passed through.
+     */
+    val upFlickToGlideRatio: Float = 1.5f,
+    /**
      * Vertical travel on backspace that deletes in bulk -- the line above the cursor on an
      * upward stroke, the word behind it on a downward one -- as a fraction of key height.
      * Larger than [flickDistanceRatio] because these gestures destroy text: a thumb drifting
@@ -302,6 +341,18 @@ sealed interface GestureOutput {
     data object FlickPreviewCleared : GestureOutput
 
     /**
+     * An upward flick is armed: releasing now would run [entry]. Nothing has happened yet.
+     *
+     * Its own case rather than a reuse of [FlickPreview], which carries the *text* of a secondary
+     * and exists to drive the iPadOS glyph slide. What is armed here may be an action, which has
+     * no text to slide and is drawn as an icon, and the distinction has to survive as far as the
+     * renderer or it becomes a string to parse again -- the thing [PopupEntry] was introduced to
+     * stop. The host shows it however that kind of entry is shown; the machine only says which.
+     */
+    data class UpFlickArmed(val keyId: String, val entry: PopupEntry) : GestureOutput
+    data object UpFlickDisarmed : GestureOutput
+
+    /**
      * The long-press popup opened. Entries are accents, edit actions, or both -- see [PopupEntry].
      */
     data class ShowAccents(val keyId: String, val entries: List<PopupEntry>) : GestureOutput {
@@ -409,6 +460,26 @@ enum class GestureState {
     IDLE,
     PRESSED,
     FLICK,
+
+    /**
+     * An upward stroke long enough to run the key's popup primary, still able to become a glide.
+     *
+     * Separate from [FLICK] rather than a direction flag on it, because the two commit different
+     * kinds of thing -- a secondary character against a [PopupEntry] that may be an action -- and
+     * escape into a glide at different distances. Sharing the state would mean every branch in
+     * the machine asking which way the finger went, which is the shape the space bar's three
+     * gestures already showed to be unreadable.
+     */
+    UP_FLICK,
+
+    /**
+     * An upward flick that was armed and then pulled back: a keypress with a long stroke in it.
+     *
+     * Types the letter on release like [PRESSED], but cannot become a glide, because the path
+     * that would start one was spent going up and coming back rather than travelling toward
+     * another key. Without it, changing your mind about an action would type a word.
+     */
+    RECALLED,
     GLIDE,
 
     /**
@@ -551,6 +622,18 @@ class TouchFsm(
             .coerceIn(config.flickPriorMinScale, config.flickPriorMaxScale)
     private val glideDistance get() = config.glideDistanceRatio * geometry.keyUnit
     private val flickToGlideDistance get() = config.flickToGlideRatio * geometry.keyUnit
+
+    /**
+     * How far up the finger must travel to arm the key's popup primary.
+     *
+     * Not scaled by [FlickPrior], deliberately. That prior was fitted to the downward gesture --
+     * its terms are about symbols, words hanging below a key, and the bottom row having no room
+     * underneath -- and none of them are evidence about an upward stroke. Feeding it the wrong
+     * direction would move this threshold by a belief that was never measured against it, and
+     * the failure would be silent: the gesture would simply grow unreliable on some keys.
+     */
+    private val upFlickDistance get() = config.upFlickDistanceRatio * geometry.keyHeight
+    private val upFlickToGlideDistance get() = config.upFlickToGlideRatio * geometry.keyUnit
     private val bulkDeleteDistance get() = config.bulkDeleteDistanceRatio * geometry.keyHeight
     private val glideResumeRadius get() = config.glideResumeRadiusRatio * geometry.keyUnit
     private val spaceDismissDistance get() = config.spaceDismissDistanceRatio * geometry.keyHeight
@@ -706,6 +789,12 @@ class TouchFsm(
         return when (state) {
             GestureState.PRESSED -> onMoveWhilePressed(dx, dy)
             GestureState.FLICK -> onMoveWhileFlicking()
+            GestureState.UP_FLICK -> onMoveWhileUpFlicking(dx, dy)
+            // A recalled flick can still be armed again -- the finger is on the key and may go
+            // back up -- but it can no longer become a glide. Re-using the arming test alone
+            // gives exactly that, since the glide test lives after it in onMoveWhilePressed and
+            // is never reached from here.
+            GestureState.RECALLED -> onMoveWhileRecalled(dx, dy)
             GestureState.GLIDE -> listOf(GestureOutput.GlideUpdated(path.toList()))
             GestureState.ACCENTS -> onMoveWhileShowingAccents(x, y)
             GestureState.TRACKPAD, GestureState.SELECTING -> onMoveWhileTrackpad(x, y, t)
@@ -728,6 +817,17 @@ class TouchFsm(
         if (isDownward && verticallyDominant && abs(dy) > flickDistance && key.key.secondary != null) {
             state = GestureState.FLICK
             return listOf(GestureOutput.FlickPreview(key.key.id, key.key.secondary))
+        }
+        // Upward, and far enough to mean it. Tested before the glide below even though a stroke
+        // this long has already passed the glide distance: arming is not committing, and
+        // [onMoveWhileUpFlicking] hands the gesture straight back to the glide if the finger
+        // keeps going. Letting the glide claim it first would make the action unreachable on
+        // every letter key, since the glide fires at 1.2 key widths and this needs 0.75 key
+        // heights of travel to arm at all.
+        val upFlick = key.key.flickUp
+        if (!isDownward && verticallyDominant && abs(dy) > upFlickDistance && upFlick != null) {
+            state = GestureState.UP_FLICK
+            return listOf(GestureOutput.UpFlickArmed(key.key.id, upFlick))
         }
         // Only letters can start a word: a swipe off shift or 123 is a mis-hit, not a glide.
         if (pathLength > glideDistance && key.key.type == KeyType.CHARACTER) {
@@ -835,6 +935,89 @@ class TouchFsm(
         return emptyList()
     }
 
+    /**
+     * An armed upward flick, which can still lose the gesture two ways.
+     *
+     * A finger that keeps travelling is writing a word, and one that comes back down below the
+     * threshold has changed its mind. Both hand the stroke back rather than committing anything,
+     * which is what makes the gesture something a hand can start and abandon -- the same promise
+     * the downward flick makes by only ever previewing.
+     *
+     * Only a key that can start a word goes to GLIDE. Elsewhere -- shift, the mode switch --
+     * there is no word to escape into, so a long stroke simply disarms and the release does
+     * nothing, rather than beginning a glide from a key that cannot spell.
+     */
+    /**
+     * A finger that armed an upward flick, pulled back, and may yet go up again.
+     *
+     * Only the arming test, deliberately. The glide is gone for the rest of this gesture -- see
+     * [GestureState.RECALLED] -- and the downward flick is too: a finger that has been a key
+     * height above the key and come back down to it is not making the short, deliberate downward
+     * stroke that commits a secondary, and reading it as one would type a symbol on the way back
+     * from an action the user decided against.
+     */
+    private fun onMoveWhileRecalled(dx: Float, dy: Float): List<GestureOutput> {
+        val key = origin ?: return emptyList()
+        val upFlick = key.key.flickUp
+        if (upFlick != null &&
+            dy < 0 && abs(dy) > verticalDominance * abs(dx) && abs(dy) > upFlickDistance
+        ) {
+            state = GestureState.UP_FLICK
+            return listOf(GestureOutput.UpFlickArmed(key.key.id, upFlick))
+        }
+        // A finger that has left the key entirely is writing a word after all, and the glide is
+        // allowed again. What RECALLED withholds is the *spent stroke*, not the glide itself: a
+        // finger still on the key it pressed has gone up and come back and should type a letter,
+        // but one now over a different key has plainly gone somewhere, and refusing it here
+        // would strand a word that happened to begin with a moment's hesitation.
+        if (key.key.type == KeyType.CHARACTER && geometry.keyAt(lastX(), lastY()) != key) {
+            state = GestureState.GLIDE
+            return listOf(GestureOutput.GlideStarted, GestureOutput.GlideUpdated(path.toList()))
+        }
+        return emptyList()
+    }
+
+    private fun lastX(): Float = path.lastOrNull()?.x ?: 0f
+    private fun lastY(): Float = path.lastOrNull()?.y ?: 0f
+
+    private fun onMoveWhileUpFlicking(dx: Float, dy: Float): List<GestureOutput> {
+        val key = origin ?: return emptyList()
+        // Pulled back toward the key: read from where the finger is now rather than latched at
+        // the crossing, for the reason [flickArmed] is -- changing your mind halfway through is
+        // part of the gesture, not a failure of it.
+        //
+        // Tested before the escape below, and that order is load-bearing. A finger that goes up
+        // a key height and comes back has *travelled* more than the escape distance without ever
+        // heading for another key, so a path-length test reached first would read a retreat as a
+        // word -- and the retreat is precisely the gesture that means "not that after all".
+        //
+        // RECALLED rather than PRESSED for the same reason: the stroke it already spent must not
+        // be handed to the glide test the moment the machine goes back to being a press.
+        //
+        // Only for a finger still on the key it pressed. A stroke that has drifted sideways onto
+        // a *different* key is a word leaving -- "ca" departs `c` up and to the left, which is
+        // exactly the shape this test would otherwise catch on dominance alone -- so it falls
+        // through to the escape below and becomes the glide it is.
+        val onOwnKey = geometry.keyAt(lastX(), lastY()) == key
+        if (onOwnKey && (-dy <= upFlickDistance || abs(dy) <= verticalDominance * abs(dx))) {
+            state = GestureState.RECALLED
+            return listOf(GestureOutput.UpFlickDisarmed)
+        }
+        if (pathLength > upFlickToGlideDistance) {
+            if (key.key.type != KeyType.CHARACTER) {
+                state = GestureState.SPENT
+                return listOf(GestureOutput.UpFlickDisarmed)
+            }
+            state = GestureState.GLIDE
+            return listOf(
+                GestureOutput.UpFlickDisarmed,
+                GestureOutput.GlideStarted,
+                GestureOutput.GlideUpdated(path.toList()),
+            )
+        }
+        return emptyList()
+    }
+
     private fun onMoveWhileShowingAccents(x: Float, y: Float): List<GestureOutput> {
         val key = origin ?: return emptyList()
         if (key.key.popup.isEmpty()) return emptyList()
@@ -923,8 +1106,14 @@ class TouchFsm(
         // a move at the position the finger left from, and those last few pixels are exactly the
         // part of the pull that decides it.
         val armedAtRelease = down?.let { y - it.y > flickDistance } ?: false
+        // The same question asked upward. Kept separate from [armedAtRelease] rather than folded
+        // into an absolute distance, because the two thresholds differ by a factor of thirty --
+        // see [GestureConfig.upFlickDistanceRatio] -- and one variable meaning "far enough in
+        // whichever direction" would quietly hold the upward gesture to the downward number.
+        val upArmedAtRelease = down?.let { it.y - y > upFlickDistance } ?: false
         val result: List<GestureOutput> = when (state) {
-            GestureState.PRESSED -> tapOutput(key)
+            // A recalled flick types the letter, exactly as the press it went back to being.
+            GestureState.PRESSED, GestureState.RECALLED -> tapOutput(key)
             GestureState.FLICK -> {
                 val secondary = key?.key?.secondary
                 when {
@@ -936,6 +1125,21 @@ class TouchFsm(
                         GestureOutput.FlickPreviewCleared,
                         GestureOutput.CommitSecondary(key.key.id, secondary),
                     )
+                }
+            }
+            GestureState.UP_FLICK -> {
+                // Re-read from the lift point, as the downward flick does: the device does not
+                // always send a move at the position the finger left from, and on a gesture
+                // that commits without a popup those last pixels are the whole verdict.
+                when (val entry = if (upArmedAtRelease) key?.key?.flickUp else null) {
+                    is PopupEntry.Accent ->
+                        listOf(GestureOutput.CommitAccent(key!!.key.id, entry.text))
+                    is PopupEntry.Action ->
+                        listOf(GestureOutput.CommitAction(key!!.key.id, entry.action))
+                    // A language is never offered here -- Key.flickUp refuses the globe key --
+                    // and a blank is a hole. Both fall through to the disarm below.
+                    is PopupEntry.Language, PopupEntry.Blank, null ->
+                        listOf(GestureOutput.UpFlickDisarmed)
                 }
             }
             GestureState.GLIDE -> return suspendGlide(x, y, t)
@@ -968,7 +1172,13 @@ class TouchFsm(
             GestureState.BACKSPACE -> listOf(GestureOutput.BackspaceRepeatEnded)
             GestureState.GLIDE_LIFTED, GestureState.IDLE, GestureState.SPENT -> emptyList()
         }
-        val captured = capture(PathPoint(x, y, t), armedAtRelease)
+        // Whichever direction this gesture went, [capture] is asked the question that matches
+        // it. Passing the downward flag from an upward gesture would record every up-flick as
+        // NONE, and the bank would show the feature being used as though it never fired.
+        val captured = capture(
+            PathPoint(x, y, t),
+            if (state == GestureState.UP_FLICK) upArmedAtRelease else armedAtRelease,
+        )
         reset()
         return result + listOfNotNull(captured) + GestureOutput.KeyHighlighted(null)
     }
@@ -1082,9 +1292,18 @@ class TouchFsm(
             GestureTrace(
                 startKeyId = key.key.id,
                 verdict = verdict ?: when (state) {
-                    GestureState.PRESSED -> GestureVerdict.TAP
+                    // RECALLED typed the letter, so it records as the tap it turned out to be.
+                    GestureState.PRESSED, GestureState.RECALLED -> GestureVerdict.TAP
                     GestureState.FLICK -> if (armed) GestureVerdict.FLICK else GestureVerdict.TAP
                     GestureState.GLIDE -> GestureVerdict.GLIDE
+                    // An armed upward flick that was still armed at the lift committed the
+                    // popup's primary entry, so it records as ACCENT -- the same verdict the
+                    // long press that commits the same entry produces. Not a new name, for the
+                    // reason [GestureVerdict] gives: the bank reads these back with valueOf, and
+                    // a name invented here would crash every build and every stored run that
+                    // predates it. One that disarmed committed nothing and is NONE.
+                    GestureState.UP_FLICK ->
+                        if (armed) GestureVerdict.ACCENT else GestureVerdict.NONE
                     GestureState.ACCENTS -> GestureVerdict.ACCENT
                     GestureState.TRACKPAD, GestureState.SELECTING -> GestureVerdict.TRACKPAD
                     GestureState.GLIDE_LIFTED, GestureState.BACKSPACE, GestureState.SPENT,

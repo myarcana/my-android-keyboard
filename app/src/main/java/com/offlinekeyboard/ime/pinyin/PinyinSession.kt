@@ -33,17 +33,51 @@ internal class PinyinSession(private val context: Context) {
      *
      * Switching this invalidates the cache: the same letters produce different characters, and
      * the globe key can change it with a buffer already open.
+     *
+     * Only meaningful for the Chinese subtypes, which are the callers that commit from
+     * [candidates].
+     * The English bar reads [scoredFor], which always ranks both scripts -- see [englishMode].
      */
     var traditional: Boolean = false
         set(value) {
             if (field == value) return
             field = value
-            // The decoder scores against the Taiwan model rather than the mainland one, so this
-            // changes which *words exist*, not merely how they are drawn.
-            decoder?.traditional = value
             cached = null
             scoredCache = null
         }
+
+    /**
+     * Whether the caller is the English suggestion bar rather than a Chinese subtype.
+     *
+     * This is the switch that decides **which question the decoder is being asked**. A Chinese
+     * subtype has been told which script the user writes, so it asks for one model and a bar
+     * mixing 麵條 with 面条 would be noise. The English bar has been told nothing: the letters
+     * might be English, might be pinyin, and if pinyin might be either script -- so all of those
+     * are competing hypotheses and the bar ranks them together.
+     *
+     * Kept separate from [traditional] rather than folded into a three-valued setting because the
+     * two answer different questions: [traditional] is "which script does this user write", which
+     * survives into commit and conversion, while this is "may the other script compete right now".
+     */
+    var englishMode: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            cached = null
+            scoredCache = null
+        }
+
+    /**
+     * The model the decoder should use for the caller currently asking.
+     *
+     * [ScriptMode.BOTH] only in English mode, per the scope of cross-script ranking: the Chinese
+     * subtypes keep single-script bars.
+     */
+    private fun modeFor(english: Boolean): ScriptMode = when {
+        english -> ScriptMode.BOTH
+        traditional -> ScriptMode.TRADITIONAL
+        else -> ScriptMode.SIMPLIFIED
+    }
 
     /** The letters currently composing; empty when nothing is in progress. */
     val composing: String get() = buffer.toString()
@@ -74,7 +108,7 @@ internal class PinyinSession(private val context: Context) {
                 if (loaded != null) {
                     dict = loaded
                     userDict = users
-                    decoder = Decoder(loaded, users, traditional)
+                    decoder = Decoder(loaded, users, modeFor(englishMode))
                     script = Script(loaded.conversionChars, loaded.conversionPhrases)
                 }
                 loading = false
@@ -136,7 +170,8 @@ internal class PinyinSession(private val context: Context) {
         // the word behind the caret at all, so without this the keyboard re-decoded identical
         // input several times per keystroke.
         scoredCache?.let { if (it.letters == letters && it.limit == limit) return it.items }
-        val converter = script
+        // The English bar ranks both scripts against each other; see [englishMode].
+        engine.mode = ScriptMode.BOTH
         val reading = Syllables.readings(letters).firstOrNull()
         val seen = HashSet<String>(limit * 2)
         val out = ArrayList<UnifiedCandidates.Scored>(limit)
@@ -147,11 +182,11 @@ internal class PinyinSession(private val context: Context) {
         // to survive to it. Cutting to `limit` here would discard the right answer before the
         // thing that recognises it ever ran.
         for (candidate in engine.candidates(letters, limit * DECODER_OVERFETCH)) {
-            val display = if (traditional && converter != null) {
-                converter.toTraditional(candidate.text)
-            } else {
-                candidate.text
-            }
+            // No conversion here, deliberately. In [ScriptMode.BOTH] every candidate already is
+            // the script its corpus wrote it in -- 麵條 came from the Taiwan model and 面条 from
+            // the mainland one -- so converting would rewrite the Simplified half into
+            // Traditional and collapse the two hypotheses the bar exists to show.
+            val display = candidate.text
             if (!seen.add(display)) continue
             // Letters consumed, by the same reckoning commit() uses: the syllable boundary the
             // candidate reached. This is what the ranker charges unexplained input against.
@@ -201,6 +236,10 @@ internal class PinyinSession(private val context: Context) {
         if (input.isEmpty()) return emptyList()
         cached?.let { if (it.input == input && it.limit >= limit) return it.items.take(limit) }
 
+        // Set per call rather than once at construction: one decoder serves both the Chinese
+        // subtypes and the English bar, and they want different models. [scoredFor] sets
+        // [ScriptMode.BOTH] for the same reason.
+        engine.mode = modeFor(englishMode)
         val converter = script
         val seen = HashSet<String>(limit * 2)
         val items = ArrayList<Decoded>(limit)
@@ -220,8 +259,87 @@ internal class PinyinSession(private val context: Context) {
             // screen, so they must be one entry here too.
             if (seen.add(display)) items.add(Decoded(candidate, display))
         }
+        if (traditional && converter != null) {
+            addScriptVariants(input, limit, converter, seen, items)
+        }
         cached = Cached(input, limit, items)
         return items
+    }
+
+    /**
+     * Adds Traditional spellings of a word only the mainland model happens to hold.
+     *
+     * A Taiwan subtype reads the Taiwan corpus and drops mainland-only words, which is right
+     * and is what keeps 軟件 out of a bar that should say 軟體. But it is too strong for one
+     * case: a word Taiwan genuinely uses whose *Traditional spelling* is only reachable through
+     * the mainland entry. `danta` is it -- McBopomofo has 蛋塔 and nothing else, so 蛋撻 could
+     * not appear at all, while both iOS (蛋塔 蛋撻 蛋鴨 淡雅 ...) and Gboard (但他 蛋塔 蛋撻 ...)
+     * offer the two side by side. No OpenCC table links 蛋塔 to 蛋撻; the only route to it is
+     * converting the mainland 蛋挞.
+     *
+     * The rule is deliberately narrow, because the general version is the "re-skinned
+     * Simplified" behaviour this file exists to avoid -- converting 软件 yields 軟件, which is
+     * not the word a Taiwanese user wants. Three things keep it contained:
+     *
+     *  - It runs **only when the Taiwan model already answered** ([items] is non-empty), so the
+     *    conversion supplies an alternative spelling beside a native candidate rather than
+     *    inventing a bar out of mainland vocabulary.
+     *  - At most [SCRIPT_VARIANTS] are added, and only multi-character readings.
+     *  - Only readings of the letters **as spelled**: a fuzzy respelling is a different word,
+     *    not another spelling of this one, and importing those put 當他/當她 into a Taiwan bar.
+     *  - They are **appended**, so every native Taiwan candidate outranks every converted one.
+     *
+     * 軟件 can therefore still appear for `ruanjian`, but only behind 軟體 -- which is the
+     * honest ordering, since a Taiwan user who typed those letters wanted 軟體 and the mainland
+     * spelling is a legitimate second reading rather than a wrong answer.
+     */
+    private fun addScriptVariants(
+        input: String,
+        limit: Int,
+        converter: Script,
+        seen: MutableSet<String>,
+        items: MutableList<Decoded>,
+    ) {
+        val engine = decoder ?: return
+        val best = items.firstOrNull() ?: return
+        engine.mode = ScriptMode.SIMPLIFIED
+        // Only readings of the letters as actually spelled. The mainland decoder applies fuzzy
+        // pinyin too, and without this `danta` imports 當他 and 當她 -- readings of `dang ta`,
+        // converted and appended to a Taiwan bar that had correctly never contained them. A
+        // script variant is a different *spelling of the same word*; a respelling is a different
+        // word, and it has already been ruled out once on the mainland side.
+        val literal = Syllables.readings(input).firstOrNull { it.fuzzyCount == 0 }
+        val literalTexts = if (literal == null) {
+            emptySet()
+        } else {
+            engine.decode(literal, limit).mapTo(HashSet()) { it.text }
+        }
+        val extra = ArrayList<Decoded>(SCRIPT_VARIANTS)
+        for (candidate in engine.candidates(input, limit)) {
+            if (extra.size >= SCRIPT_VARIANTS) break
+            if (candidate.text.length < 2) continue
+            if (candidate.text !in literalTexts) continue
+            // At least as good as what the Taiwan model itself found. This one test does all
+            // the filtering, because the two cases separate cleanly on it:
+            //
+            //   danta     蛋挞 -13.3 against native 蛋塔 -16.4  -> ahead, a real second spelling
+            //   ruanjian  软件 -9.3  against native 如案件 -23.1 -> far ahead, the word Taiwan
+            //                                                     wants and its model lacked
+            //   shida     是哒 -11.3 against native 師大 -11.2  -> behind, mainland noise
+            //   nihao     拟好 -14.2 against native 你好 -12.3  -> behind, mainland noise
+            //
+            // A mainland reading that cannot even match the native bar is the decoder guessing
+            // at input Taiwan has a perfectly good word for, and converting it adds nothing.
+            if (candidate.score < best.candidate.score) continue
+            val display = converter.toTraditional(candidate.text)
+            // Unconverted means the word is already Traditional, so the Taiwan model would have
+            // had it if Taiwan used it; nothing is learned by adding it.
+            if (display == candidate.text) continue
+            if (!seen.add(display)) continue
+            extra.add(Decoded(candidate, display))
+        }
+        engine.mode = modeFor(englishMode)
+        items.addAll(extra)
     }
 
     private class Decoded(val candidate: Decoder.Candidate, val display: String)
@@ -319,5 +437,16 @@ internal class PinyinSession(private val context: Context) {
          * longer list to sort, not a second decode.
          */
         const val DECODER_OVERFETCH = 5
+
+        /**
+         * How many converted mainland spellings a Traditional bar may gain. See
+         * [addScriptVariants].
+         *
+         * Two, because this is a spelling alternative rather than a source of vocabulary: it
+         * exists so 蛋撻 can sit beside 蛋塔, not so the mainland dictionary can leak into a
+         * Taiwan bar. Anything past the first couple is mainland vocabulary wearing Traditional
+         * characters, which is precisely what the Taiwan model was built to avoid.
+         */
+        const val SCRIPT_VARIANTS = 2
     }
 }

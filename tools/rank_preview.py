@@ -22,7 +22,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dump_pinyin_dict import Reader  # noqa: E402
 
-CORPUS_TOTAL = 2e9
+# Per-corpus totals, measured by tools/corpus_totals.py and mirrored in ScriptMode.kt. A weight
+# only means something against its own corpus: the mainland column is 2.5x the Taiwan one, so
+# dividing both by one number is a thumb on the scale worth ~0.9 nats.
+CN_TOTAL = 5.629e9
+TW_TOTAL = 2.280e9
 BACKOFF = 6.0
 FUZZY_PENALTY = 2.3
 EMOJI_TOKEN_SHARE = 1 / 300.0
@@ -48,8 +52,38 @@ def load_lexicon(path: str) -> dict:
     return out
 
 
-def unigram(weight: int) -> float:
-    return math.log((weight + 1) / CORPUS_TOTAL)
+def unigram(weight: int, total: float = CN_TOTAL) -> float:
+    return math.log((weight + 1) / total)
+
+
+def log_prob(cn: int, tw: int, mode: str):
+    """
+    The best log-probability a mode assigns, or None when no corpus it reads has the entry.
+
+    Mirrors ScriptMode.logProbOf: each column is normalised by its *own* total and the best wins.
+    Summing the columns would both invent a frequency no corpus observed and double-count the
+    characters common to both.
+    """
+    best = None
+    if mode in ("cn", "both") and cn > 0:
+        best = unigram(cn, CN_TOTAL)
+    if mode in ("tw", "both") and tw > 0:
+        cand = unigram(tw, TW_TOTAL)
+        if best is None or cand > best:
+            best = cand
+    return best
+
+
+def rank_weight(cn: int, tw: int, mode: str) -> int:
+    """Mirrors ScriptMode.rankWeightOf: Taiwan weights scaled onto the mainland corpus."""
+    best = 0
+    if mode in ("cn", "both") and cn > 0:
+        best = cn
+    if mode in ("tw", "both") and tw > 0:
+        scaled = int(tw * (CN_TOTAL / TW_TOTAL))
+        if scaled > best:
+            best = scaled
+    return best
 
 
 def emoji_score(rank: int, query: str) -> float:
@@ -138,7 +172,7 @@ def readings(letters: str, syllables: set, max_readings: int = 16):
     return out
 
 
-def decode(letters: str, reader: Reader, words: dict, chars: dict, traditional: bool,
+def decode(letters: str, reader: Reader, words: dict, chars: dict, mode: str,
            limit: int = 12):
     """
     A small Viterbi over the same lattice the app builds, returning (text, score, consumed).
@@ -146,7 +180,6 @@ def decode(letters: str, reader: Reader, words: dict, chars: dict, traditional: 
     Beam of 4, single-character backoff edges, the same unigram scoring. Enough to reproduce the
     app's ordering for the short inputs a suggestion bar deals with.
     """
-    region = 1 if traditional else 0
     syls = set(reader.syllables)
     results = {}
 
@@ -159,15 +192,27 @@ def decode(letters: str, reader: Reader, words: dict, chars: dict, traditional: 
             for span in range(1, min(12, n - i) + 1):
                 key = " ".join(ids[i:i + span])
                 entries = words.get(key, [])
-                cands = [(w, wt[region], False) for w, wt in entries if wt[region] > 0]
+                cands = []
+                for w, wt in entries:
+                    lp = log_prob(wt[0], wt[1], mode)
+                    if lp is not None:
+                        cands.append((w, lp, False))
                 if span == 1:
                     for ch, wt in chars.get(ids[i], [])[:12]:
-                        if wt[region] > 0 and len(ch) == 1:
-                            cands.append((ch, wt[region], True))
-                for text, weight, backoff in cands:
+                        lp = log_prob(wt[0], wt[1], mode)
+                        if lp is not None and len(ch) == 1:
+                            cands.append((ch, lp, True))
+                for text, lp, backoff in cands:
                     if len(text) != span:
                         continue
-                    sc = unigram(weight) - (BACKOFF if backoff else 0.0)
+                    # Spelling one syllable with one character is a backoff however the entry was
+                    # found. The Taiwan model keeps single-character frequencies in the *word*
+                    # index (是, 時, 十 all sit under `shi`), so those arrive as ordinary words
+                    # carrying no penalty; the unpenalised copy then wins and the bar fills with
+                    # character pairs like 是大 that no corpus contains. Mirrors Decoder.wordsFor.
+                    if span == 1 and len(text) == 1:
+                        backoff = True
+                    sc = lp - (BACKOFF if backoff else 0.0)
                     tgt = i + span
                     for prev_text, prev_score in best.get(i, []):
                         entry = (prev_text + text, prev_score + sc)
@@ -186,17 +231,17 @@ def decode(letters: str, reader: Reader, words: dict, chars: dict, traditional: 
                 continue
             key = " ".join(ids[:span])
             for w, wt in words.get(key, []):
-                if wt[region] <= 0:
+                score = log_prob(wt[0], wt[1], mode)
+                if score is None:
                     continue
-                score = unigram(wt[region])
                 consumed = ends[span - 1]
                 if w not in results or score > results[w][0]:
                     results[w] = (score, consumed)
         # Character floor for the first syllable.
         for ch, wt in chars.get(ids[0], [])[:8]:
-            if wt[region] <= 0 or len(ch) != 1:
+            score = log_prob(wt[0], wt[1], mode)
+            if score is None or len(ch) != 1:
                 continue
-            score = unigram(wt[region])
             if ch not in results or score > results[ch][0]:
                 results[ch] = (score, ends[0])
 
@@ -229,6 +274,8 @@ def main() -> None:
     ap.add_argument("--lexicon", default="app/src/main/assets/lexicon_en.tsv")
     ap.add_argument("--traditional", action="store_true",
                     help="score against the Taiwan model instead of the mainland one")
+    ap.add_argument("--both", action="store_true",
+                    help="rank both scripts against each other, as the English bar does")
     ap.add_argument("--limit", type=int, default=10)
     args = ap.parse_args()
 
@@ -244,14 +291,15 @@ def main() -> None:
         penalty = max(english - NOT_ENGLISH, 0.0) * ENGLISH_EVIDENCE
         for rank, e in enumerate(emoji.search(q)):
             rows.append((emoji_score(rank, q), "emoji", e, len(q)))
-        for text, score, consumed in decode(q, reader, words, chars, args.traditional):
+        mode = "both" if args.both else ("tw" if args.traditional else "cn")
+        for text, score, consumed in decode(q, reader, words, chars, mode):
             coverage = consumed / len(q) if q else 0.0
             rows.append(
                 (score - (1 - coverage) * COVERAGE_PENALTY - penalty, "chinese", text, consumed)
             )
         rows.sort(key=lambda r: -r[0])
 
-        model = "taiwan" if args.traditional else "mainland"
+        model = {"both": "both scripts", "tw": "taiwan", "cn": "mainland"}[mode]
         note = (f"english lnP {english:.2f}, chinese charged {penalty:.2f}"
                 if penalty > 0 else "not an english word")
         print(f"\n=== {query}   ({model} model; {note}) ===")
