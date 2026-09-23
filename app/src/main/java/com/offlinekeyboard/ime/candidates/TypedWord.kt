@@ -12,7 +12,14 @@ data class TypedWord(val query: String, val length: Int) {
         /** Enough for the two-word form; no emoji name is longer. */
         const val LOOKBEHIND = 48
 
-        private fun isWordChar(c: Char) = c.isLetter() || c == '\'' || c == '-'
+        /**
+         * Han characters are letters to [Char.isLetter] but never part of the word being typed:
+         * after picking 他的 out of `tadebabahentaoyanwo` the field reads `他的babahentaoyanwo`,
+         * and the next suggestions have to answer `babahentaoyanwo` -- which a query of the whole
+         * mixed run, not being pinyin, could not.
+         */
+        private fun isWordChar(c: Char) =
+            (c.isLetter() && !Character.isIdeographic(c.code)) || c == '\'' || c == '-'
 
         /**
          * The one- and two-word candidates ending at the caret, longest first.

@@ -46,17 +46,12 @@ class FuzzySpellingTest {
     /** The English-mode strip, by the path KeyboardService.rankedFor takes. */
     private fun englishBar(q: String): List<UnifiedCandidates.Suggestion> {
         val engine = Decoder(dict, UserDict(null), ScriptMode.BOTH)
-        val reading = Syllables.readings(q).firstOrNull()
         val seen = HashSet<String>()
         val scored = ArrayList<UnifiedCandidates.Scored>()
-        for (c in engine.candidates(q, 60)) {
+        // PinyinSession.scoredFor: the Chinese subtype's list, same limit, same order.
+        for (c in engine.candidates(q, 20)) {
             if (!seen.add(c.text)) continue
-            val consumed = when {
-                reading == null -> q.length
-                c.syllables >= reading.size -> q.length
-                else -> reading.ends.getOrElse(c.syllables - 1) { q.length }
-            }
-            scored += UnifiedCandidates.Scored(c.text, c.score, consumed)
+            scored += UnifiedCandidates.Scored(c.text, c.score, c.consumed, c.ids)
         }
         return UnifiedCandidates.rank(
             q,
@@ -112,16 +107,16 @@ class FuzzySpellingTest {
     // --- the bar is not padded --------------------------------------------------------------
 
     @Test
-    fun `the bar does not pad itself with partial readings`() {
-        val bar = englishBar("danta")
-        // Every Chinese suggestion must explain all five letters. 但/單/石 read `dan` and ignore
-        // `ta`; they filled seven of twelve slots before the floor existed.
-        val partial = bar.filter {
-            it.kind == UnifiedCandidates.Kind.CHINESE && it.consumes < "danta".length
-        }
-        assertTrue("partial readings left in the bar: ${partial.map { it.text }}", partial.isEmpty())
-        assertFalse("但 is filler for `danta`", bar.any { it.text == "但" })
-        assertFalse("單 is filler for `danta`", bar.any { it.text == "單" })
+    fun `whole readings lead and partial readings follow them`() {
+        val bar = englishBar("danta").filter { it.kind == UnifiedCandidates.Kind.CHINESE }
+        // What iOS shows first for `danta` is all whole-input readings (蛋塔 蛋撻 蛋鴨 淡雅 ...),
+        // so every candidate that explains all five letters comes before any that reads only
+        // `dan`. The partial ones are still offered behind them, as on the Chinese bar, since
+        // committing 但 and typing on is a legitimate way to enter the phrase.
+        val firstPartial = bar.indexOfFirst { it.consumes < "danta".length }
+        val lastWhole = bar.indexOfLast { it.consumes == "danta".length }
+        assertTrue("a partial reading leads a whole one: ${bar.map { it.text }}",
+            firstPartial < 0 || lastWhole < firstPartial)
     }
 
     @Test

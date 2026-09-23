@@ -38,6 +38,17 @@ internal object TypingHabits {
      * row. A quote opens a passage whose first character is as likely to be a digit as a letter
      * -- `"3 of them"` -- and unlike the apostrophe it comes in pairs, so the closing one follows
      * text that has already taken the plane wherever it needed to go.
+     *
+     * **Space only counts once something has been typed on the plane.** [typedOnPlane] is
+     * whether any non-space character has been committed since the plane was switched to. A
+     * space pressed straight after "123" ends nothing -- there is no number to end -- and the
+     * hand that switched planes plainly still wants the symbols it switched for, as in ", " or
+     * a space before "$40". Returning then would throw away the tap that was just made on "123".
+     * This is also what iOS does: it only leaves the plane at a space after a symbol was typed.
      */
-    fun returnsToLetters(text: String): Boolean = text == " " || text == "'"
+    fun returnsToLetters(text: String, typedOnPlane: Boolean): Boolean = when (text) {
+        " " -> typedOnPlane
+        "'" -> true
+        else -> false
+    }
 }

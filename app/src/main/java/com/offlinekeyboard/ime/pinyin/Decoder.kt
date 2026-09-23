@@ -51,13 +51,28 @@ internal class Decoder(
     private val fuzzyPenalty: Float = FUZZY_PENALTY,
 ) {
 
-    /** One decoding of the input: the text, and how many syllables it consumed. */
+    /**
+     * One decoding of the input: the text, and exactly which part of the input it stands for.
+     *
+     * [consumed] and [ids] are recorded by the phase that produced the candidate, from the
+     * reading it actually came from. They used to be reconstructed afterwards by guessing a
+     * reading from the syllable count, and every caller guessed separately -- which is how the
+     * English bar came to count a prefix's letters off the wrong end of the word.
+     */
     class Candidate(
         val text: String,
         val syllables: Int,
         val score: Float,
         /** True if this came from the user's own history rather than the shipped dictionary. */
         val learned: Boolean = false,
+        /**
+         * Letters of the input this candidate stands for, always counted from the **start**.
+         * Committing it replaces those letters and leaves the rest to be typed on -- 他的 out of
+         * `tadebaba` is `tade`, and `baba` is what remains.
+         */
+        val consumed: Int = 0,
+        /** The syllable ids of the consumed letters, as the reading that produced it split them. */
+        val ids: IntArray = IntArray(0),
     )
 
     /**
@@ -115,9 +130,10 @@ internal class Decoder(
             }
         }
 
+        val consumed = reading.ends[n - 1]
         return best[n].orEmpty()
             .take(limit)
-            .map { Candidate(it.text(), n, it.score, it.learned) }
+            .map { Candidate(it.text(), n, it.score, it.learned, consumed, reading.ids) }
     }
 
     /**
@@ -162,6 +178,8 @@ internal class Decoder(
                         candidate.syllables,
                         candidate.score - penalty,
                         candidate.learned,
+                        candidate.consumed,
+                        candidate.ids,
                     ),
                 )
             }
@@ -251,7 +269,7 @@ internal class Decoder(
                 val score = word.logProb +
                     (if (word.learned) LEARNED_BONUS else 0f) -
                     (if (word.backoff) backoffPenalty else 0f)
-                offer(Candidate(word.text, span, score, word.learned))
+                offer(Candidate(word.text, span, score, word.learned, primary.ends[span - 1], ids))
             }
         }
 
@@ -263,7 +281,7 @@ internal class Decoder(
                 // character reaches the floor in [ScriptMode.BOTH] at its Taiwan probability
                 // rather than being dropped for having no mainland weight.
                 val logProb = mode.logProbOf(entry.cn, entry.tw) ?: continue
-                offer(Candidate(entry.text, 1, logProb))
+                offer(Candidate(entry.text, 1, logProb, false, primary.ends[0], intArrayOf(firstId)))
             }
         }
 

@@ -13,13 +13,27 @@ import org.junit.Test
 class TypingHabitsTest {
 
     @Test
-    fun `space goes back to the letters`() {
-        assertTrue(TypingHabits.returnsToLetters(" "))
+    fun `space after typing a symbol goes back to the letters`() {
+        assertTrue(TypingHabits.returnsToLetters(" ", typedOnPlane = true))
+    }
+
+    /**
+     * Switching to "123" and pressing space straight away has ended nothing: there is no number
+     * yet, and the hand still wants the plane it just asked for.
+     */
+    @Test
+    fun `space before anything was typed on the plane stays put`() {
+        assertFalse(TypingHabits.returnsToLetters(" ", typedOnPlane = false))
+    }
+
+    @Test
+    fun `apostrophe goes back to the letters even as the first thing typed`() {
+        assertTrue(TypingHabits.returnsToLetters("'", typedOnPlane = false))
     }
 
     @Test
     fun `apostrophe goes back to the letters`() {
-        assertTrue(TypingHabits.returnsToLetters("'"))
+        assertTrue(TypingHabits.returnsToLetters("'", typedOnPlane = true))
     }
 
     /**
@@ -29,7 +43,7 @@ class TypingHabitsTest {
     @Test
     fun `the punctuation row does not go back to the letters`() {
         listOf(".", ",", "?", "!", "-", "/", ":", ";", "$", "%", "&", "@").forEach {
-            assertFalse("$it should stay on the symbol plane", TypingHabits.returnsToLetters(it))
+            assertFalse("$it should stay on the symbol plane", TypingHabits.returnsToLetters(it, typedOnPlane = true))
         }
     }
 
@@ -39,18 +53,18 @@ class TypingHabitsTest {
      */
     @Test
     fun `the double quote does not go back to the letters`() {
-        assertFalse(TypingHabits.returnsToLetters("\""))
+        assertFalse(TypingHabits.returnsToLetters("\"", typedOnPlane = true))
     }
 
     @Test
     fun `digits do not go back to the letters`() {
-        ('0'..'9').forEach { assertFalse(TypingHabits.returnsToLetters(it.toString())) }
+        ('0'..'9').forEach { assertFalse(TypingHabits.returnsToLetters(it.toString(), typedOnPlane = true)) }
     }
 
     /** Typing a letter is not a reason to switch planes; it means we are already on them. */
     @Test
     fun `letters do not trigger a switch`() {
-        assertFalse(TypingHabits.returnsToLetters("a"))
-        assertFalse(TypingHabits.returnsToLetters("Z"))
+        assertFalse(TypingHabits.returnsToLetters("a", typedOnPlane = true))
+        assertFalse(TypingHabits.returnsToLetters("Z", typedOnPlane = true))
     }
 }

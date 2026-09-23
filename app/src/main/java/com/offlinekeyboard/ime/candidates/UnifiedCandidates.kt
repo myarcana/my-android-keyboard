@@ -15,14 +15,13 @@ import kotlin.math.ln
  * **The scale is log-probability**, in nats, which is what the pinyin decoder already produces
  * (see [com.offlinekeyboard.ime.pinyin.Decoder]): a candidate's score is `ln P(candidate)`, so a
  * thing ten times as likely scores `ln 10` higher. Putting emoji on that scale is the whole
- * trick, and [emojiScore] is where it happens. Once both sides are log-probabilities, "rank them
- * together" is a sort and nothing more -- there is no per-kind quota, no interleaving rule, and
- * no tuned weight deciding how many of each to show.
+ * trick, and [emojiScore] is where it happens.
  *
- * What this is *not* is a merge of two ranked lists. Merging preserves each list's internal
- * order and only decides how to interleave, which cannot express "this emoji is a better answer
- * than that Chinese word": it can only express "show emoji first". The scores here are
- * comparable quantities, and that is what lets 哈 sit between two laughing faces for `ha`.
+ * The scale decides only *where emoji go*. The Chinese candidates are never re-sorted on it:
+ * they keep the decoder's order -- whole-input readings, then prefixes longest first, then
+ * characters -- which is the order the Chinese subtypes show, so the two bars agree about
+ * Chinese by construction. See [rank] for why re-sorting them was the bug rather than the
+ * feature.
  */
 object UnifiedCandidates {
 
@@ -52,36 +51,49 @@ object UnifiedCandidates {
          * `beijingdaxue` and leave the rest composing.
          */
         val consumes: Int,
+        /** The decoder's candidate behind a Chinese suggestion, for learning the choice. */
+        val source: Scored? = null,
     )
 
     /**
-     * Ranks emoji and Chinese for the same typed letters.
+     * Places emoji around the Chinese candidates for the same typed letters.
      *
-     * [chinese] arrives already scored by the pinyin decoder, in nats. [emojiHits] arrives as a
-     * ranked list, best first, and is scored here. Both are then sorted together.
+     * **The Chinese candidates keep exactly the order the decoder gave them**, which is the
+     * order the Chinese subtypes show: every reading of the whole input first, then words
+     * covering the start of it, longest first, then single characters for the first syllable.
+     * That is the shape of the iOS bar and of every mainstream IME (Rime puts its sentence
+     * first and phrases after it by length; AOSP PinyinIME's candidate 0 is always the full
+     * sentence), and it is the same bar in both languages -- the English bar is not allowed a
+     * second opinion about which Chinese reading is best.
      *
-     * Coverage -- how much of [query] a Chinese reading actually consumed -- is read straight off
-     * each [Scored.consumes]. It used to arrive as a `(String) -> Float` lookup the caller
-     * supplied, which scanned the candidate list by text to find the entry it had just been
-     * handed: quadratic in a list deliberately over-fetched to 60, so ~3,600 string comparisons
-     * per keystroke to recover a number already sitting on the object being iterated. The
-     * coverage rule itself is unchanged; only the way the value is obtained is.
+     * It used to have one. Everything was re-sorted on a single score with a fixed charge for
+     * letters a candidate left unexplained, and that charge was capped while a sentence's cost
+     * grows with every syllable: for `tadebabahentaoyanwo`, 他的 (-23.0, four letters of
+     * nineteen) beat 他的爸爸很讨厌我 (-39.4, all of them), and the filler rule then deleted the
+     * sentence for being 16 nats behind. Ordering by what a candidate *covers* rather than by
+     * a score across different spans is what removes that whole class of failure.
+     *
+     * What this function still decides is the only thing Chinese mode never has to: whether
+     * the letters are Chinese at all, and so where the emoji go. Each Chinese candidate is
+     * given a sort key on the shared log-probability scale, clamped so it never exceeds the key
+     * of the one before it -- which lets an ordinary merge interleave emoji without reordering a
+     * single Chinese entry. And when the best Chinese reading is [CHINESE_GATE] nats behind the
+     * best emoji (`happy`, `pizza`, `the` -- English words that also parse as pinyin), the
+     * Chinese candidates are left off entirely rather than trailing the bar.
      *
      * @param query the letters typed, lowercased.
      * @param emojiHits emoji matching [query], best first, as [EmojiIndex.search] returns them.
-     * @param chinese Chinese candidates for [query] read as pinyin, with decoder scores.
+     * @param chinese Chinese candidates for [query], **in decoder order**, with decoder scores.
      */
     fun rank(
         query: String,
         emojiHits: List<String>,
         chinese: List<Scored>,
         englishScore: Float = NOT_ENGLISH,
-        limit: Int = 12,
+        limit: Int = 32,
     ): List<Suggestion> {
-        val out = ArrayList<Suggestion>(emojiHits.size + chinese.size)
-
-        emojiHits.forEachIndexed { rank, emoji ->
-            out += Suggestion(emoji, Kind.EMOJI, emojiScore(rank, query), query.length)
+        val emoji = emojiHits.mapIndexed { rank, text ->
+            Suggestion(text, Kind.EMOJI, emojiScore(rank, query), query.length)
         }
 
         // How much the letters being an ordinary English word argues against reading them as
@@ -92,70 +104,66 @@ object UnifiedCandidates {
             (englishScore - NOT_ENGLISH).coerceAtLeast(0f) * ENGLISH_EVIDENCE
         }
 
-        for (candidate in chinese) {
+        var ceiling = Float.POSITIVE_INFINITY
+        val zh = chinese.map { candidate ->
             val coverage = if (query.isEmpty()) {
                 0f
             } else {
                 (candidate.consumes.toFloat() / query.length).coerceIn(0f, 1f)
             }
-            out += Suggestion(
-                candidate.text,
-                Kind.CHINESE,
-                chineseScore(candidate.score, coverage) - englishPenalty,
-                candidate.consumes,
-            )
+            val key = minOf(ceiling, chineseScore(candidate.score, coverage) - englishPenalty)
+            ceiling = key
+            Suggestion(candidate.text, Kind.CHINESE, key, candidate.consumes, candidate)
         }
 
-        out.sortByDescending { it.score }
-        return withoutFiller(out.take(limit), query.length)
+        val showChinese = zh.isNotEmpty() &&
+            (emoji.isEmpty() || zh.first().score >= emoji.first().score - CHINESE_GATE)
+        val merged = merge(emoji, if (showChinese) zh else emptyList())
+        return merged.take(limit)
     }
 
     /**
-     * Drops trailing candidates that are only in the bar because the bar had room.
-     *
-     * The ranker had no floor: it sorted by score and took [limit], so whatever was left over
-     * filled the strip however bad it was. For `danta` that meant seven of twelve slots going to
-     * single characters -- 但, 單, 石, 擔 -- that read `dan` and ignore `ta` entirely. Each had
-     * already been charged the full [COVERAGE_PENALTY] and sat 6 to 9 nats below the real
-     * answers; the penalty was working, there was simply nothing else to show and no rule saying
-     * that "nothing else" is the better answer.
-     *
-     * Two things are cut, and only ever from the tail:
-     *
-     *  - **Partial readings, once a complete one exists.** If any candidate explains everything
-     *    typed, one explaining a prefix is a worse answer to the same question rather than a
-     *    different question, and the user can reach it by typing less. This is the rule that
-     *    removes 但/單/石, and it fires only when a full-coverage candidate is actually present,
-     *    so input no word covers (a name, a rare compound) still fills the bar from its floor.
-     *  - **Anything [FILLER_GAP] nats behind the leader**, whatever its coverage. A candidate
-     *    three orders of magnitude less likely than the best one is not a suggestion.
-     *
-     * [MIN_SUGGESTIONS] are always kept, so the strip never collapses to one item and a
-     * genuinely ambiguous input keeps its alternatives.
+     * Merges two lists that are each already in their final order, taking whichever head scores
+     * higher. Neither list is reordered internally; ties go to the emoji, which were there first.
      */
-    private fun withoutFiller(ranked: List<Suggestion>, queryLength: Int): List<Suggestion> {
-        if (ranked.size <= MIN_SUGGESTIONS) return ranked
-        val best = ranked.first().score
-        // "Complete" is measured against the letters typed, not against the longest span some
-        // candidate happened to reach: an input whose every reading is partial would otherwise
-        // treat its longest partial one as complete and cut all the others against it.
-        val complete = ranked.any { it.kind != Kind.EMOJI && it.consumes >= queryLength }
-        return ranked.filterIndexed { i, s ->
-            when {
-                i < MIN_SUGGESTIONS -> true
-                // Emoji are never filler: they answer a different question from the Chinese
-                // half and are already scored on the shared scale, so a bar that is
-                // deliberately emoji-only (`happy`) survives this untouched.
-                s.kind == Kind.EMOJI -> true
-                best - s.score > FILLER_GAP -> false
-                complete && s.consumes < queryLength -> false
-                else -> true
+    private fun merge(a: List<Suggestion>, b: List<Suggestion>): List<Suggestion> {
+        val out = ArrayList<Suggestion>(a.size + b.size)
+        var i = 0
+        var j = 0
+        while (i < a.size || j < b.size) {
+            out += when {
+                j >= b.size -> a[i++]
+                i >= a.size -> b[j++]
+                a[i].score >= b[j].score -> a[i++]
+                else -> b[j++]
             }
         }
+        return out
     }
 
-    /** A Chinese candidate as the decoder produced it: text, its log-probability, and its span. */
-    data class Scored(val text: String, val score: Float, val consumes: Int)
+    /**
+     * A Chinese candidate as the decoder produced it: text, its log-probability, and its span.
+     *
+     * [ids] are the syllables it stands for, so that choosing it from the English bar can be
+     * learned exactly as choosing it from the Chinese bar is.
+     */
+    class Scored(
+        val text: String,
+        val score: Float,
+        val consumes: Int,
+        val ids: IntArray = IntArray(0),
+    )
+
+    /**
+     * What the typed word becomes when the Chinese candidate [text] is picked for it.
+     *
+     * A candidate stands for the **start** of the word -- 他的 for `tade` out of
+     * `tadebabahentaoyanwo` -- so the letters after it stay, to be answered next:
+     * `他的babahentaoyanwo`. Counting those letters off the caret end instead is what produced
+     * `tadebabahentaoy他的`: the right number of letters, deleted from the wrong side.
+     */
+    fun replacementFor(word: String, text: String, consumes: Int): String =
+        text + word.substring(consumes.coerceIn(0, word.length))
 
     /**
      * An emoji's log-probability, on the same scale as everything else.
@@ -238,23 +246,24 @@ object UnifiedCandidates {
      */
     private const val EMOJI_HARMONIC = 8.1f
 
-    /** Charged for input a Chinese reading does not explain, in nats. See [chineseScore]. */
+    /**
+     * Charged for input a Chinese reading does not explain, in nats. See [chineseScore].
+     *
+     * Only ever used to place emoji relative to the Chinese candidates -- never to reorder
+     * those -- so a cap on it can no longer let a prefix outrank the sentence it begins.
+     */
     private const val COVERAGE_PENALTY = 18f
 
-    /** Kept regardless of the filler floor, so the strip is never bare. See [withoutFiller]. */
-    private const val MIN_SUGGESTIONS = 3
-
     /**
-     * How far behind the best candidate a suggestion may sit before it is not worth a slot.
+     * How far the best Chinese reading may sit behind the best emoji before the letters are
+     * taken not to be Chinese at all, in nats: 7 is "about a thousand times less likely".
      *
-     * In nats, so 7 is "about a thousand times less likely than the leader". Sized from the
-     * `danta` bar, where the real answers sat within 1.7 nats of each other (-13.24 to -14.91)
-     * and the filler began at -16.14, a 2.9-nat step below the last real one. Anything this far
-     * down is a different kind of thing rather than a close second. Deliberately generous: this
-     * is the backstop for candidates that are merely bad, while the coverage rule in
-     * [withoutFiller] is what removes the specific case of a partial reading.
+     * Only consulted when there are emoji to compare against, so input that matches no emoji
+     * (`niuroumian`, `tadebabahentaoyanwo`) always shows its Chinese. The cases it exists for
+     * are English words that also parse as pinyin -- `happy` (哈皮朋友, 15 nats behind),
+     * `the`, `pizza` -- whose Chinese readings would otherwise trail every English bar.
      */
-    private const val FILLER_GAP = 7f
+    private const val CHINESE_GATE = 7f
 
     /**
      * The log-probability below which a query is not treated as an English word at all.

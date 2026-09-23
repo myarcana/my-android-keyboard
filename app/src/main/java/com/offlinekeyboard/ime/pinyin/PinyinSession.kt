@@ -160,7 +160,7 @@ internal class PinyinSession(private val context: Context) {
      * read as pinyin: this feeds a ranked bar that English words must be able to win outright,
      * and a guaranteed floor would put a Chinese character under every word typed.
      */
-    fun scoredFor(letters: String, limit: Int = 12): List<UnifiedCandidates.Scored> {
+    fun scoredFor(letters: String, limit: Int = CANDIDATE_LIMIT): List<UnifiedCandidates.Scored> {
         val engine = decoder ?: return emptyList()
         if (letters.isEmpty()) return emptyList()
         // Memoised on the exact query, for the reason [decoded] is: a full Viterbi pass over
@@ -170,35 +170,43 @@ internal class PinyinSession(private val context: Context) {
         // the word behind the caret at all, so without this the keyboard re-decoded identical
         // input several times per keystroke.
         scoredCache?.let { if (it.letters == letters && it.limit == limit) return it.items }
-        // The English bar ranks both scripts against each other; see [englishMode].
+        // The English bar ranks both scripts against each other; see [englishMode]. That is a
+        // choice of *model*, not of ranking: the list below is the one [Decoder.candidates]
+        // gives a Chinese subtype, in the same order, with the same limit.
         engine.mode = ScriptMode.BOTH
-        val reading = Syllables.readings(letters).firstOrNull()
         val seen = HashSet<String>(limit * 2)
         val out = ArrayList<UnifiedCandidates.Scored>(limit)
-        // Deliberately over-fetched. The decoder ranks by its own score, in which dozens of
-        // single characters -- each explaining one letter of seven and none of them the answer --
-        // outrank a word that explains all seven: 蚵仔煎 sits below forty of them for `ezijian`.
-        // The ranker's coverage penalty is what sorts that out, so everything it needs to see has
-        // to survive to it. Cutting to `limit` here would discard the right answer before the
-        // thing that recognises it ever ran.
-        for (candidate in engine.candidates(letters, limit * DECODER_OVERFETCH)) {
+        for (candidate in engine.candidates(letters, limit)) {
             // No conversion here, deliberately. In [ScriptMode.BOTH] every candidate already is
             // the script its corpus wrote it in -- 麵條 came from the Taiwan model and 面条 from
             // the mainland one -- so converting would rewrite the Simplified half into
             // Traditional and collapse the two hypotheses the bar exists to show.
             val display = candidate.text
             if (!seen.add(display)) continue
-            // Letters consumed, by the same reckoning commit() uses: the syllable boundary the
-            // candidate reached. This is what the ranker charges unexplained input against.
-            val consumed = when {
-                reading == null -> letters.length
-                candidate.syllables >= reading.size -> letters.length
-                else -> reading.ends.getOrElse(candidate.syllables - 1) { letters.length }
-            }
-            out.add(UnifiedCandidates.Scored(display, candidate.score, consumed))
+            out.add(
+                UnifiedCandidates.Scored(
+                    display,
+                    candidate.score,
+                    candidate.consumed.coerceIn(1, letters.length),
+                    candidate.ids,
+                ),
+            )
         }
         scoredCache = ScoredCache(letters, limit, out)
         return out
+    }
+
+    /**
+     * Records that [chosen] was picked from the English bar, exactly as [commit] records a pick
+     * from the Chinese one -- so a correction made in either language changes both bars alike.
+     */
+    fun learn(chosen: UnifiedCandidates.Scored) {
+        val users = userDict ?: return
+        if (chosen.ids.isEmpty() || chosen.text.length != chosen.ids.size) return
+        users.learn(chosen.ids, chosen.text)
+        users.save()
+        cached = null
+        scoredCache = null
     }
 
     private class ScoredCache(
@@ -363,30 +371,18 @@ internal class PinyinSession(private val context: Context) {
         val entry = decoded(CANDIDATE_LIMIT).getOrNull(position) ?: return null
         val chosen = entry.candidate
 
-        // The reading the candidate actually came from, not merely the best one.
-        //
-        // Candidates are drawn from several segmentations, so the first reading need not be the
-        // one that produced this text -- for `ta`, 他 comes from [ta] while 天啊 comes from
-        // [t][a]. Learning against the wrong reading files a word under a key that will never
-        // produce it, and consuming letters by the wrong reading eats the wrong number of them.
-        // A candidate whose length matches its syllable count identifies its reading well enough
-        // here, since every dictionary entry has one character per syllable.
-        val readings = Syllables.readings(input)
-        val reading = readings.firstOrNull { it.size >= chosen.syllables }
-            ?: readings.firstOrNull()
-
-        val consumedLetters = when {
-            reading == null -> input.length
-            chosen.syllables >= reading.size -> input.length
-            else -> reading.ends.getOrElse(chosen.syllables - 1) { input.length }
-        }
+        // The span the candidate actually stands for, recorded by the decoder from the reading
+        // that produced it -- not reconstructed here from a guessed reading. Candidates come
+        // from several segmentations (for `ta`, 他 is [ta] while 天啊 is [t][a]), and consuming
+        // or learning by the wrong one eats the wrong letters or files the word under a key that
+        // will never produce it. The English bar reads the same two fields, so a pick consumes
+        // and learns identically in either language.
+        val consumedLetters = chosen.consumed.takeIf { it > 0 } ?: input.length
 
         // Learn against the syllables actually consumed, so 北京 is learned for `bei jing` and
         // not for the whole `beijingdaxue` key that will never be typed again.
-        if (reading != null && chosen.syllables <= reading.size &&
-            chosen.text.length == chosen.syllables
-        ) {
-            userDict?.learn(reading.ids.copyOfRange(0, chosen.syllables), chosen.text)
+        if (chosen.ids.isNotEmpty() && chosen.text.length == chosen.ids.size) {
+            userDict?.learn(chosen.ids, chosen.text)
             userDict?.save()
             // Learning changed what the decoder will say about these letters, so the memoised
             // answer for them is now wrong. Dropped here rather than only in `clear`, because the
@@ -426,17 +422,8 @@ internal class PinyinSession(private val context: Context) {
         /** Longest run of letters treated as one composition. */
         const val MAX_INPUT = 48
 
+        /** Shared by both bars, so the English one can never show a different Chinese list. */
         const val CANDIDATE_LIMIT = 20
-
-        /**
-         * How many more candidates [scoredFor] asks the decoder for than it will return.
-         *
-         * The unified ranker re-sorts on a quantity the decoder does not know about (coverage),
-         * so the answer can be well down the decoder's own list. Five times is enough to clear
-         * the character floor for the longest input a suggestion bar sees, and the cost is a
-         * longer list to sort, not a second decode.
-         */
-        const val DECODER_OVERFETCH = 5
 
         /**
          * How many converted mainland spellings a Traditional bar may gain. See

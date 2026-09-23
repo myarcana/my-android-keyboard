@@ -32,6 +32,7 @@ FUZZY_PENALTY = 2.3
 EMOJI_TOKEN_SHARE = 1 / 300.0
 EMOJI_HARMONIC = 8.1
 COVERAGE_PENALTY = 18.0
+CHINESE_GATE = 7.0
 NOT_ENGLISH = -14.0
 ENGLISH_EVIDENCE = 1.0
 
@@ -181,7 +182,12 @@ def decode(letters: str, reader: Reader, words: dict, chars: dict, mode: str,
     app's ordering for the short inputs a suggestion bar deals with.
     """
     syls = set(reader.syllables)
-    results = {}
+    # In the three phases Decoder.candidates uses, so the order printed is the order shown:
+    # whole-input readings, then prefix words longest first, then single characters.
+    full: dict = {}
+    prefix: dict = {}
+    floor: dict = {}
+    results = full
 
     for ids, ends in readings(letters, syls):
         n = len(ids)
@@ -225,35 +231,41 @@ def decode(letters: str, reader: Reader, words: dict, chars: dict, mode: str,
             consumed = len(letters)
             if text not in results or score > results[text][0]:
                 results[text] = (score, consumed)
-        # Prefix words: committing one word of a longer phrase is normal.
+    first = next(iter(readings(letters, syls)), None)
+    if first is not None:
+        ids, ends = first
+        n = len(ids)
+        # Prefix words of the best reading, longest first: committing one word of a longer
+        # phrase is normal, and a longer prefix is always offered before a shorter one.
         for span in range(min(n, 12), 0, -1):
             if span == n:
                 continue
             key = " ".join(ids[:span])
+            ws = []
             for w, wt in words.get(key, []):
                 score = log_prob(wt[0], wt[1], mode)
-                if score is None:
-                    continue
-                consumed = ends[span - 1]
-                if w not in results or score > results[w][0]:
-                    results[w] = (score, consumed)
+                if score is not None and len(w) == span:
+                    ws.append((w, score))
+            for w, score in ws[:6]:
+                prefix.setdefault(w, (score, ends[span - 1]))
         # Character floor for the first syllable.
         for ch, wt in chars.get(ids[0], [])[:8]:
             score = log_prob(wt[0], wt[1], mode)
             if score is None or len(ch) != 1:
                 continue
-            if ch not in results or score > results[ch][0]:
-                results[ch] = (score, ends[0])
+            floor.setdefault(ch, (score, ends[0]))
 
-    # Ranked by the score the *bar* will use, coverage included, before truncating. Sorting on
-    # the bare decoder score and cutting here is what hid 蚵仔煎: forty single characters each
-    # explaining one letter of seven outscore it on raw frequency and are all worthless, and the
-    # penalty that says so had not been applied yet. Truncate on the final quantity or not at all.
-    ranked = sorted(
-        results.items(),
-        key=lambda kv: -(kv[1][0] - (1 - kv[1][1] / max(len(letters), 1)) * COVERAGE_PENALTY),
-    )[:limit]
-    return [(text, score, consumed) for text, (score, consumed) in ranked]
+    # No re-sort across phases: that is what let 他的 beat 他的爸爸很讨厌我. Whole-input
+    # readings by score, capped like FULL_DECODINGS; the other phases in the order produced.
+    out, seen = [], set()
+    phases = [sorted(full.items(), key=lambda kv: -kv[1][0])[:6],
+              list(prefix.items()), list(floor.items())]
+    for phase in phases:
+        for text, (score, consumed) in phase:
+            if text not in seen:
+                seen.add(text)
+                out.append((text, score, consumed))
+    return out[:limit]
 
 
 def load_tables(reader: Reader):
@@ -289,15 +301,25 @@ def main() -> None:
         rows = []
         english = lexicon.get(q, NOT_ENGLISH)
         penalty = max(english - NOT_ENGLISH, 0.0) * ENGLISH_EVIDENCE
-        for rank, e in enumerate(emoji.search(q)):
-            rows.append((emoji_score(rank, q), "emoji", e, len(q)))
+        emoji_rows = [(emoji_score(rank, q), "emoji", e, len(q))
+                      for rank, e in enumerate(emoji.search(q))]
         mode = "both" if args.both else ("tw" if args.traditional else "cn")
-        for text, score, consumed in decode(q, reader, words, chars, mode):
+        # Mirrors UnifiedCandidates.rank: Chinese keeps decoder order, its sort key clamped to
+        # never exceed the previous one, and emoji are merged in around it.
+        zh_rows, ceiling = [], math.inf
+        for text, score, consumed in decode(q, reader, words, chars, mode, limit=20):
             coverage = consumed / len(q) if q else 0.0
-            rows.append(
-                (score - (1 - coverage) * COVERAGE_PENALTY - penalty, "chinese", text, consumed)
-            )
-        rows.sort(key=lambda r: -r[0])
+            key = min(ceiling, score - (1 - coverage) * COVERAGE_PENALTY - penalty)
+            ceiling = key
+            zh_rows.append((key, "chinese", text, consumed))
+        if zh_rows and emoji_rows and zh_rows[0][0] < emoji_rows[0][0] - CHINESE_GATE:
+            zh_rows = []
+        rows, i, j = [], 0, 0
+        while i < len(emoji_rows) or j < len(zh_rows):
+            if j >= len(zh_rows) or (i < len(emoji_rows) and emoji_rows[i][0] >= zh_rows[j][0]):
+                rows.append(emoji_rows[i]); i += 1
+            else:
+                rows.append(zh_rows[j]); j += 1
 
         model = {"both": "both scripts", "tw": "taiwan", "cn": "mainland"}[mode]
         note = (f"english lnP {english:.2f}, chinese charged {penalty:.2f}"

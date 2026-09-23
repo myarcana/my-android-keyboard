@@ -195,6 +195,17 @@ class KeyboardService : InputMethodService() {
      */
     private var candidateConsumes: List<Int> = emptyList()
 
+    /**
+     * The suggestions behind the bar, parallel to it; empty for the default emoji.
+     *
+     * Kept so a tap can tell a Chinese pick -- which stands for the *start* of the typed word
+     * and leaves the rest -- from an emoji, which stands for all of it.
+     */
+    private var candidateSuggestions: List<UnifiedCandidates.Suggestion> = emptyList()
+
+    /** The typed word the bar was answering, exactly as it stood in the field. */
+    private var candidateWord: String = ""
+
     // --- tap decoding ---
     /**
      * Re-reads a run of letter taps once there is enough of a word to read. Shares the lexicon
@@ -1058,9 +1069,20 @@ class KeyboardService : InputMethodService() {
      */
     private fun returnToLetters(text: String) {
         if (plane.id.startsWith("en_qwerty")) return
-        if (!TypingHabits.returnsToLetters(text)) return
-        switchPlane("mode_abc")
+        if (TypingHabits.returnsToLetters(text, typedOnPlane)) {
+            switchPlane("mode_abc")
+            return
+        }
+        if (text.isNotBlank()) typedOnPlane = true
     }
+
+    /**
+     * Whether anything other than a space has been typed since leaving the letters for the
+     * number and symbol planes. A space only sends those planes back to the letters once this is
+     * true; see [TypingHabits.returnsToLetters]. Reset by [switchPlane] on entering or leaving
+     * the letters.
+     */
+    private var typedOnPlane = false
 
     // --- tap decoding ---------------------------------------------------------------------
 
@@ -1494,7 +1516,11 @@ class KeyboardService : InputMethodService() {
      * letters. The key ids say where each one goes, and they are the only thing that does.
      */
     private fun switchPlane(keyId: String) {
+        val from = plane
         plane = IosLayouts.planeFor(keyId) ?: return
+        // Only a fresh arrival from the letters starts the count again. Hopping between "123"
+        // and "#+=" is still the same excursion: "1" then "#+=" then space has typed something.
+        if (from.id.startsWith("en_qwerty") || plane.id.startsWith("en_qwerty")) typedOnPlane = false
         shift = ShiftState.OFF
         applyLayout()
     }
@@ -1751,6 +1777,8 @@ class KeyboardService : InputMethodService() {
         keyboardView?.candidateKinds = emptyList()
         candidateReplaceLength = 0
         candidateConsumes = emptyList()
+        candidateSuggestions = emptyList()
+        candidateWord = ""
     }
 
     /**
@@ -1823,6 +1851,9 @@ class KeyboardService : InputMethodService() {
             // unlike the mixed bar showing the same characters.
             view.candidateKinds = texts.map { UnifiedCandidates.Kind.CHINESE }
             candidateReplaceLength = 0
+            candidateConsumes = emptyList()
+            candidateSuggestions = emptyList()
+            candidateWord = ""
             return
         }
         val index = emoji
@@ -1843,6 +1874,9 @@ class KeyboardService : InputMethodService() {
                 candidateConsumes = ranked.map {
                     if (it.kind == UnifiedCandidates.Kind.CHINESE) it.consumes else word.length
                 }
+                candidateSuggestions = ranked
+                candidateWord = before.subSequence(before.length - word.length, before.length)
+                    .toString()
                 candidateReplaceLength = word.length
                 return
             }
@@ -1851,7 +1885,8 @@ class KeyboardService : InputMethodService() {
     }
 
     /**
-     * The ranked bar for one candidate word: emoji and Chinese on a single scale.
+     * The bar for one candidate word: the Chinese candidates in exactly the order the Chinese
+     * subtypes show them, with emoji placed around them by [UnifiedCandidates.rank].
      *
      * The Chinese half is only asked for when the dictionary is already in memory. It is loaded
      * in the background from [onStartInput] like the emoji index, so this is a "not yet" rather
@@ -1870,7 +1905,9 @@ class KeyboardService : InputMethodService() {
         val hits = index.search(query)
         val session = pinyin
         val chinese = if (session != null && session.isReady && !query.contains(' ')) {
-            session.scoredFor(query)
+            // Lowercased because the field holds what was typed, and `Tadebaba` at the start
+            // of a sentence is still pinyin; the lengths, and so every `consumes`, are unchanged.
+            session.scoredFor(query.lowercase())
         } else {
             emptyList()
         }
@@ -1898,6 +1935,8 @@ class KeyboardService : InputMethodService() {
         keyboardView?.candidateKinds = emptyList()
         candidateReplaceLength = 0
         candidateConsumes = emptyList()
+        candidateSuggestions = emptyList()
+        candidateWord = ""
     }
 
     /** Replaces the typed word with the emoji, the way the iOS emoji suggestion does. */
@@ -1912,18 +1951,37 @@ class KeyboardService : InputMethodService() {
         flushPending()
         val text = keyboardView?.candidates?.getOrNull(position) ?: return
         val ic = currentInputConnection ?: return
-        // A Chinese suggestion may stand for only part of the word: picking 牛肉 out of
-        // `niuroumian` must eat exactly `niurou` and leave `mian` for the next suggestion to
-        // answer. Emoji, and every entry on a uniform bar, still replace the whole word.
-        val replace = candidateConsumes.getOrNull(position) ?: candidateReplaceLength
+        val suggestion = candidateSuggestions.getOrNull(position)
+        val word = candidateWord
         ic.beginBatchEdit()
-        if (replace > 0) {
-            ic.deleteSurroundingText(replace, 0)
-            deleted(replace)
+        if (suggestion != null && suggestion.kind == UnifiedCandidates.Kind.CHINESE &&
+            word.length == candidateReplaceLength && suggestion.consumes < word.length
+        ) {
+            // A Chinese suggestion may stand for only the *start* of the word: picking 他的 out
+            // of `tadebabahentaoyanwo` means `tade`, and `babahentaoyanwo` is still being typed.
+            // The whole word is replaced by the characters plus the letters they did not use,
+            // so the field reads 他的babahentaoyanwo and the next suggestions answer the rest --
+            // the way iOS and the Chinese subtypes both behave. Deleting `consumes` letters
+            // back from the caret instead ate the *end* of the word: tadebabahentaoy他的.
+            val replacement = UnifiedCandidates.replacementFor(word, text, suggestion.consumes)
+            ic.deleteSurroundingText(word.length, 0)
+            deleted(word.length)
+            ic.commitText(replacement, 1)
+            typed(replacement)
+        } else {
+            // Emoji, whole-word Chinese, and every entry on a uniform bar replace the whole word.
+            val replace = candidateConsumes.getOrNull(position) ?: candidateReplaceLength
+            if (replace > 0) {
+                ic.deleteSurroundingText(replace, 0)
+                deleted(replace)
+            }
+            ic.commitText(text, 1)
+            typed(text)
         }
-        ic.commitText(text, 1)
-        typed(text)
         ic.endBatchEdit()
+        // A choice made here is learned exactly as one made on the Chinese bar, so the two
+        // bars cannot drift apart as the user corrects them.
+        suggestion?.source?.let { pinyin?.learn(it) }
         refreshCandidates()
     }
 
