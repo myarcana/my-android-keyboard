@@ -1,12 +1,24 @@
 {
-  "title": "Glide a word, tap the rest",
+  "title": "Tap the sentence, glide the word",
   "field": 0,
   "steps": [
-    {"do": "pause", "ms": 700, "caption": "Tap or glide -- the same keyboard"},
-    {"do": "type", "text": "meet me at ", "interval": 195, "after": 350},
-    {"do": "glide", "word": "sunset", "caption": "One stroke through the letters", "after": 900},
-    {"do": "type", "text": " ", "after": 800},
-    {"do": "glide", "word": "tomorrow", "after": 1200}
+    {
+      "do": "pause",
+      "ms": 700,
+      "caption": "Tap or glide -- the same keyboard"
+    },
+    {
+      "do": "type",
+      "text": "time for ",
+      "interval": 195,
+      "after": 400
+    },
+    {
+      "do": "glide",
+      "word": "coffee",
+      "caption": "One stroke through the letters",
+      "after": 1400
+    }
   ],
-  "tailMs": 1600
+  "tailMs": 1800
 }
