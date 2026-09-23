@@ -1,0 +1,11 @@
+{
+  "title": "Plain typing, with the decoder working",
+  "field": 0,
+  "steps": [
+    {"do": "pause", "ms": 600, "caption": "Everything runs on the phone"},
+    {"do": "type", "text": "the quick brown fox ", "interval": 165},
+    {"do": "type", "text": "jumps over it", "interval": 165, "caption": "No network, no account, no latency"},
+    {"do": "pause", "ms": 900}
+  ],
+  "tailMs": 1500
+}

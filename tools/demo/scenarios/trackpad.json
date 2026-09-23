@@ -1,0 +1,11 @@
+{
+  "title": "The space bar is a trackpad",
+  "field": 0,
+  "steps": [
+    {"do": "type", "text": "move the caret without aiming", "interval": 150, "after": 700},
+    {"do": "drag", "key": "space", "dx": -2.6, "ms": 900, "holdMs": 420,
+     "caption": "Hold the space bar and slide", "after": 900},
+    {"do": "drag", "key": "space", "dx": 1.8, "ms": 700, "after": 900}
+  ],
+  "tailMs": 1600
+}

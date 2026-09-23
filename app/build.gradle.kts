@@ -14,6 +14,11 @@ android {
         versionCode = 1
         versionName = "0.2.0-phase1"
 
+        // The demo recorder measures the keyboard from inside the keyboard's own process: it
+        // reports where every key landed, from the live LayoutGeometry rather than a copy of the
+        // metrics. See app/src/androidTest/.../demo/DemoGeometry.kt and tools/demo/.
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+
         // Phone only for a device deploy. The emulator's x86_64 copies of the native runtimes
         // are ~40 MB that a physical phone can never load; drop them when the models and libs
         // are in the pack anyway. A self-contained build keeps both, as it always did.
@@ -139,6 +144,7 @@ dependencies {
     implementation(libs.androidx.autofill)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.test.runner)
 }
 
 /**

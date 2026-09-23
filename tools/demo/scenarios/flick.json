@@ -1,0 +1,12 @@
+{
+  "title": "Flick for numbers, hold for accents",
+  "field": 0,
+  "steps": [
+    {"do": "pause", "ms": 600, "caption": "Flick a key for the character above it"},
+    {"do": "type", "text": "room ", "interval": 190},
+    {"do": "flick", "key": "t", "dir": "up", "after": 900},
+    {"do": "flick", "key": "y", "dir": "up", "after": 1100},
+    {"do": "hold", "key": "e", "ms": 800, "caption": "Hold for the accented letters", "after": 1200}
+  ],
+  "tailMs": 1600
+}

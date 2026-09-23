@@ -1,15 +1,18 @@
 package com.offlinekeyboard.testpad
 
 import android.app.Activity
+import android.content.Intent
 import android.graphics.Color
 import android.os.Bundle
 import android.text.InputType
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
+import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.LinearLayout
 import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 
 /**
@@ -32,6 +35,9 @@ import androidx.core.view.WindowInsetsCompat
  * process, no files.
  */
 class TestPadActivity : Activity() {
+
+    /** The fields, top to bottom, for the demo recorder to pick one by number. */
+    private val demoFields = mutableListOf<EditText>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -158,5 +164,81 @@ class TestPadActivity : Activity() {
         // Start at the top: the short-line section is the interesting part, and focusing the
         // field otherwise leaves the view wherever it was last scrolled.
         field.post { field.setSelection(0) }
+
+        // Demo recording (tools/demo/): start with `--ei demoField <n>` to focus that field,
+        // counting from the top, and open the keyboard on it.
+        //
+        // The app does this rather than the recorder tapping the field, because a tap raises the
+        // keyboard only when it *changes* which view has focus, and a recorder that has just
+        // restarted arrives at a screen whose field is already focused and whose keyboard is
+        // gone. That was one take in three lost to "the keyboard never came up". Asking from
+        // inside the focused app is the request the platform is willing to honour.
+        demoFields.clear()
+        demoFields += listOf(words, login, field)
+        openForDemo(intent)
+    }
+
+    /**
+     * Also handled here, not only in [onCreate].
+     *
+     * A relaunch reaches whichever of the two the system feels like: `FLAG_ACTIVITY_CLEAR_TOP`
+     * recreates this activity when something is above it and delivers the intent here when it is
+     * already on top. Handling only `onCreate` therefore ignored the request half the time.
+     *
+     * Handling both is still not enough on its own -- a keyboard asked for by an activity that
+     * never went away is not raised reliably either -- which is why `tools/demo/demo.sh` stops
+     * this app before it starts it. This exists so that a hand-typed `am start` behaves.
+     */
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        openForDemo(intent)
+    }
+
+    /** Focuses the field the demo recorder asked for and opens the keyboard on it. */
+    private fun openForDemo(intent: Intent?) {
+        val demoField = intent?.getIntExtra("demoField", -1) ?: -1
+        if (demoField >= 0 && demoFields.isNotEmpty()) {
+            val wanted = demoFields.getOrElse(demoField) { demoFields.first() }
+            wanted.setText("")
+            // Focus is dropped and taken again, so that this is a *change* of focus even when the
+            // field already had it. A relaunch that lands on an activity which is already showing
+            // -- the intent arriving at [onNewIntent] rather than [onCreate] -- otherwise asks for
+            // a keyboard on a field nothing has changed about, and the request goes nowhere.
+            wanted.clearFocus()
+            wanted.requestFocus()
+
+            // Asked repeatedly, for nine seconds, and through both doors.
+            //
+            // A single request is honoured about half the time, and the reason is that this
+            // keyboard is expensive to start: the recorder's instrumentation kills its process,
+            // and the next cold start takes longer than the system is willing to wait for a
+            // window -- `ImeTracker` reports `setFinished at PHASE_IME_SHOW_WINDOW with
+            // STATUS_TIMEOUT`, the show is abandoned, and the take that needed it fails. The
+            // attempt after that finds the process warm and works, which is what made the
+            // failures alternate.
+            //
+            // The repeat is not conditional on the insets reporting the keyboard hidden, because
+            // they report it *visible* while it is merely requested, which ended an earlier
+            // version of this loop before anything had appeared.
+            val controller = WindowCompat.getInsetsController(window, wanted)
+            val manager = getSystemService(InputMethodManager::class.java)
+            val asking = object : Runnable {
+                var attempts = 0
+                override fun run() {
+                    val insets = ViewCompat.getRootWindowInsets(wanted)
+                    // Visible *and* occupying height. The visibility flag alone is set while the
+                    // keyboard is merely requested, which stopped an earlier version of this loop
+                    // before anything had appeared.
+                    val up = insets?.isVisible(WindowInsetsCompat.Type.ime()) == true &&
+                        insets.getInsets(WindowInsetsCompat.Type.ime()).bottom > 0
+                    if (up || attempts++ > 12) return
+                    controller.show(WindowInsetsCompat.Type.ime())
+                    manager?.showSoftInput(wanted, InputMethodManager.SHOW_IMPLICIT)
+                    wanted.postDelayed(this, 700)
+                }
+            }
+            wanted.post(asking)
+        }
     }
 }

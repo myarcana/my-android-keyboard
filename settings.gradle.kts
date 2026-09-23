@@ -16,4 +16,5 @@ dependencyResolutionManagement {
 rootProject.name = "OfflineKeyboard"
 include(":app")
 include(":testpad")
+include(":demodriver")
 include(":modelpack")

@@ -42,3 +42,9 @@ modelpack/
 
 # Kotlin incremental-compile scratch.
 .kotlin/
+
+# Demo recordings: raw captures, touch logs and rendered videos, made by tools/demo/.
+build/demo/
+
+# The renderer's Python environment (numpy, pillow), created on first use.
+tools/demo/.venv/
