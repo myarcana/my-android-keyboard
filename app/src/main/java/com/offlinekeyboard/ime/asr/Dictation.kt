@@ -44,6 +44,16 @@ private const val MIN_SILENCE_SECONDS = 0.35f
 private const val MAX_SPEECH_SECONDS = 25f
 
 /**
+ * How much audio either side of a garbled span goes into its forced-Chinese retry.
+ *
+ * Token timestamps are where a token *starts*, at 60 ms frame resolution, so the span is widened
+ * a little to catch the onset of its first syllable and the tail of its last. Much wider and the
+ * neighbouring English words come back into the retry ("拼螺蛳粉 is" at 0.25 s), which is
+ * exactly the context that stopped the whole-segment retry from working.
+ */
+private const val SPAN_PAD_SECONDS = 0.1f
+
+/**
  * How long to read and throw away before trusting the microphone, and before telling the user it
  * is listening.
  *
@@ -70,10 +80,10 @@ private const val WARMUP_DISCARD_NANOS = 120_000_000L
  *
  *  - Segments are cut on a shorter pause, so a mid-sentence language switch tends to get its own
  *    segment and therefore its own language decision.
- *  - A segment detected as anything but Chinese that contains a Latin word outside the English
- *    lexicon is decoded a second time forced to `zh`, and [CodeSwitch.choose] keeps the retry
- *    only when it adds Han without disturbing any English word. The `auto` result is still what
- *    ships unless the retry is purely a repair.
+ *  - In a segment detected as anything but Chinese, each run of Latin words outside the English
+ *    lexicon has its own audio decoded again forced to `zh`, and [CodeSwitch.choose] keeps the
+ *    retry only when it turns the run into Han without inventing English. The `auto` result is
+ *    still what ships everywhere else.
  */
 class Dictation(private val context: Context) {
 
@@ -414,9 +424,10 @@ class Dictation(private val context: Context) {
     /**
      * Decodes one segment, repairing the code-switch failure when it shows.
      *
-     * The automatic pass is authoritative. The forced-Chinese pass only runs when the automatic
-     * text contains a Latin word that is not English, and only replaces it when the change is
-     * purely a repair -- so a segment of ordinary English costs exactly one decode, as before.
+     * The automatic pass is authoritative. When it contains Latin words that are not English,
+     * the audio under each run of them -- and only that audio -- is decoded again forced to
+     * Chinese, and the run is replaced only when [CodeSwitch.choose] judges the result a pure
+     * repair. A segment of ordinary English costs exactly one decode, as before.
      */
     private fun transcribe(engine: OfflineRecognizer, samples: FloatArray): CommandMerge.Transcript {
         val auto = decode(engine, samples)
@@ -425,22 +436,36 @@ class Dictation(private val context: Context) {
         if (!CodeSwitch.suspectsMissedChinese(auto.text, auto.lang, isEnglish)) return auto.transcript
 
         val zh = zhRecognizer ?: return auto.transcript
-        val forced = try {
-            decode(zh, samples)
-        } catch (t: Throwable) {
-            Log.e(TAG, "forced-zh retry failed", t)
-            return auto.transcript
+        val runs = CodeSwitch.suspectRuns(
+            auto.transcript,
+            segmentSeconds = samples.size.toFloat() / SAMPLE_RATE,
+            isEnglish = isEnglish,
+        )
+        val repairs = runs.mapNotNull { run ->
+            val from = ((run.startSeconds - SPAN_PAD_SECONDS) * SAMPLE_RATE).toInt().coerceAtLeast(0)
+            val to = ((run.endSeconds + SPAN_PAD_SECONDS) * SAMPLE_RATE).toInt().coerceAtMost(samples.size)
+            if (to <= from) return@mapNotNull null
+            val forced = try {
+                decode(zh, samples.copyOfRange(from, to)).text.trim()
+            } catch (t: Throwable) {
+                Log.e(TAG, "forced-zh retry failed", t)
+                return@mapNotNull null
+            }
+            val chosen = CodeSwitch.choose(run.text, forced, isEnglish)
+            if (chosen == run.text) {
+                if (Log.isLoggable(TAG, Log.DEBUG)) {
+                    Log.d(TAG, "code-switch retry refused: run=[${run.text}] zh=[$forced]")
+                }
+                null
+            } else {
+                run to chosen
+            }
         }
-        val chosen = CodeSwitch.choose(auto.text, forced.text, isEnglish)
-        if (chosen != auto.text) {
-            Log.i(TAG, "code-switch repair applied (auto lang=${auto.lang})")
-        } else if (Log.isLoggable(TAG, Log.DEBUG)) {
-            Log.d(TAG, "code-switch retry refused: auto=[${auto.text}] zh=[${forced.text}]")
-        }
-        // Whichever text won, its own tokens and timings go with it: the merge matches
-        // detections against these words, and pairing one decode's text with another's
-        // timings would put the marks in the wrong places.
-        return if (chosen == auto.text) auto.transcript else forced.transcript
+        if (repairs.isEmpty()) return auto.transcript
+        Log.i(TAG, "code-switch repair applied to ${repairs.size} of ${runs.size} spans")
+        // The repair is spliced into the auto decode's own tokens, so every other word keeps
+        // the timing the punctuation merge matches detections against.
+        return CodeSwitch.splice(auto.transcript, repairs)
     }
 
     private class Decoded(val transcript: CommandMerge.Transcript, val lang: String) {

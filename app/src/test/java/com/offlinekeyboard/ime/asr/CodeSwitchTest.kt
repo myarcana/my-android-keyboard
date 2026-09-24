@@ -74,6 +74,95 @@ class CodeSwitchTest {
         }
     }
 
+    // --- only the garbled span is retried -------------------------------------------------
+
+    /** The real auto decode of "I think 螺蛳粉 is the best food in the world" (zh-TW voice). */
+    private val rociphon = CommandMerge.Transcript(
+        text = "i think rociphon is the best food in the world",
+        tokens = listOf("i", " think", " ro", "ci", "phon", " is", " the", " best", " food", " in", " the", " world"),
+        timestamps = listOf(0.12f, 0.30f, 0.54f, 0.78f, 1.02f, 1.14f, 1.32f, 1.44f, 1.68f, 1.86f, 1.98f, 2.10f),
+    )
+
+    @Test
+    fun `the garbled word is found with the audio it was spoken in`() {
+        val run = CodeSwitch.suspectRuns(rociphon, 3.24f, isEnglish).single()
+        assertEquals("rociphon", run.text)
+        assertEquals(2, run.firstToken)
+        assertEquals(4, run.lastToken)
+        // From its first token to the start of "is": the span the retry decodes, nothing more.
+        assertEquals(0.54f, run.startSeconds)
+        assertEquals(1.14f, run.endSeconds)
+    }
+
+    @Test
+    fun `the span retry's Han is spliced in and the English is untouched`() {
+        val run = CodeSwitch.suspectRuns(rociphon, 3.24f, isEnglish).single()
+        // The real forced-zh decode of 0.44..1.24 s of that audio.
+        val repaired = CodeSwitch.choose(run.text, "螺蛳粉", isEnglish)
+        assertEquals("螺蛳粉", repaired)
+        val out = CodeSwitch.splice(rociphon, listOf(run to repaired))
+        assertEquals("i think螺蛳粉 is the best food in the world", out.text)
+        assertEquals(out.tokens.size, out.timestamps.size)
+        assertEquals(0.54f, out.timestamps[2])
+        assertEquals(1.14f, out.timestamps[3])
+    }
+
+    @Test
+    fun `adjacent unknown words are one span`() {
+        val t = CommandMerge.Transcript(
+            text = "i think lu sien is good",
+            tokens = listOf("i", " think", " lu", " si", "en", " is", " good"),
+            timestamps = listOf(0.1f, 0.3f, 0.72f, 0.9f, 1.1f, 1.44f, 1.6f),
+        )
+        val run = CodeSwitch.suspectRuns(t, 2f, isEnglish).single()
+        assertEquals("lu sien", run.text)
+        assertEquals(0.72f, run.startSeconds)
+        assertEquals(1.44f, run.endSeconds)
+    }
+
+    @Test
+    fun `a span retry that drags in a neighbouring English word is refused`() {
+        // Too much padding decodes the next word too; "is" would appear twice.
+        assertEquals("wifan", CodeSwitch.choose("wifan", "拼螺蛳粉 is", isEnglish))
+        assertEquals("wassufu", CodeSwitch.choose("wassufu", "", isEnglish))
+    }
+
+    @Test
+    fun `a trailing span runs to the end of the segment`() {
+        val t = CommandMerge.Transcript(
+            text = "she lives near xmaning",
+            tokens = listOf("she", " lives", " near", " xman", "ing"),
+            timestamps = listOf(0.1f, 0.3f, 0.6f, 0.9f, 1.2f),
+        )
+        val run = CodeSwitch.suspectRuns(t, 1.8f, isEnglish).single()
+        assertEquals(1.8f, run.endSeconds)
+        assertEquals("she lives near西门町", CodeSwitch.splice(t, listOf(run to "西门町")).text)
+    }
+
+    @Test
+    fun `two spans are both spliced`() {
+        val t = CommandMerge.Transcript(
+            text = "the xmaning and dohua",
+            tokens = listOf("the", " xman", "ing", " and", " do", "hua"),
+            timestamps = listOf(0.1f, 0.3f, 0.5f, 0.8f, 1.0f, 1.2f),
+        )
+        val runs = CodeSwitch.suspectRuns(t, 1.6f, isEnglish)
+        assertEquals(listOf("xmaning", "dohua"), runs.map { it.text })
+        val out = CodeSwitch.splice(t, listOf(runs[0] to "西门町", runs[1] to "豆花"))
+        assertEquals("the西门町 and豆花", out.text)
+        assertEquals(listOf(0.1f, 0.3f, 0.8f, 1.0f), out.timestamps)
+    }
+
+    @Test
+    fun `English and Han produce no spans`() {
+        val t = CommandMerge.Transcript(
+            text = "the best豆花 in the world",
+            tokens = listOf("the", " best", "豆", "花", " in", " the", " world"),
+            timestamps = listOf(0.1f, 0.3f, 0.6f, 0.7f, 0.9f, 1.0f, 1.1f),
+        )
+        assertTrue(CodeSwitch.suspectRuns(t, 1.5f, isEnglish).isEmpty())
+    }
+
     // --- the forced pass must not damage English ----------------------------------------
 
     @Test

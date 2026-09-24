@@ -21,10 +21,24 @@ import java.io.InputStream
  *     "what's your favorite taiwanese food 牛肉麵嗎" -> "... food ne roium ma"
  *     "the best 豆花 in the world"                   -> "the best dohua in the world"
  *
- * The repair is to decode the same audio a second time forced to `zh` and keep the better
- * answer. Forcing `zh` does not throw the English away: on the same audio SenseVoice returns
- * "the best豆花 in the world", English intact. Deciding when to retry and which answer to keep is
- * what this file does, and it is pure text so it is testable on the JVM without a model.
+ * The repair is to decode the audio a second time forced to `zh` and keep the better answer.
+ * Deciding when to retry, which audio to retry, and which answer to keep is what this file does,
+ * and it is pure text and numbers so it is testable on the JVM without a model.
+ *
+ * ## Only the garbled span is retried, not the segment
+ *
+ * The first version re-decoded the whole segment forced to `zh`. The language token is only the
+ * first thing the decoder sees, and a segment that is mostly English keeps pulling it back to
+ * English, so the romanised word usually came back romanised again:
+ *
+ *     "I think 螺蛳粉 is the best food in the world"
+ *       auto      -> "i think rociphon is the best food in the world"
+ *       forced zh -> "i think rocien is the best food in the world"
+ *
+ * That repaired 1 of 6 voices on this sentence. Cutting out just the audio under the unknown
+ * words ([suspectRuns], with the token timings the decode already returns) and decoding *that*
+ * forced to `zh` leaves the decoder no English to lean on, and 4 of 6 came back as 螺蛳粉. The
+ * English around it is never re-decoded, so it cannot be rewritten.
  *
  * ## Why an English dictionary, and not a pinyin-shape detector
  *
@@ -98,6 +112,105 @@ object CodeSwitch {
 
     fun isHan(c: Char): Boolean =
         Character.UnicodeScript.of(c.code) == Character.UnicodeScript.HAN
+
+    /**
+     * A run of consecutive non-English Latin words in a transcript: tokens
+     * [firstToken]..[lastToken] inclusive, spoken from [startSeconds] until [endSeconds] (the
+     * start of the next token, or the end of the segment).
+     */
+    data class Run(
+        val firstToken: Int,
+        val lastToken: Int,
+        val startSeconds: Float,
+        val endSeconds: Float,
+        val text: String,
+    )
+
+    /**
+     * The stretches of [transcript] that look like romanised Chinese: maximal runs of Latin words
+     * outside the English lexicon. "lu sien" is one run, not two, because splitting one Chinese
+     * word's audio in half would give each half too little to decode.
+     *
+     * Words are rebuilt from tokens the way [CommandMerge.words] does it -- a token starting with
+     * a space starts a word -- but keeping token indices, which is what [splice] replaces.
+     */
+    fun suspectRuns(
+        transcript: CommandMerge.Transcript,
+        segmentSeconds: Float,
+        isEnglish: (String) -> Boolean,
+    ): List<Run> {
+        val tokens = transcript.tokens
+        val times = transcript.timestamps
+        if (tokens.isEmpty() || times.size != tokens.size) return emptyList()
+
+        // [first, last] token index of each word, and its text.
+        class Word(val first: Int, var last: Int, var text: String)
+        val words = mutableListOf<Word>()
+        tokens.forEachIndexed { i, raw ->
+            val body = raw.removePrefix(" ").removePrefix("\u2581")
+            if (body.isEmpty()) return@forEachIndexed
+            val prev = words.lastOrNull()
+            val continues = prev != null && raw == body && isLatinWord(body) && isLatinWord(prev.text)
+            if (continues) {
+                prev!!.last = i
+                prev.text += body
+            } else {
+                words += Word(i, i, body)
+            }
+        }
+
+        fun suspect(w: Word) = isLatinWord(w.text) && !isEnglish(w.text.trim('\''))
+        val runs = mutableListOf<Run>()
+        var i = 0
+        while (i < words.size) {
+            if (!suspect(words[i])) { i++; continue }
+            var j = i
+            while (j + 1 < words.size && suspect(words[j + 1])) j++
+            val first = words[i].first
+            val last = words[j].last
+            runs += Run(
+                firstToken = first,
+                lastToken = last,
+                startSeconds = times[first],
+                endSeconds = times.getOrElse(last + 1) { segmentSeconds },
+                text = words.subList(i, j + 1).joinToString(" ") { it.text },
+            )
+            i = j + 1
+        }
+        return runs
+    }
+
+    /**
+     * [transcript] with each run's tokens replaced by its repair, text rebuilt from the tokens.
+     *
+     * The replacement becomes a single token timed at the run's start, so the punctuation merge
+     * still finds every other word where it was. A Latin replacement starts with a space so it
+     * stays a separate word; Han does not need one, and [SpokenPunctuation] puts the space
+     * between Latin and Han back on the side that touches.
+     */
+    fun splice(
+        transcript: CommandMerge.Transcript,
+        repairs: List<Pair<Run, String>>,
+    ): CommandMerge.Transcript {
+        if (repairs.isEmpty()) return transcript
+        val tokens = transcript.tokens.toMutableList()
+        val times = transcript.timestamps.toMutableList()
+        for ((run, text) in repairs.sortedByDescending { it.first.firstToken }) {
+            val token = if (text.firstOrNull()?.let(::isHan) == true) text else " $text"
+            val range = run.firstToken..run.lastToken
+            repeat(range.count()) {
+                tokens.removeAt(run.firstToken)
+                times.removeAt(run.firstToken)
+            }
+            tokens.add(run.firstToken, token)
+            times.add(run.firstToken, run.startSeconds)
+        }
+        return CommandMerge.Transcript(tokens.joinToString("").trim(), tokens, times)
+    }
+
+    private fun isLatinWord(s: String) = s.isNotEmpty() && LATIN_WORD.matches(s)
+
+    private val LATIN_WORD = Regex("[A-Za-z']+")
 
     /**
      * Picks between the `auto` decode and a decode forced to Chinese.
