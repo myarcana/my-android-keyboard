@@ -91,6 +91,64 @@ class Lexicon private constructor(
         return logFrequency[i] * LN10_PER_CENTIDECADE - LOG_CORPUS_TOTAL
     }
 
+    /**
+     * `ln P(a word beginning with [prefix])`, or null when no word does.
+     *
+     * The other half of what the suggestion bar needs to know about letters still being typed.
+     * [logProbability] says how common the word `ma` is; this says how common everything
+     * *starting* `ma` is, and the difference between the two is what separates a finished word
+     * from the start of a longer one. `ma` is a word, but 99% of the English that begins with
+     * those letters is `make`, `many`, `market` -- which is why the letters alone say little about
+     * what is being typed, and why an emoji matched only because its keyword begins `ma` is a
+     * long shot. See [com.offlinekeyboard.ime.candidates.UnifiedCandidates].
+     *
+     * Matched on the glided letters, so apostrophes and hyphens neither help nor hinder.
+     */
+    fun logPrefixProbability(prefix: String): Float? {
+        val key = prefix.lowercase().filter { it in 'a'..'z' }
+        if (key.isEmpty()) return null
+        val index = prefixIndex
+        val lo = index.lowerBound(key)
+        // '{' sorts immediately after 'z', so this is the first key that no longer starts with it.
+        val hi = index.lowerBound(key + '{')
+        val mass = index.cumulative[hi] - index.cumulative[lo]
+        if (mass <= 0.0) return null
+        return (kotlin.math.ln(mass) - LOG_CORPUS_TOTAL).toFloat()
+    }
+
+    /** The log-probability of the rarest word here: what a word missing from it is worth. */
+    val floorLogProbability: Float by lazy {
+        (logFrequency.minOrNull() ?: 0) * LN10_PER_CENTIDECADE - LOG_CORPUS_TOTAL
+    }
+
+    /** Glided forms, sorted, with running totals of their counts, for [logPrefixProbability]. */
+    private class PrefixIndex(val keys: Array<String>, val cumulative: DoubleArray) {
+        fun lowerBound(key: String): Int {
+            var lo = 0
+            var hi = keys.size
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                if (keys[mid] < key) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+    }
+
+    /**
+     * Built on first use rather than at load, since only the suggestion bar asks. The service
+     * warms it on the loader thread -- it is a sort of forty thousand strings, which is not a
+     * thing to do on a keystroke.
+     */
+    private val prefixIndex: PrefixIndex by lazy {
+        val order = letters.indices.sortedBy { letters[it] }
+        val keys = Array(order.size) { letters[order[it]] }
+        val cumulative = DoubleArray(order.size + 1)
+        for ((rank, i) in order.withIndex()) {
+            cumulative[rank + 1] = cumulative[rank] + Math.pow(10.0, logFrequency[i] / 100.0)
+        }
+        PrefixIndex(keys, cumulative)
+    }
+
     private fun buildSpellings(): Map<String, List<String>> {
         // Pass one: which glided forms are spelled differently from how they are glided. Only
         // those need an entry at all.

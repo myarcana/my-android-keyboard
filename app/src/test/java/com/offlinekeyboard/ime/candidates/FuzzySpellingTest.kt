@@ -53,12 +53,7 @@ class FuzzySpellingTest {
             if (!seen.add(c.text)) continue
             scored += UnifiedCandidates.Scored(c.text, c.score, c.consumed, c.ids)
         }
-        return UnifiedCandidates.rank(
-            q,
-            emoji.search(q),
-            scored,
-            english.logProbability(q) ?: UnifiedCandidates.NOT_ENGLISH,
-        )
+        return UnifiedCandidates.suggest(q, emoji, scored, english)
     }
 
     // --- what the user typed wins ----------------------------------------------------------

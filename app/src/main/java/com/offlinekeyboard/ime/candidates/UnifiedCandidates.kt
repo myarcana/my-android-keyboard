@@ -1,5 +1,6 @@
 package com.offlinekeyboard.ime.candidates
 
+import com.offlinekeyboard.ime.glide.Lexicon
 import kotlin.math.ln
 
 /**
@@ -91,10 +92,21 @@ object UnifiedCandidates {
         chinese: List<Scored>,
         englishScore: Float = NOT_ENGLISH,
         limit: Int = 32,
+        /**
+         * Per hit, `ln P(the word being typed is one this emoji was matched on)` -- see
+         * [emojiFit]. Empty when the English lexicon is not loaded, in which case the cruder
+         * [lengthBonus] stands in for it.
+         */
+        emojiFit: List<Float> = emptyList(),
     ): List<Suggestion> {
         val emoji = emojiHits.mapIndexed { rank, text ->
-            Suggestion(text, Kind.EMOJI, emojiScore(rank, query), query.length)
+            val evidence = emojiFit.getOrNull(rank) ?: lengthBonus(query)
+            Suggestion(text, Kind.EMOJI, emojiScore(rank) + evidence, query.length)
         }
+            // Stable, so emoji the evidence cannot separate keep the index's own order. It can
+            // separate a good many: for `wo`, 💦 matched on `work` is fifty times likelier than
+            // 🎉 matched on `woohoo`, though the index lists the second first.
+            .sortedByDescending { it.score }
 
         // How much the letters being an ordinary English word argues against reading them as
         // pinyin. See [ENGLISH_EVIDENCE].
@@ -120,6 +132,46 @@ object UnifiedCandidates {
             (emoji.isEmpty() || zh.first().score >= emoji.first().score - CHINESE_GATE)
         val merged = merge(emoji, if (showChinese) zh else emptyList())
         return merged.take(limit)
+    }
+
+    /**
+     * The English bar for [query]: emoji from [index], [chinese] as the decoder gave them, and
+     * the English lexicon's view of the letters, all put through [rank].
+     *
+     * The one place the inputs are assembled, so the service and the tests cannot disagree
+     * about them -- a test that ranked without the English terms is how a bar showing no Chinese
+     * at all for `ma` went unnoticed while a diagnostic of it looked fine.
+     *
+     * [english] is null until the lexicon has loaded; the bar then ranks as it did before it
+     * had English evidence rather than waiting for it.
+     */
+    fun suggest(
+        query: String,
+        index: EmojiIndex,
+        chinese: List<Scored>,
+        english: Lexicon?,
+        limit: Int = 32,
+    ): List<Suggestion> {
+        val matches = index.matches(query)
+        val fit = if (english == null) {
+            emptyList()
+        } else {
+            emojiFit(
+                query,
+                matches,
+                english::logProbability,
+                english::logPrefixProbability,
+                english.floorLogProbability,
+            )
+        }
+        return rank(
+            query = query,
+            emojiHits = matches.map { it.emoji },
+            chinese = chinese,
+            englishScore = english?.logProbability(query) ?: NOT_ENGLISH,
+            limit = limit,
+            emojiFit = fit,
+        )
     }
 
     /**
@@ -189,18 +241,64 @@ object UnifiedCandidates {
      * `happy` is emoji-only because no Chinese reading covers it at all, `niuroumian` is
      * Chinese-only because no emoji is named anything like it, and `ha` genuinely mixes.
      */
-    private fun emojiScore(rank: Int, query: String): Float =
-        ln(EMOJI_TOKEN_SHARE) - ln((rank + 1).toFloat()) - ln(EMOJI_HARMONIC) +
-            lengthBonus(query)
+    private fun emojiScore(rank: Int): Float =
+        ln(EMOJI_TOKEN_SHARE) - ln((rank + 1).toFloat()) - ln(EMOJI_HARMONIC)
 
     /**
-     * How much less an emoji match means when the query is very short.
+     * How likely it is that the word being typed is one an emoji was matched on, as `ln P`.
      *
-     * A one- or two-letter query matches emoji by bare prefix, which is weak evidence of intent:
-     * `h` prefixes dozens of names without suggesting any of them. Longer queries need no such
-     * discount -- by four letters a name match is deliberate -- so this is zero there rather
-     * than a curve, and it is deliberately small: at two letters `ha` should still lead with
-     * laughing faces, just not so far ahead that 哈 cannot appear beside them.
+     * [emojiScore] is the chance that a token of text is a given emoji *if the user is typing
+     * the word it is named for*. For an exact match that is the typed word, but most matches on
+     * a short query are prefixes, and a prefix is a guess: `ma` reaches ‼️ because `mark` starts
+     * with `ma`, and ✨ because `magic` does. The bar was scoring those guesses as certainties.
+     * So `ma` -- a string over which `make`, `many` and `man` between them hold most of the English
+     * -- produced twelve emoji all scored as if the user had typed their names, and every Chinese
+     * reading of it (吗, 妈, 马) was pushed past the edge of the strip.
+     *
+     * The missing factor is the completion probability, which the English lexicon states directly:
+     *
+     *     P(word is t | letters so far are q) = P(t) / P(any word starting q)
+     *
+     * summed over the distinct words the emoji was matched on. It is ~0.9 for `piz` -> pizza,
+     * where the letters leave no doubt, and ~0.01 for `ma` -> mark, where they leave almost all
+     * of it. An exact match is charged the same way, with the typed word as `t`: 🪅 matches `de`
+     * exactly (from "cinco de mayo") but `de` is a small share of the English starting `de`.
+     *
+     * This replaced a flat [lengthBonus] of -1.2 or -0.5 nats for one- and two-letter queries,
+     * which was the right sign and far too small: the real discount at two letters averages over
+     * 2 nats and for `ma` is 4.5. It also discounts *per emoji* where the flat term could not, so
+     * an emoji matched on a common word now outranks one matched on a rare word.
+     *
+     * @param wordLogP `ln P(word)`, null if not a word.
+     * @param prefixLogP `ln P(some word starts with prefix)`, null if none does.
+     * @param floor what an unknown word is worth; the rarest lexicon entry.
+     */
+    fun emojiFit(
+        query: String,
+        matches: List<EmojiIndex.Match>,
+        wordLogP: (String) -> Float?,
+        prefixLogP: (String) -> Float?,
+        floor: Float,
+    ): List<Float> {
+        val q = query.lowercase().trim()
+        // A two-word query ("thumbs u") is already specific, and the lexicon is one word at a
+        // time; the old behaviour -- no discount -- is kept for it.
+        if (q.isEmpty() || q.contains(' ')) return matches.map { 0f }
+        val total = prefixLogP(q) ?: return matches.map { 0f }
+        return matches.map { match ->
+            // What the user would have to be typing: the first word of each matched term, since
+            // the query is a prefix of the term and has no space in it.
+            val words = match.terms.map { it.substringBefore(' ') }.distinct()
+            var sum = 0.0
+            for (w in words) sum += kotlin.math.exp((wordLogP(w) ?: floor).toDouble())
+            if (sum <= 0.0) return@map 0f
+            (ln(sum).toFloat() - total).coerceAtMost(0f)
+        }
+    }
+
+    /**
+     * How much less an emoji match means when the query is very short, for when [emojiFit]
+     * cannot be computed -- the English lexicon has not loaded yet.
      */
     private fun lengthBonus(query: String): Float =
         when {

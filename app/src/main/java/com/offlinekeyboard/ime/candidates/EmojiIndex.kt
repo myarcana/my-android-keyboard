@@ -25,6 +25,17 @@ class EmojiIndex private constructor(
     private class Entry(val emoji: String, val name: String)
 
     /**
+     * One emoji offered for a query, and the words that made it match.
+     *
+     * [terms] are what the query was matched *against*: the query itself for an exact match, or
+     * the longer names and keywords it is a prefix of -- `mark` and `magic` for `ma`. They are
+     * kept because a prefix match is only as good as the chance that the word being typed really
+     * is one of them, and only the caller has the English frequencies to say how good that is.
+     * See [UnifiedCandidates.suggest].
+     */
+    class Match(val emoji: String, val exact: Boolean, val terms: List<String>)
+
+    /**
      * Emoji for [query], best first, or empty if the query is too short to be meaningful.
      *
      * Ranked in tiers rather than by a score, because the tiers are what the eye expects:
@@ -35,30 +46,42 @@ class EmojiIndex private constructor(
      * emoji frequency. That is the whole ranking: no weights to tune here, and re-ranking means
      * regenerating the asset rather than editing this.
      */
-    fun search(query: String, limit: Int = MAX_RESULTS): List<String> {
+    fun search(query: String, limit: Int = MAX_RESULTS): List<String> =
+        matches(query, limit).map { it.emoji }
+
+    /** [search], with what each emoji was matched against. */
+    fun matches(query: String, limit: Int = MAX_RESULTS): List<Match> {
         val q = query.lowercase().trim()
         if (q.length < MIN_QUERY) return emptyList()
 
-        val ranked = LinkedHashMap<Int, Int>()
-        fun offer(entry: Int, tier: Int) {
-            val existing = ranked[entry]
-            if (existing == null || tier < existing) ranked[entry] = tier
+        val tiers = LinkedHashMap<Int, Int>()
+        val matched = HashMap<Int, MutableList<String>>()
+        fun offer(entry: Int, tier: Int, term: String) {
+            val existing = tiers[entry]
+            if (existing == null || tier < existing) tiers[entry] = tier
+            val list = matched.getOrPut(entry) { ArrayList(2) }
+            if (term !in list) list += term
         }
 
-        namesToEntry[q]?.let { offer(it, TIER_EXACT_NAME) }
-        indexOfTerm(q)?.let { i -> postings[i].forEach { offer(it, TIER_EXACT_TERM) } }
+        namesToEntry[q]?.let { offer(it, TIER_EXACT_NAME, q) }
+        indexOfTerm(q)?.let { i -> postings[i].forEach { offer(it, TIER_EXACT_TERM, q) } }
         for (i in prefixRange(q)) {
             if (terms[i] == q) continue
-            postings[i].forEach { offer(it, TIER_PREFIX) }
+            postings[i].forEach { offer(it, TIER_PREFIX, terms[i]) }
         }
         for ((name, entry) in namesToEntry) {
-            if (name.startsWith(q)) offer(entry, TIER_NAME_PREFIX)
+            if (name.startsWith(q)) offer(entry, TIER_NAME_PREFIX, name)
         }
 
-        return ranked.entries
+        return tiers.entries
             .sortedWith(compareBy({ it.value }, { it.key }))
             .take(limit)
-            .map { entries[it.key].emoji }
+            .map { (entry, tier) ->
+                val exact = tier <= TIER_EXACT_TERM
+                // An exact match stands for the query itself, whatever longer terms it also
+                // prefixes: the evidence for it is the typed word, not a guess at a longer one.
+                Match(entries[entry].emoji, exact, if (exact) listOf(q) else matched.getValue(entry))
+            }
     }
 
     private fun indexOfTerm(term: String): Int? =

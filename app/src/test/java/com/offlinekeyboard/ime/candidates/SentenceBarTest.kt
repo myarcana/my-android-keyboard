@@ -36,12 +36,7 @@ class SentenceBarTest {
         val scored = decoder.candidates(q, 20)
             .filter { seen.add(it.text) }
             .map { UnifiedCandidates.Scored(it.text, it.score, it.consumed, it.ids) }
-        return UnifiedCandidates.rank(
-            q,
-            emoji.search(q),
-            scored,
-            english.logProbability(q) ?: UnifiedCandidates.NOT_ENGLISH,
-        )
+        return UnifiedCandidates.suggest(q, emoji, scored, english)
     }
 
     private fun chinese(q: String) =

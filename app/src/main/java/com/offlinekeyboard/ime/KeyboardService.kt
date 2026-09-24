@@ -1808,6 +1808,9 @@ class KeyboardService : InputMethodService() {
             // just parsed, and doing it twice over would be two loads of the asset.
             val engine: GlideEngine? = lexicon?.let { FutoSwipe.open(applicationContext, it) }
             val index = lexicon?.let { TapDecoder(WordIndex.of(it)) }
+            // Warmed here, off the main thread: the suggestion bar's first prefix query would
+            // otherwise sort forty thousand words on a keystroke.
+            lexicon?.logPrefixProbability("a")
             handler.post {
                 glide = engine
                 tapDecoder = index
@@ -1974,7 +1977,6 @@ class KeyboardService : InputMethodService() {
      */
     private fun rankedFor(query: String): List<UnifiedCandidates.Suggestion> {
         val index = emoji ?: return emptyList()
-        val hits = index.search(query)
         val session = pinyin
         val chinese = if (session != null && session.isReady && !query.contains(' ')) {
             // Lowercased because the field holds what was typed, and `Tadebaba` at the start
@@ -1983,13 +1985,7 @@ class KeyboardService : InputMethodService() {
         } else {
             emptyList()
         }
-        if (hits.isEmpty() && chinese.isEmpty()) return emptyList()
-        return UnifiedCandidates.rank(
-            query = query,
-            emojiHits = hits,
-            chinese = chinese,
-            englishScore = englishWords?.logProbability(query) ?: UnifiedCandidates.NOT_ENGLISH,
-        )
+        return UnifiedCandidates.suggest(query, index, chinese, englishWords)
     }
 
     /**

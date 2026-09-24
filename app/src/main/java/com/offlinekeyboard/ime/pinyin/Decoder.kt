@@ -97,6 +97,16 @@ internal class Decoder(
         val best = arrayOfNulls<MutableList<Path>>(n + 1)
         best[0] = mutableListOf(Path(word = null, previous = null, score = 0f, learned = false))
 
+        // A reading of one syllable has no word to back off *from*: every word spans two or
+        // more, so the character is the reading, not a fallback for it. Charging [BACKOFF] here
+        // anyway put every single-syllable input 6 nats below what the dictionary says, and it
+        // did so only on this reading -- the abbreviation reading of the same letters (`m a`
+        // for `ma`, `h e n` for `hen`) spells two-character words and pays nothing. So `ma`
+        // led with 买啊 and 毛啊 ahead of 马 and 妈, `hen` with 河南 ahead of 很, `zhe` with 综合
+        // ahead of 这: the commonest characters in the language, losing to readings nobody types.
+        // The English bar then read the deflated score as "these letters are not very Chinese".
+        val chargeBackoff = n > 1
+
         for (i in 0 until n) {
             val prefixes = best[i] ?: continue
             // Words starting at i, over every length that fits. Longer words are preferred by
@@ -112,7 +122,8 @@ internal class Decoder(
                     // pair of characters pays two small ones. The dictionary's word entry is
                     // strictly better evidence than assembling the same text character by
                     // character, and the penalty is what says so.
-                    val wordScore = word.logProb - if (word.backoff) backoffPenalty else 0f
+                    val wordScore = word.logProb -
+                        if (word.backoff && chargeBackoff) backoffPenalty else 0f
                     val target = i + span
                     for (path in prefixes) {
                         val score = path.score + wordScore +
@@ -379,9 +390,19 @@ internal class Decoder(
         // Tracked alongside, because which reading produced a candidate is not recoverable from
         // the candidate: the budget below spends exact and fuzzy decodings differently.
         val fromFuzzy = HashSet<String>()
-        for (reading in readings.take(MAX_READINGS)) {
+        val considered = readings.take(MAX_READINGS)
+        // A one-syllable reading decodes to single characters, which the character floor offers
+        // anyway; left uncapped they fill every whole-input slot, and `xian` lost 西安 to a sixth
+        // homophone of 先. Capped only when a real multi-syllable reading is there to use the
+        // room: for `ma` the only rival is the abbreviation `m a`, whose 买啊 and 毛啊 are worse
+        // than the next homophone, so there the characters keep every slot.
+        val rivalReading = considered.any { r ->
+            r.size > 1 && r.fuzzyCount == 0 && r.ids.none(Syllables::isInitial)
+        }
+        for (reading in considered) {
             val penalty = reading.fuzzyCount * fuzzyPenalty
-            for (candidate in decode(reading, limit, spans)) {
+            val take = if (reading.size == 1 && rivalReading) SINGLE_SYLLABLE_DECODINGS else limit
+            for (candidate in decode(reading, minOf(limit, take), spans)) {
                 if (reading.fuzzyCount > 0) fromFuzzy.add(candidate.text)
                 full.add(
                     Candidate(
@@ -997,6 +1018,13 @@ internal class Decoder(
 
         private const val PREFIX_WORDS = 6
         private const val CHAR_FLOOR = 8
+
+        /**
+         * Whole-input decodings a one-syllable reading may contribute; the rest of its
+         * characters arrive through [CHAR_FLOOR]. Half of [FULL_DECODINGS], so the other
+         * readings of the same letters (西安 for `xian`) keep a place ahead of the floor.
+         */
+        private const val SINGLE_SYLLABLE_DECODINGS = FULL_DECODINGS / 2
         private const val ABBREVIATION_BRANCHES = 24
 
         /**
