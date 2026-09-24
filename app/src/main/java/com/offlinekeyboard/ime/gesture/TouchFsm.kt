@@ -25,18 +25,19 @@ data class GestureConfig(
      * How long a still finger must hold before the press becomes a hold: the accent popup, the
      * backspace repeat, the spacebar trackpad.
      *
-     * Half the platform's 500ms, by request. The platform number is a *default* for views that
-     * have nothing better to do while waiting, not a perceptual constant, and a keyboard does
-     * have something better: every key here offers a hold, so the wait is paid on purpose rather
-     * than discovered by accident, and 250ms is long enough to stay clear of a tap (the bank's
-     * slowest tap lifts at 190ms) without making the user prove patience.
+     * 175ms, by request: first halved from the platform's 500ms to 250ms, then cut a further 30%.
+     * The platform number is a *default* for views that have nothing better to do while waiting,
+     * not a perceptual constant, and a keyboard does have something better: every key here
+     * offers a hold, so the wait is paid on purpose rather than discovered by accident.
      *
-     * It is not free. This is the window in which a slow glide can be mistaken for a hold, and
-     * halving it halves the slack -- the recorded "on" that dawdled 447ms before accelerating is
-     * now well past the deadline, and only [longPressSlopRatio] keeps it from opening a popup.
-     * That guard is what makes the shorter timeout safe; do not loosen both at once.
+     * It is not free, twice over. First, it now sits *inside* the tap distribution: the bank's
+     * slowest tap lifts at 190ms, so a lingering tap on a key with a popup can open it instead of
+     * typing the letter. Second, this is the window in which a slow glide can be mistaken for a
+     * hold -- the recorded "on" that dawdled 447ms before accelerating is well past the deadline,
+     * and only [longPressSlopRatio] keeps it from opening a popup. That guard is what makes a
+     * short timeout safe; do not loosen both at once.
      */
-    val longPressMs: Long = 250L,
+    val longPressMs: Long = 175L,
     /**
      * Downward travel needed to read as a flick, as a fraction of key height.
      *

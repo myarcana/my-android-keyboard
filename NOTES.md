@@ -714,7 +714,7 @@ up" beats "up", and a two-character minimum, below which the bar is noise.
 
 ### Held backspace accelerates
 
-250ms to start (the shared long-press timeout), then a character every 55ms, then whole words
+175ms to start (the shared long-press timeout), then a character every 55ms, then whole words
 every 140ms after 18 repeats -- about a second in. A fixed character rate is either too slow to
 clear a sentence or too fast to stop on the word you meant; both rates exist so neither has to
 compromise. Word deletion stops at a line break rather than running past it.
@@ -1020,7 +1020,7 @@ geometry can be compared at all.
 
 | parameter | value | why |
 |---|---|---|
-| `longPressMs` | 250 | half the platform's 500ms; every key here offers a hold, so the wait is paid on purpose |
+| `longPressMs` | 175 | 250ms (half the platform's 500ms) cut a further 30%; every key here offers a hold, so the wait is paid on purpose. Below the bank's slowest tap (190ms) |
 | `flickDistanceRatio` | 0.20 × key height | Android's touch slop; below it the OS calls the finger still |
 | `verticalDominance` | 4.25 | what separates a flick from gliding "ok" |
 | `longPressSlopRatio` | 0.20 × key height | past this the finger is not holding still |
@@ -1072,7 +1072,7 @@ The three it missed were each a different near-miss, and only one was a threshol
   *still*, which is what it means everywhere else on the platform, so it now cancels once the
   finger has drifted past touch slop. The space bar is exempt -- holding space and starting to
   move before the timeout is the normal way into the trackpad, and no glide competes for it.
-  `longPressMs` has since halved to 250ms, which puts that same 447ms dawdle well past the
+  `longPressMs` has since dropped to 175ms, which puts that same 447ms dawdle well past the
   deadline: the drift guard, not the clock, is now the only thing protecting a slow glide.
 
 One gesture in 208 is still misread: an "ok" that left at a ratio of 4.3, right against the 4.25
