@@ -47,6 +47,7 @@ import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
 import com.offlinekeyboard.ime.glide.GlideRejections
+import com.offlinekeyboard.ime.glide.GlideSpacing
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.EditAction
@@ -182,6 +183,17 @@ class KeyboardService : InputMethodService() {
      * the other. See [GlideRejections].
      */
     private val glideRejections = GlideRejections()
+
+    /**
+     * Where the last glided word ended, while the next keypress could still be the start of a
+     * new word after it; null otherwise. -1 when the field would not say where the caret was.
+     *
+     * A glide leaves the caret against its last letter rather than after a space (see
+     * [commitGlide]), so a tapped letter that follows it needs the space put in first -- see
+     * [spaceAfterGlide]. Cleared by anything that is not merely on the way to that letter.
+     */
+    private var glideEnd: Int? = null
+
     /** How many characters a tapped suggestion replaces: the word that produced it. */
     private var candidateReplaceLength = 0
 
@@ -545,8 +557,15 @@ class KeyboardService : InputMethodService() {
         if (text.isEmpty()) return
         val ic = currentInputConnection ?: return
         val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
-        val needsSpace = before != null && !before.isWhitespace() &&
-            !isHan(before) && !isHan(text.first()) && text.first().isLetterOrDigit()
+        // Latin beside Han takes a space ("the best 豆花"), Han beside Han never does, and nothing
+        // follows a full-width mark, which already fills its own cell.
+        val first = text.first()
+        val needsSpace = before != null && !before.isWhitespace() && first.isLetterOrDigit() &&
+            when {
+                isHan(before) && isHan(first) -> false
+                isHan(first) -> before.isLetterOrDigit()
+                else -> !isFullWidthMark(before)
+            }
         ic.beginBatchEdit()
         ic.commitText(if (needsSpace) " $text" else text, 1)
         ic.endBatchEdit()
@@ -579,6 +598,8 @@ class KeyboardService : InputMethodService() {
 
     private fun isHan(c: Char): Boolean =
         Character.UnicodeScript.of(c.code) == Character.UnicodeScript.HAN
+
+    private fun isFullWidthMark(c: Char): Boolean = c in "，。？！；：、「」『』“”（）…—"
 
     /**
      * Which script the punctuation should take, decided from the segment itself rather than from
@@ -801,6 +822,7 @@ class KeyboardService : InputMethodService() {
         // text at the same offsets, and carrying refusals into it would demote a candidate on
         // the strength of something the user said about a different document.
         glideRejections.clear()
+        glideEnd = null
         endSelection()
         stopTrackpad()
         stopBackspaceRepeat()
@@ -817,6 +839,7 @@ class KeyboardService : InputMethodService() {
         // Nor may a rejection recorded against an offset in the last field, where the same
         // offset now names entirely different text. See [onFinishInputView].
         if (!restarting) glideRejections.clear()
+        glideEnd = null
         // Nor may a login offered for the last one. `restarting` means the same field is still
         // focused -- the app changed something about it -- and the chips on screen are still
         // that field's, so only a genuinely new field clears them.
@@ -987,6 +1010,15 @@ class KeyboardService : InputMethodService() {
         typedThisGesture.setLength(0)
         deletedThisGesture = 0
         outputs.forEach { out ->
+            if (glideEnd != null && !keepsGlideOpen(out)) {
+                when (out) {
+                    is GestureOutput.CommitPrimary -> spaceAfterGlide(out.text)
+                    is GestureOutput.CommitSecondary -> spaceAfterGlide(out.text)
+                    is GestureOutput.CommitAccent -> spaceAfterGlide(out.text)
+                    else -> Unit
+                }
+                glideEnd = null
+            }
             when (out) {
                 is GestureOutput.CommitPrimary -> if (!pendLetter(out)) commit(out.text)
                 is GestureOutput.CommitSecondary -> commit(out.text)
@@ -1030,6 +1062,42 @@ class KeyboardService : InputMethodService() {
         // callback is what makes the mid-word rule true of the word actually being typed instead
         // of the one before it.
         refreshFlickContext()
+    }
+
+    /**
+     * Outputs that can come between a glide and the letter that starts the next word without
+     * being an edit of their own: what the finger shows on the way to a key, shift, and hopping
+     * between the letter and symbol planes. Anything else settles the glide, so a letter typed
+     * after it is not treated as the start of a new word.
+     */
+    private fun keepsGlideOpen(out: GestureOutput): Boolean = when (out) {
+        is GestureOutput.KeyHighlighted,
+        is GestureOutput.FlickPreview,
+        GestureOutput.FlickPreviewCleared,
+        is GestureOutput.UpFlickArmed,
+        GestureOutput.UpFlickDisarmed,
+        is GestureOutput.ShowAccents,
+        is GestureOutput.AccentHighlighted,
+        GestureOutput.HideAccents,
+        is GestureOutput.GestureCaptured,
+        -> true
+        is GestureOutput.SpecialKey -> out.type == KeyType.SHIFT || out.type == KeyType.MODE_SWITCH
+        else -> false
+    }
+
+    /**
+     * Puts a space between the glided word just typed and the letter about to be typed, which
+     * starts a new word. A glide leaves the caret against its last letter so that punctuation
+     * and another glide both land correctly; a tapped letter is the one case that needs the
+     * space it deliberately withheld. See [GlideSpacing].
+     */
+    private fun spaceAfterGlide(text: String) {
+        val end = glideEnd ?: return
+        val ic = currentInputConnection ?: return
+        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
+        if (!GlideSpacing.needsSpace(text, end, currentCaret(), before)) return
+        ic.commitText(" ", 1)
+        typed(" ")
     }
 
     private fun commit(text: String) {
@@ -1338,6 +1406,10 @@ class KeyboardService : InputMethodService() {
         // Both spellings: `cased` is what the field now contains and what a delete has to be
         // measured against, `word` is how the ranking spells it and so what gets struck off.
         glideRejections.committed(start, written = cased, candidate = word)
+        // A letter tapped next starts another word and needs a space first; see [spaceAfterGlide].
+        // Worked out from where the word started rather than read back from the editor, which
+        // may not have caught up with the commit yet.
+        glideEnd = if (start < 0) -1 else start + cased.length
         if (shift == ShiftState.ONE_SHOT) {
             shift = ShiftState.OFF
             applyLayout()
@@ -1941,6 +2013,8 @@ class KeyboardService : InputMethodService() {
 
     /** Replaces the typed word with the emoji, the way the iOS emoji suggestion does. */
     private fun commitCandidate(position: Int) {
+        // A suggestion replaces the glided word, so the next letter is no longer following it.
+        glideEnd = null
         // A Chinese candidate replaces the composing pinyin, which is the keyboard's own buffer
         // rather than a run of characters counted off the field -- and it may consume only part
         // of it. Handled before flushPending, which would otherwise settle the letters as Latin

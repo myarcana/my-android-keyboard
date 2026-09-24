@@ -54,7 +54,7 @@ class FutoSwipe private constructor(
     var lastMicros: Float = 0f
         private set
 
-    override fun decode(path: List<PathPoint>, geometry: LayoutGeometry): List<String> {
+    override fun decode(path: List<PathPoint>, geometry: LayoutGeometry): List<GlideCandidate> {
         if (path.size < 2) return emptyList()
         applyLayout(geometry)
 
@@ -76,7 +76,13 @@ class FutoSwipe private constructor(
         return runCatching {
             val results = decoder.recognize(x, y, t, topK = 5)
             lastMicros = decoder.lastTiming().totalUs
-            results.flatMap { lexicon.spellings(it.word) }.distinct()
+            // `score` is the library's final score: the CTC log-probability, length-normalised,
+            // plus the frequency, length and context-LM terms. All of it is log-domain, which
+            // is what makes a softmax over it a probability rather than an arbitrary squashing.
+            val confidence = softmax(results.map { it.score })
+            results.flatMapIndexed { i, result ->
+                lexicon.spellings(result.word).map { GlideCandidate(it, confidence[i]) }
+            }.distinctBy { it.word }
         }.onFailure { Log.w(TAG, "decode failed", it) }.getOrDefault(emptyList())
     }
 

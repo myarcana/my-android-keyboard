@@ -1,5 +1,6 @@
 package com.offlinekeyboard.ime.tap
 
+import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 
 /**
@@ -211,7 +212,15 @@ class SpatialModel(
      * centred the touch happened to be over whichever key sits below it.
      */
     fun sigmasAboveLetterRow(x: Float, y: Float, geometry: LayoutGeometry): Float {
-        val rect = geometry.letterKeys.filterNotNull().minByOrNull { r ->
+        // The number and symbol planes have no letters, and "no letter nearby" used to fall
+        // through to 0 sigma -- an ordinary press -- which handed the *entire* strip to the digit
+        // and symbol row beneath it: every emoji tap typed the key underneath instead. On those
+        // planes the row under the strip is the character keys, and a thumb aiming at a digit
+        // scatters exactly as one aiming at a letter does, so measure against those.
+        val targets = geometry.letterKeys.filterNotNull().ifEmpty {
+            geometry.keyRects.filter { it.key.type == KeyType.CHARACTER }
+        }
+        val rect = targets.minByOrNull { r ->
             val dy = if (y < r.top) r.top - y else if (y > r.bottom) y - r.bottom else 0f
             val dx = if (x < r.left) r.left - x else if (x > r.right) x - r.right else 0f
             dy * dy + dx * dx

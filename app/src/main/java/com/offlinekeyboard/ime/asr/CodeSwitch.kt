@@ -1,5 +1,8 @@
 package com.offlinekeyboard.ime.asr
 
+import com.offlinekeyboard.ime.pinyin.SyllableTable
+import java.io.InputStream
+
 /**
  * Repairs the one failure mode SenseVoice has on code-switched speech.
  *
@@ -11,122 +14,86 @@ package com.offlinekeyboard.ime.asr
  *     Invalid sense-voice-language: '%s'. Valid values are: auto, zh, en, ja, ko, yue.
  *     Or you can leave it empty to use 'auto'
  *
- * So a sentence that is mostly English with Mandarin at the end detects as `en`, and the
- * Mandarin tail is then forced through an English-conditioned decoder. It does not come back
- * as Chinese and it does not come back as nothing -- it comes back as **romanised mush**:
+ * So a sentence that is mostly English with Mandarin in it detects as `en`, and the Mandarin is
+ * then forced through an English-conditioned decoder. It does not come back as Chinese and it
+ * does not come back as nothing -- it comes back **romanised**:
  *
- *     "what's your favorite taiwanese food 牛肉麵嗎"
- *       -> "what's your favorite taiwanese food ne roium ma"
- *
- * That tail is the signature. They are Latin letters in English word shape but they are not
- * English words, and no English language model would ever produce them. `docs/ASR_BENCHMARK.md`
- * did not catch it because it scores character error rate with whitespace removed: a short
- * romanised tail on a long correct sentence is a handful of characters, which is exactly the
- * 7.9% "mixed" figure rather than a contradiction of it.
+ *     "what's your favorite taiwanese food 牛肉麵嗎" -> "... food ne roium ma"
+ *     "the best 豆花 in the world"                   -> "the best dohua in the world"
  *
  * The repair is to decode the same audio a second time forced to `zh` and keep the better
- * answer. Deciding which is better is what this file does, and it is pure text so it is
- * testable on the JVM without a model.
+ * answer. Forcing `zh` does not throw the English away: on the same audio SenseVoice returns
+ * "the best豆花 in the world", English intact. Deciding when to retry and which answer to keep is
+ * what this file does, and it is pure text so it is testable on the JVM without a model.
+ *
+ * ## Why an English dictionary, and not a pinyin-shape detector
+ *
+ * The first version of this recognised romanisation by its *shape* -- pinyin-like syllables,
+ * letter clusters English does not make -- and demanded two such words before retrying. Replayed
+ * over 148 real SenseVoice decodes of synthesised mixed speech (`asrlab/` beside the repo) it
+ * fired on 6 of 72 code-switched segments. The misses were not edge cases:
+ *
+ *  - **One Chinese word is the common case.** "the best 豆花 in the world" has a single
+ *    romanised word, and two-word evidence can never fire on it.
+ *  - **The decoder does not write pinyin.** It writes English-looking spellings of the sounds:
+ *    "dohua", "hogu", "littleo", "xmaning". They match no syllable table.
+ *
+ * What every one of them has in common is simpler: **it is not an English word.** The shipped
+ * glide lexicon (40,000 words) is the test. A segment detected as English that contains a Latin
+ * word outside it is worth a second look; that fired on 55 of 72 mixed segments.
+ *
+ * The price is that English proper nouns ("kubernetes", "reykjavik", "quinoa") also trigger a
+ * retry. That costs one extra decode of that segment and nothing else, because [choose] is what
+ * guards the text, and it refused every one of them (0 of 56 English segments changed).
  */
 object CodeSwitch {
 
-    /** The language tokens SenseVoice reports back in [com.k2fsa.sherpa.onnx.OfflineRecognizerResult.lang]. */
+    /** The language codes SenseVoice is configured with. */
     const val LANG_ZH = "zh"
     const val LANG_EN = "en"
 
     /**
-     * Vowel-free letter groups an English syllable cannot contain, and the pinyin-shaped endings
-     * that show up when Mandarin is romanised by an English-conditioned decoder.
+     * The language code from [com.k2fsa.sherpa.onnx.OfflineRecognizerResult.lang].
      *
-     * These are deliberately narrow. The cost of a false positive is re-decoding audio that was
-     * already right, and then picking between two answers -- not corrupting a good transcript.
+     * sherpa-onnx reports the model's raw token, `<|zh|>`, not the `zh` it was configured with.
+     * The previous comparison against the bare code could never match, so a segment that
+     * `auto` had *already* decoded as Chinese was still retried as Chinese -- the same decode twice.
      */
-    private val PINYIN_SHAPED = Regex(
-        "^(?:zh|ch|sh|[bpmfdtnlgkhjqxrzcsw])?" +
-            "(?:iang|iong|uang|uai|uan|iao|ian|ang|eng|ong|ing|ia|ie|iu|in|" +
-            "ua|uo|ui|un|ue|ai|ei|ao|ou|an|en|er|a|o|e|i|u)$",
-        RegexOption.IGNORE_CASE,
-    )
+    fun normaliseLang(lang: String): String = lang.trim().removePrefix("<|").removeSuffix("|>")
 
     /**
-     * Letter shapes English does not produce, for the words that are not even clean pinyin --
-     * an English-conditioned decoder spelling Mandarin invents letters rather than transliterating
-     * it. Deliberately conservative: patterns like `[aeiou]{3}` were tried and removed because
-     * they fire on the English suffixes -ious and -ium ("serious", "premium"), which measured as
-     * a 2.1% false-positive rate against the shipped English lexicon. This set holds 0.63%, and
-     * the two-signal gate in [suspectsMissedChinese] absorbs what is left.
+     * Reads the English word set out of `lexicon_en.tsv`: the first column of each line,
+     * lowercased. The same asset the glide decoder uses, so there is one idea of "English" in the
+     * keyboard rather than two that drift.
      */
-    private val NON_ENGLISH_SHAPE = Regex(
-        "(?:^zh|^q(?![u])|^x(?![aeiou]?$)|ii|uu|^ng|iu[mn](?!$))",
-        RegexOption.IGNORE_CASE,
-    )
-
-    /**
-     * Whether a Latin run looks like romanised Mandarin rather than English.
-     *
-     * A word counts when it is a plausible pinyin syllable *and* is not an ordinary English word.
-     * "ma", "ne", "ma" are pinyin-shaped; so are "so" and "no", which is why the English stop
-     * list matters more than the pattern does.
-     */
-    fun looksRomanised(word: String): Boolean {
-        val w = word.lowercase().trim { !it.isLetter() }
-        if (w.length < 2 || w.length > 7) return false
-        if (!w.all { it.isLetter() && it.code < 128 }) return false
-        if (w in COMMON_ENGLISH) return false
-        // Either a clean pinyin syllable, or a letter shape English does not produce.
-        return PINYIN_SHAPED.matches(w) || NON_ENGLISH_SHAPE.containsMatchIn(w)
-    }
-
-    /**
-     * Words short enough and shaped enough to trip [PINYIN_SHAPED] while being perfectly ordinary
-     * English. Without this list the detector fires on "he", "she", "to", "do", "no", "so".
-     */
-    private val COMMON_ENGLISH = setOf(
-        "a", "an", "at", "as", "am", "and", "are", "be", "been", "but", "by", "can", "day",
-        "do", "for", "go", "had", "has", "have", "he", "her", "here", "him", "his", "how",
-        "i", "if", "in", "is", "it", "its", "just", "know", "like", "me", "my", "no", "not",
-        "now", "of", "off", "on", "one", "or", "our", "out", "say", "see", "she", "so",
-        "some", "than", "that", "the", "their", "them", "then", "there", "they", "this",
-        "to", "too", "two", "up", "us", "was", "way", "we", "were", "what", "when", "where",
-        "who", "why", "will", "with", "yes", "you", "your", "man", "men", "new", "old",
-        "own", "put", "run", "she", "ten", "the", "use", "very", "want", "well", "went",
-        "were", "hi", "ok", "okay", "time", "make", "come", "take", "good", "food", "long",
-        "song", "king", "ring", "thing", "bring", "sing", "wing", "young", "along", "among",
-        "wrong", "strong", "hang", "bang", "rang", "sang", "tea", "sea", "see", "sun", "son",
-        "fun", "gun", "bun", "win", "wine", "fine", "nine", "line", "mine", "din", "pin",
-        "tin", "bin", "sin", "shin", "chin", "thin", "than", "chan", "shan", "man", "can",
-        "ban", "fan", "pan", "tan", "van", "ran", "plan", "hen", "pen", "ten", "men", "den",
-        "when", "then", "open", "even", "seen", "been", "teen", "keen", "queen", "green",
-        "her", "per", "were", "are", "ear", "near", "dear", "year", "hear", "fear", "bear",
-        // Place names and loanwords that are ordinary English text, not a failed decode.
-        "hong", "kong", "beijing", "taipei", "shanghai", "tofu", "kung", "feng", "chi",
-        "tai", "wan", "yen", "yuan", "bao", "wok", "tofu", "china", "asia",
-    )
-
-    /**
-     * How much of a transcript's Latin content looks romanised, as a fraction of its Latin words.
-     *
-     * Chinese characters are ignored: a segment the model got right is partly Han already, and
-     * the question is only whether the *Latin* part is real English.
-     */
-    fun romanisedRatio(text: String): Double {
-        val words = text.split(Regex("[^\\p{L}']+")).filter { w ->
-            w.isNotEmpty() && w.all { it.code < 128 && it.isLetter() }
+    fun readEnglishWords(input: InputStream): Set<String> {
+        val out = HashSet<String>(48_000)
+        input.bufferedReader().useLines { lines ->
+            lines.forEach { line ->
+                if (line.isEmpty() || line[0] == '#') return@forEach
+                val tab = line.indexOf('\t')
+                if (tab > 0) out += line.substring(0, tab).lowercase()
+            }
         }
-        if (words.isEmpty()) return 0.0
-        return words.count { looksRomanised(it) }.toDouble() / words.size
+        return out
     }
 
-    /** True when a segment shows the romanised-tail signature and is worth a second decode. */
-    fun suspectsMissedChinese(text: String, lang: String): Boolean {
+    /**
+     * Pinyin syllables that are also English lexicon entries: "ne", "ma", "long", "fan", "ming".
+     *
+     * These are the only English words a forced-`zh` retry is allowed to remove. When a decoder
+     * spells 牛肉麵嗎 as "ne ro mian ma", the "ne" and "ma" are real lexicon entries -- the lexicon
+     * is built from web text and carries them -- but here they are romanisation, and the retry
+     * replacing them with Han is the repair, not a loss.
+     */
+    private val SYLLABLES: Set<String> = SyllableTable.ALL.toHashSet()
+
+    /** True when a segment has Latin words that are not English, and is worth a forced-`zh` decode. */
+    fun suspectsMissedChinese(text: String, lang: String, isEnglish: (String) -> Boolean): Boolean {
         if (text.isBlank()) return false
-        // A result already containing Han was decoded as Chinese somewhere; nothing to repair.
-        if (text.any(::isHan) && lang == LANG_ZH) return false
-        val ratio = romanisedRatio(text)
-        val romanisedWords = text.split(Regex("[^\\p{L}']+")).count { looksRomanised(it) }
-        // Two independent signals: at least two suspicious words, and enough of the sentence to
-        // not be a single odd proper noun.
-        return romanisedWords >= 2 && ratio >= 0.15
+        // Already decoded as Chinese: a forced-zh retry would reproduce this exact decode.
+        if (normaliseLang(lang) == LANG_ZH) return false
+        return latinWords(text).any { !isEnglish(it) }
     }
 
     fun isHan(c: Char): Boolean =
@@ -135,34 +102,44 @@ object CodeSwitch {
     /**
      * Picks between the `auto` decode and a decode forced to Chinese.
      *
-     * The forced-`zh` pass is only better when it actually produced Han characters *and* removed
-     * the romanised words. A forced pass that returns its own Latin mush, or that throws away
-     * English the speaker really said, loses -- which is why this compares both directions
-     * rather than trusting the retry.
+     * The forced pass is conditioned on Chinese, and on English audio it does its own damage --
+     * "crowded" becomes "quiet", "4 thirty" becomes "at4 thirty0", "want" becomes 忘. So the
+     * forced answer is only taken when the change it makes is purely the repair:
+     *
+     *  1. **It adds Han.** Otherwise it did not recover any Chinese.
+     *  2. **It leaves fewer non-words.** The romanised word has to actually go.
+     *  3. **Every English word survives, and none is invented.** The only English words it may
+     *     remove are pinyin syllables ("ne", "ma"), which in this position were romanisation.
+     *
+     * Rule 3 is the one that keeps English safe. It is deliberately strict: when the retry
+     * repairs the Chinese but also rewrites one English word, the `auto` answer ships. A wrong
+     * English word the user did not say is worse than a romanised word they can see is wrong.
      */
-    fun choose(auto: String, forcedZh: String): String {
-        if (forcedZh.isBlank()) return auto
-        if (!forcedZh.any(::isHan)) return auto
+    fun choose(auto: String, forcedZh: String, isEnglish: (String) -> Boolean): String {
+        if (forcedZh.count(::isHan) <= auto.count(::isHan)) return auto
 
-        val autoRomanised = romanisedRatio(auto)
-        val forcedRomanised = romanisedRatio(forcedZh)
+        val autoWords = latinWords(auto)
+        val forcedWords = latinWords(forcedZh)
+        if (forcedWords.count { !isEnglish(it) } >= autoWords.count { !isEnglish(it) }) return auto
 
-        // The forced pass has to actually reduce the mush to be worth taking.
-        if (forcedRomanised >= autoRomanised) return auto
-
-        // Guard against the forced pass eating English the speaker did say. Count the Latin words
-        // each side kept that the other did not consider romanised.
-        val autoEnglish = latinWords(auto).count { !looksRomanised(it) }
-        val forcedEnglish = latinWords(forcedZh).count { !looksRomanised(it) }
-        // Losing more than half the real English means `zh` swallowed the English half of a
-        // code-switched sentence, which is the opposite failure and no better.
-        if (autoEnglish > 0 && forcedEnglish * 2 < autoEnglish) return auto
-
+        val autoEnglish = autoWords.filter(isEnglish).map { it.lowercase() }.groupingBy { it }.eachCount()
+        val forcedEnglish = forcedWords.filter(isEnglish).map { it.lowercase() }.groupingBy { it }.eachCount()
+        for ((word, count) in autoEnglish) {
+            val lost = count - (forcedEnglish[word] ?: 0)
+            if (lost > 0 && word !in SYLLABLES) return auto
+        }
+        for ((word, count) in forcedEnglish) {
+            if (count > (autoEnglish[word] ?: 0)) return auto
+        }
         return forcedZh
     }
 
-    private fun latinWords(text: String): List<String> =
-        text.split(Regex("[^\\p{L}']+")).filter { w ->
-            w.isNotEmpty() && w.all { it.code < 128 && it.isLetter() }
-        }
+    /**
+     * The Latin words of [text], apostrophes kept so "what's" is looked up as itself. Han, digits
+     * and punctuation are separators: "best豆花" yields "best", and "430" yields nothing.
+     */
+    fun latinWords(text: String): List<String> =
+        LATIN_SPLIT.split(text).map { it.trim('\'') }.filter { it.isNotEmpty() }
+
+    private val LATIN_SPLIT = Regex("[^A-Za-z']+")
 }

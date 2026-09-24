@@ -32,6 +32,16 @@ internal class UserDict(private val file: File?) {
     fun wordsFor(ids: IntArray): List<Learned> = entries[keyOf(ids)].orEmpty()
 
     /**
+     * Whether some learned key is longer than [ids] and begins with it -- the user-dictionary
+     * half of the decoder's stopping test (see [PinyinDict.hasLongerKey]).
+     */
+    fun hasLongerKey(ids: IntArray): Boolean {
+        if (entries.isEmpty()) return false
+        val prefix = keyOf(ids) + " "
+        return entries.keys.any { it.startsWith(prefix) }
+    }
+
+    /**
      * Records that [text] was chosen for [ids].
      *
      * The count is the whole model: choosing a word repeatedly raises it, and one choice is

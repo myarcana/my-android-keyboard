@@ -139,6 +139,17 @@ class SpokenPunctuationTest {
     }
 
     @Test
+    fun `a Latin word beside Han is separated by a space`() {
+        // The forced-zh decode writes "the best豆花"; the space is ours to put back.
+        assertEquals("the best 豆花 in the world", cn("the best豆花 in the world"))
+        assertEquals("这个 bug 我已经 fix 好了", cn("这个 bug我已经 fix 好了"))
+        assertEquals("what's your food 牛肉面吗", cn("what's your food牛肉面吗"))
+        // Han against Han, and Han against a full-width mark, still take none.
+        assertEquals("好的，谢谢", cn("好的逗号谢谢"))
+        assertEquals("我在 costco，你要不要", cn("我在 costco逗号你要不要"))
+    }
+
+    @Test
     fun `a lone i is capitalised beside Han text`() {
         // Auto language detection code-switches mid-segment; the Latin word is still a word.
         assertEquals("我說 I know", cn("我說 i know"))

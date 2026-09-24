@@ -122,6 +122,25 @@ internal class PinyinDict private constructor(
         return out
     }
 
+    /**
+     * Whether some key is strictly longer than [ids] and begins with it.
+     *
+     * The decoder's stopping test: once no key extends a run of syllables, no longer run from the
+     * same start can hold a word, so there is nothing to look up. Model-agnostic on purpose -- it
+     * may only ever say "stop" when stopping loses nothing.
+     */
+    fun hasLongerKey(ids: IntArray): Boolean {
+        if (ids.isEmpty()) return keyOffsets.isNotEmpty()
+        var i = lowerBound(ids)
+        while (i < keyOffsets.size) {
+            val key = readKeyIds(keyOffsets[i])
+            if (!startsWith(key, ids)) return false
+            if (key.size > ids.size) return true
+            i++
+        }
+        return false
+    }
+
     /** Single characters that can be read as [syllableId], best-first. */
     fun charsFor(syllableId: Int): List<CharEntry> = charsBySyllable[syllableId].orEmpty()
 

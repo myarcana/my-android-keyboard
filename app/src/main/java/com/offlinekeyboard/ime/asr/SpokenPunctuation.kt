@@ -226,9 +226,17 @@ object SpokenPunctuation {
      * had spaces around it and the mark does not want them in the same places. Half-width marks
      * want nothing before and one space after; full-width marks want nothing on either side,
      * since the mark already occupies a full character cell.
+     *
+     * A Latin word beside Han takes a space on the side that touches it: "the best 豆花 in",
+     * "这个 bug 我已经". SenseVoice is inconsistent about this -- a forced-`zh` decode writes
+     * "the best豆花", an `auto` decode sometimes "这个 bug我" -- so the space is decided here rather
+     * than trusted from the model. Only between letters: Han against Han, and Han against a
+     * full-width mark, still take none.
      */
     private fun tidySpacing(text: String): String {
         var result = text
+        result = LATIN_THEN_HAN.replace(result, "$1 $2")
+        result = HAN_THEN_LATIN.replace(result, "$1 $2")
         result = Regex("[ \\t]+([$HALF_WIDTH$FULL_WIDTH])").replace(result, "$1")
         result = Regex("([$FULL_WIDTH])[ \\t]+").replace(result, "$1")
         result = Regex("([$HALF_WIDTH])(?=[\\p{L}\\p{N}])").replace(result, "$1 ")
@@ -236,4 +244,8 @@ object SpokenPunctuation {
         result = Regex("[ \\t]{2,}").replace(result, " ")
         return result
     }
+
+    /** A Latin letter (or a word-final apostrophe) directly followed by Han, and the reverse. */
+    private val LATIN_THEN_HAN = Regex("(\\p{IsLatin}'?)(\\p{IsHan})")
+    private val HAN_THEN_LATIN = Regex("(\\p{IsHan})(\\p{IsLatin})")
 }

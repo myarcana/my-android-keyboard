@@ -241,6 +241,16 @@ The runtime repair is in `app/src/main/java/com/offlinekeyboard/ime/asr/CodeSwit
 the romanised signature, decode that segment again forced to `zh`, keep the better answer.
 `auto` remains the default, so the configuration this table measured is still the one that ships.
 
+The first detector looked for pinyin-*shaped* words and needed two of them. It missed the common
+case, reported as `The best 豆花 in the world` -> `the best dohua in the world`: one Chinese
+word, and an English-conditioned decoder does not write pinyin ("dohua", "hogu", "xmaning").
+Replayed over 148 SenseVoice decodes of synthesised speech, it retried 6 of 72 mixed segments.
+The trigger is now "a Latin word outside the English lexicon", which retries 55 of 72, and the
+forced answer is kept only if it adds Han, removes non-words, and loses no English word except
+a pinyin syllable. That fixed 10 of 72 mixed segments against 4 before, and changed 0 of 56
+English ones. Forced `zh` often rewrites English it should not ("crowded" -> "quiet"), which is
+why that last rule is strict.
+
 ## Deciding
 
 The bar is the `apple` row. Beat it in all four columns and the choice is made. The likely

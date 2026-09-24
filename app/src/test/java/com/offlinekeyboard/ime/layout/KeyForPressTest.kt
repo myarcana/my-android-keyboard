@@ -157,6 +157,30 @@ class KeyForPressTest {
         assertNull(honest.keyForPress(254.1f, honest.stripHeight - 1f))
     }
 
+    /**
+     * The number and symbol planes have no letters, and the reach test used to read "no letter
+     * to measure against" as "an ordinary press": the whole strip went to the digit row, so every
+     * emoji tap typed the 1-0 or [-= key beneath it instead.
+     */
+    @Test
+    fun `the strip stays the emoji's on the number and symbol planes`() {
+        for (layout in listOf(IosLayouts.NUMBERS, IosLayouts.SYMBOLS)) {
+            val g = LayoutGeometry(layout, 1080f)
+            val top = g.keyRects.first()
+            var y = 0f
+            while (y < g.stripHeight) {
+                assertEquals(
+                    "${layout.id}: a press at y=$y in the strip was claimed by the key row",
+                    false,
+                    g.isLetterReach(top.centerX, y),
+                )
+                assertNull(g.keyForPress(top.centerX, y))
+                y += 1f
+            }
+            assertEquals(top.key.id, g.keyForPress(top.centerX, top.centerY)?.key?.id)
+        }
+    }
+
     @Test
     fun `a press well below the last row is not snapped upward`() {
         assertNull(idAt(geometry.widthPx / 2f, geometry.heightPx + 100f))

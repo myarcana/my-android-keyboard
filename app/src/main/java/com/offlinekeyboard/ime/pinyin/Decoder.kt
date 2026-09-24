@@ -83,7 +83,10 @@ internal class Decoder(
      * offered too (see [candidates]) because committing a piece at a time is also normal, but
      * they never outrank a complete sentence.
      */
-    fun decode(reading: Syllables.Reading, limit: Int = 12): List<Candidate> {
+    fun decode(reading: Syllables.Reading, limit: Int = 12): List<Candidate> =
+        decode(reading, limit, SpanTable())
+
+    private fun decode(reading: Syllables.Reading, limit: Int, spans: SpanTable): List<Candidate> {
         val n = reading.size
         if (n == 0) return emptyList()
 
@@ -100,8 +103,8 @@ internal class Decoder(
             // their weight rather than by rule; a long word is simply more evidence.
             val maxSpan = minOf(MAX_WORD_SYLLABLES, n - i)
             for (span in 1..maxSpan) {
-                val ids = reading.ids.copyOfRange(i, i + span)
-                for (word in wordsFor(ids)) {
+                val lookup = spans.at(reading.ids, i, span)
+                for (word in lookup.words) {
                     // A character used as a fallback is charged a backoff penalty, exactly as a
                     // smoothed n-gram model charges for dropping to a shorter context. Without
                     // it, two very common characters outscore the single word they spell -- 天起
@@ -127,6 +130,12 @@ internal class Decoder(
                         )
                     }
                 }
+                // No key in either dictionary is longer than this run and begins with it, so no
+                // longer span from here can hold a word. Without this stop every position asked
+                // the dictionary about all twelve spans, most of them syllable runs nothing could
+                // ever spell -- which is what made a long English word cost most of a second per
+                // keystroke once the English bar started reading it as pinyin.
+                if (!lookup.extendable) break
             }
         }
 
@@ -168,9 +177,12 @@ internal class Decoder(
         // Tracked alongside, because which reading produced a candidate is not recoverable from
         // the candidate: the budget below spends exact and fuzzy decodings differently.
         val fromFuzzy = HashSet<String>()
+        // One table for every reading: they are segmentations of the same letters, so most of
+        // their spans are the same syllables at shifted positions. See [SpanTable].
+        val spans = SpanTable()
         for (reading in readings.take(MAX_READINGS)) {
             val penalty = reading.fuzzyCount * fuzzyPenalty
-            for (candidate in decode(reading, limit)) {
+            for (candidate in decode(reading, limit, spans)) {
                 if (reading.fuzzyCount > 0) fromFuzzy.add(candidate.text)
                 full.add(
                     Candidate(
@@ -261,7 +273,7 @@ internal class Decoder(
         for (span in minOf(primary.size, MAX_WORD_SYLLABLES) downTo 1) {
             if (span == primary.size) continue
             val ids = primary.ids.copyOfRange(0, span)
-            for (word in wordsFor(ids).take(PREFIX_WORDS)) {
+            for (word in spans.at(primary.ids, 0, span).words.take(PREFIX_WORDS)) {
                 // The learned bonus has to be applied here too, not only inside the Viterbi
                 // pass. A one-syllable correction -- the commonest kind, choosing between
                 // homophones of `ta` -- arrives as a prefix candidate, and scoring it without
@@ -308,7 +320,10 @@ internal class Decoder(
      * initial, which is why it is handled here rather than in the dictionary: the dictionary
      * deals in resolved syllables only.
      */
-    private fun wordsFor(ids: IntArray): List<Entry> {
+    private fun wordsFor(
+        ids: IntArray,
+        abbreviation: () -> List<PinyinDict.Word> = { expandAbbreviation(ids) },
+    ): List<Entry> {
         val out = ArrayList<Entry>(8)
         userDict?.wordsFor(ids)?.forEach {
             // A learned word has no corpus behind it, so it is normalised against the mainland
@@ -316,7 +331,7 @@ internal class Decoder(
             // what actually carries its weight.
             out.add(Entry(it.text, unigram(it.weight), learned = true, rankWeight = it.weight))
         }
-        val words = if (ids.any(Syllables::isInitial)) expandAbbreviation(ids) else dict.wordsFor(ids)
+        val words = if (ids.any(Syllables::isInitial)) abbreviation() else dict.wordsFor(ids)
         for (word in words) {
             // Null means no corpus this mode reads has the word, which is what drops 牛肉面 from a
             // Taiwan user's bar and 牛肉麵 from a mainland user's, now that both live on the same
@@ -421,6 +436,62 @@ internal class Decoder(
     }
 
     /**
+     * [wordsFor] and the stopping test, memoised per syllable run for one [candidates] call.
+     *
+     * The readings of one input are segmentations of the same letters, so they share most of
+     * their runs: sixteen readings of a long word asked the dictionary the same questions sixteen
+     * times, each one a binary search over varint-encoded keys plus a scan of the user
+     * dictionary. Scoped to a single call because [mode] and the user dictionary can change
+     * between calls, and either one changes the answer.
+     */
+    private inner class SpanTable {
+        private val memo = HashMap<List<Int>, Lookup>()
+        private val abbreviations = HashMap<List<Int>, List<IntArray>>()
+
+        fun at(ids: IntArray, from: Int, span: Int): Lookup {
+            val key = ids.asList().subList(from, from + span)
+            memo[key]?.let { return it }
+            val run = ids.copyOfRange(from, from + span)
+            val lookup = if (run.any(Syllables::isInitial)) {
+                // Built on the shorter run's prefixes rather than from nothing: resolving a bare
+                // consonant is hundreds of prefix scans, and restarting that for every span
+                // length at every position was most of the cost of a long consonant-heavy word.
+                val prefixes = abbreviationPrefixes(ids, from, span)
+                Lookup(
+                    wordsFor(run) { abbreviationWords(prefixes) },
+                    // Every longer run is a one-syllable extension of one of these prefixes, and
+                    // an extension survives only if some key is longer than its prefix.
+                    prefixes.any(dict::hasLongerKey),
+                )
+            } else {
+                Lookup(
+                    wordsFor(run),
+                    dict.hasLongerKey(run) || userDict?.hasLongerKey(run) == true,
+                )
+            }
+            memo[key.toList()] = lookup
+            return lookup
+        }
+
+        /** [expandAbbreviation]'s surviving prefixes after [span] syllables, one step at a time. */
+        private fun abbreviationPrefixes(ids: IntArray, from: Int, span: Int): List<IntArray> {
+            if (span == 0) return ROOT_PREFIXES
+            val key = ids.asList().subList(from, from + span)
+            abbreviations[key]?.let { return it }
+            val shorter = abbreviationPrefixes(ids, from, span - 1)
+            val prefixes = if (shorter.isEmpty()) {
+                emptyList()
+            } else {
+                abbreviationStep(shorter, ids[from + span - 1])
+            }
+            abbreviations[key.toList()] = prefixes
+            return prefixes
+        }
+    }
+
+    private class Lookup(val words: List<Entry>, val extendable: Boolean)
+
+    /**
      * Words matching an abbreviated key like `b j` (北京).
      *
      * Only the fully-abbreviated and mixed forms people actually type are supported, and the
@@ -428,47 +499,61 @@ internal class Decoder(
      * the common words, which is exactly what the weight ordering gives.
      */
     private fun expandAbbreviation(ids: IntArray): List<PinyinDict.Word> {
-        // Resolve one initial at a time against the keys the dictionary actually holds. Doing it
-        // as a prefix walk keeps this proportional to the matches rather than to the number of
-        // syllables sharing an initial.
-        var prefixes = listOf(IntArray(0))
+        var prefixes = ROOT_PREFIXES
         for (id in ids) {
-            val next = ArrayList<IntArray>()
-            if (Syllables.isInitial(id)) {
-                val letter = Syllables.initialLetter(id)
-                for (prefix in prefixes) {
-                    for ((sid, spelling) in dict.syllableSpellings.withIndex()) {
-                        if (spelling[0] == letter) next.add(prefix + sid)
-                    }
-                }
-            } else {
-                for (prefix in prefixes) next.add(prefix + id)
-            }
-            // Keep only prefixes the dictionary can still extend, or this explodes -- and keep
-            // the *strongest* ones, not the first ones. Truncating in syllable-id order means
-            // alphabetical order, which cut `bei` long before it was reached and left `bj`
-            // unable to find 北京. Ranking by the best word under each prefix is what makes an
-            // abbreviation resolve to the word people actually meant.
-            // Several words are fetched per prefix, not one. `wordsWithPrefix` reads a bounded
-            // number of entries and *then* ranks them for the region in play, so asking for one
-            // returns the region's best only if the globally-first entry happens to be in that
-            // region. It often is not -- a Traditional-only word can head the list for a
-            // mainland user -- and scoring the prefix at 0 dropped it from the search entirely,
-            // which is how `bj` stopped finding 北京.
-            prefixes = next.asSequence()
-                .map { prefix ->
-                    prefix to (
-                        dict.wordsWithPrefix(prefix, ABBREVIATION_PROBE, mode)
-                            .firstOrNull()?.rankWeightIn(mode) ?: 0
-                        )
-                }
-                .filter { it.second > 0 }
-                .sortedByDescending { it.second }
-                .take(ABBREVIATION_BRANCHES)
-                .map { it.first }
-                .toList()
+            prefixes = abbreviationStep(prefixes, id)
             if (prefixes.isEmpty()) return emptyList()
         }
+        return abbreviationWords(prefixes)
+    }
+
+    /**
+     * One syllable of [expandAbbreviation]: extends every prefix by [id] -- or, for a bare
+     * consonant, by every syllable with that initial -- and keeps the strongest survivors.
+     *
+     * Resolved one initial at a time against the keys the dictionary actually holds. Doing it as
+     * a prefix walk keeps this proportional to the matches rather than to the number of
+     * syllables sharing an initial.
+     */
+    private fun abbreviationStep(prefixes: List<IntArray>, id: Int): List<IntArray> {
+        val next = ArrayList<IntArray>()
+        if (Syllables.isInitial(id)) {
+            val letter = Syllables.initialLetter(id)
+            for (prefix in prefixes) {
+                for ((sid, spelling) in dict.syllableSpellings.withIndex()) {
+                    if (spelling[0] == letter) next.add(prefix + sid)
+                }
+            }
+        } else {
+            for (prefix in prefixes) next.add(prefix + id)
+        }
+        // Keep only prefixes the dictionary can still extend, or this explodes -- and keep
+        // the *strongest* ones, not the first ones. Truncating in syllable-id order means
+        // alphabetical order, which cut `bei` long before it was reached and left `bj`
+        // unable to find 北京. Ranking by the best word under each prefix is what makes an
+        // abbreviation resolve to the word people actually meant.
+        // Several words are fetched per prefix, not one. `wordsWithPrefix` reads a bounded
+        // number of entries and *then* ranks them for the region in play, so asking for one
+        // returns the region's best only if the globally-first entry happens to be in that
+        // region. It often is not -- a Traditional-only word can head the list for a
+        // mainland user -- and scoring the prefix at 0 dropped it from the search entirely,
+        // which is how `bj` stopped finding 北京.
+        return next.asSequence()
+            .map { prefix ->
+                prefix to (
+                    dict.wordsWithPrefix(prefix, ABBREVIATION_PROBE, mode)
+                        .firstOrNull()?.rankWeightIn(mode) ?: 0
+                    )
+            }
+            .filter { it.second > 0 }
+            .sortedByDescending { it.second }
+            .take(ABBREVIATION_BRANCHES)
+            .map { it.first }
+            .toList()
+    }
+
+    /** The words under fully resolved abbreviation [prefixes], best first. */
+    private fun abbreviationWords(prefixes: List<IntArray>): List<PinyinDict.Word> {
         // wordsFor, not wordsWithPrefix: the key is now fully resolved and the word must cover
         // exactly it. A prefix query here is what let 婀娜 answer a one-syllable `n`.
         val out = ArrayList<PinyinDict.Word>()
@@ -749,5 +834,8 @@ internal class Decoder(
          */
         private const val ABBREVIATION_PROBE = 16
         private const val ABBREVIATION_RESULTS = 12
+
+        /** Where every abbreviation walk starts: one empty prefix. */
+        private val ROOT_PREFIXES = listOf(IntArray(0))
     }
 }

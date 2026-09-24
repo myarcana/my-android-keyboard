@@ -1,137 +1,161 @@
 package com.offlinekeyboard.ime.asr
 
+import com.offlinekeyboard.ime.glide.LEXICON_ASSET
+import java.io.File
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The case this exists for is a real one, reported verbatim:
+ * Every auto/forced pair here is a real SenseVoice output (int8, sherpa-onnx 1.13.6) on
+ * synthesised speech -- zh-TW and multilingual voices reading mixed sentences -- not an invented
+ * string. The judgement is made against the shipped English lexicon, the same asset
+ * [Dictation] loads, so these tests fail if the lexicon changes in a way that matters.
  *
- *     spoken:    "what's your favorite taiwanese food 牛肉麵嗎"
- *     written:   "what's your favorite taiwanese food ne roium ma"
+ * The case that prompted the rewrite, reported verbatim:
  *
- * SenseVoice decided the segment was English and decoded the Mandarin tail through an
- * English-conditioned decoder. The tail is Latin letters that are not English words.
+ *     spoken:  "The best 豆花 in the world"
+ *     written: "The best dohua in the world"
+ *
+ * The old detector wanted two pinyin-shaped words; this has one, and "dohua" is not pinyin.
  */
 class CodeSwitchTest {
 
-    private val reported = "what's your favorite taiwanese food ne roium ma"
+    private val english: Set<String> = run {
+        var dir: File? = File("").absoluteFile
+        var found: File? = null
+        repeat(5) {
+            val candidate = dir?.resolve("app/src/main/assets/$LEXICON_ASSET")
+            if (found == null && candidate != null && candidate.isFile) found = candidate
+            dir = dir?.parentFile
+        }
+        assertNotNull("lexicon asset not found", found)
+        found!!.inputStream().use(CodeSwitch::readEnglishWords)
+    }
 
-    // --- the reported failure ------------------------------------------------------------
+    private val isEnglish: (String) -> Boolean = { it.lowercase() in english }
+
+    private fun suspects(text: String, lang: String = "<|en|>") =
+        CodeSwitch.suspectsMissedChinese(text, lang, isEnglish)
+
+    private fun choose(auto: String, forced: String) = CodeSwitch.choose(auto, forced, isEnglish)
+
+    // --- the reported failures -----------------------------------------------------------
 
     @Test
-    fun `the reported sentence is flagged as missed Chinese`() {
-        assertTrue(CodeSwitch.suspectsMissedChinese(reported, CodeSwitch.LANG_EN))
+    fun `the best dohua is repaired`() {
+        val auto = "the best dohua in the world"
+        val forced = "the best豆花 in the world"
+        assertTrue(suspects(auto))
+        assertEquals(forced, choose(auto, forced))
     }
 
     @Test
-    fun `the forced Chinese decode wins on the reported sentence`() {
-        val forced = "what's your favorite taiwanese food 牛肉麵嗎"
-        assertEquals(forced, CodeSwitch.choose(reported, forced))
-    }
-
-    // --- ordinary English must never be touched ------------------------------------------
-
-    @Test
-    fun `plain English is not flagged`() {
-        assertFalse(
-            CodeSwitch.suspectsMissedChinese(
-                "what's your favorite taiwanese food",
-                CodeSwitch.LANG_EN,
-            ),
-        )
-        assertFalse(
-            CodeSwitch.suspectsMissedChinese(
-                "can you bring the report to the meeting tomorrow",
-                CodeSwitch.LANG_EN,
-            ),
-        )
-        assertFalse(
-            CodeSwitch.suspectsMissedChinese(
-                "I think we should go there and see if they are open",
-                CodeSwitch.LANG_EN,
-            ),
-        )
+    fun `a romanised tail of pinyin syllables is repaired`() {
+        // "ne" and "ma" are in the lexicon; they are also the romanisation being replaced.
+        val auto = "what's your favorite taiwanese food ne ro mian ma"
+        val forced = "what's your favorite taiwanese food牛肉面吗"
+        assertTrue(suspects(auto))
+        assertEquals(forced, choose(auto, forced))
     }
 
     @Test
-    fun `short English words that look like pinyin are not romanised`() {
-        // Every one of these matches a pinyin syllable shape and is ordinary English.
-        for (w in listOf("he", "she", "to", "do", "no", "so", "the", "we", "you", "her", "men")) {
-            assertFalse(w, CodeSwitch.looksRomanised(w))
+    fun `single romanised words that are not pinyin are repaired`() {
+        for ((auto, forced) in listOf(
+            "we ordered hogu and it was really good" to "we ordered火锅 and it was really good",
+            "this littleo fan is too salty" to "this卤肉饭 is too salty",
+            "she lives near xmaning" to "she lives near西门庭",
+            "let's get zhenz奶茶 after work" to "let's get珍珠奶茶 after work",
+        )) {
+            assertTrue(auto, suspects(auto))
+            assertEquals(auto, forced, choose(auto, forced))
+        }
+    }
+
+    // --- the forced pass must not damage English ----------------------------------------
+
+    @Test
+    fun `a retry that rewrites an English word loses`() {
+        // Real forced-zh outputs that fixed the Chinese and broke something else.
+        for ((auto, forced) in listOf(
+            "the jieyun was so crowded this morning" to "the捷i运 was so quiet this morning",
+            "do you want xian fuji tonight" to "do you忘弦苏记 tonight",
+            "i think manng koing is the perfect summer dessert" to
+                "i think芒ango冰 is the perfect summer dessert dessert",
+            "we went to costco and bought some tinhua" to "we went to costco and bought some听hu",
+        )) {
+            assertEquals(forced, auto, choose(auto, forced))
         }
     }
 
     @Test
-    fun `a correct code-switched result is left alone`() {
-        // Already has Han and was decoded as Chinese: nothing to repair.
-        assertFalse(
-            CodeSwitch.suspectsMissedChinese("這個 bug 我已經 fix 好了", CodeSwitch.LANG_ZH),
-        )
-    }
-
-    // --- the arbitration must not make things worse --------------------------------------
-
-    @Test
-    fun `a retry with no Han characters loses`() {
-        assertEquals(reported, CodeSwitch.choose(reported, "wo de ni hao ma"))
-    }
-
-    @Test
-    fun `a blank retry loses`() {
-        assertEquals(reported, CodeSwitch.choose(reported, ""))
+    fun `a retry that adds no Han loses`() {
+        val auto = "the kubernetes deployment failed again on tuesday"
+        assertEquals(auto, choose(auto, auto))
+        assertEquals(auto, choose(auto, ""))
+        val dohua = "the best dohua in the world"
+        assertEquals(dohua, choose(dohua, "the best do hua in the world"))
     }
 
     @Test
     fun `a retry that swallows the English loses`() {
-        // Forced zh threw away the English half instead of fixing the Chinese tail.
-        assertEquals(reported, CodeSwitch.choose(reported, "牛肉麵嗎"))
+        val auto = "what's your favorite taiwanese food ne ro mian ma"
+        assertEquals(auto, choose(auto, "牛肉面吗"))
     }
 
     @Test
-    fun `a retry that keeps the English and fixes the Chinese wins`() {
-        val auto = "I want to eat niu rou mian ma"
-        val forced = "I want to eat 牛肉麵嗎"
-        assertEquals(forced, CodeSwitch.choose(auto, forced))
-    }
-
-    // --- the detector itself --------------------------------------------------------------
-
-    @Test
-    fun `romanised mandarin syllables are detected`() {
-        for (w in listOf("zhong", "xiang", "qing", "jiao", "cheng", "shuo", "niu", "rou", "mian")) {
-            assertTrue(w, CodeSwitch.looksRomanised(w))
+    fun `English proper nouns are retried but never changed`() {
+        // A retry costs a decode; the text is what matters, and it is left alone.
+        for (t in listOf(
+            "the kubernetes deployment failed again on tuesday",
+            "my friend shavoon is flying to reykjavik",
+            "we went to costco and bought some quinoa",
+        )) {
+            assertTrue(t, suspects(t))
+            assertEquals(t, choose(t, t))
         }
     }
 
-    /**
-     * Ordinary English that the first draft of the detector flagged. Each of these cost a
-     * needless second decode, and "serious"/"premium" made the -ious/-ium suffix rule untenable.
-     */
+    // --- when not to retry ---------------------------------------------------------------
+
     @Test
-    fun `English that previously false-positived is clean`() {
+    fun `plain English is not retried`() {
         for (t in listOf(
+            "can you pick up the kids at 430",
+            "send the invoice to accounts by friday please",
+            "i'll be about 15 minutes late the train is delayed again",
             "the premium account has various serious issues",
             "we went to hong kong last year for a holiday",
-            "the team found a bug in the account system around noon",
-            "please send me the medium size in blue",
         )) {
-            assertFalse(t, CodeSwitch.suspectsMissedChinese(t, CodeSwitch.LANG_EN))
+            assertFalse(t, suspects(t))
         }
     }
 
     @Test
-    fun `a single odd word is not enough to trigger a retry`() {
-        // One unusual token (a name, say) must not cost a second decode.
-        assertFalse(
-            CodeSwitch.suspectsMissedChinese("I met Xiang at the office today", CodeSwitch.LANG_EN),
-        )
+    fun `a segment auto already decoded as Chinese is not retried`() {
+        // sherpa-onnx reports the raw token. The old check compared against bare "zh" and never
+        // matched, so these were decoded twice for an identical answer.
+        assertFalse(suspects("这个包裹已经 fix 好了", "<|zh|>"))
+        assertFalse(suspects("do you want显速机 tonight", "<|zh|>"))
+    }
+
+    @Test
+    fun `lang tokens are normalised`() {
+        assertEquals("zh", CodeSwitch.normaliseLang("<|zh|>"))
+        assertEquals("en", CodeSwitch.normaliseLang("en"))
     }
 
     @Test
     fun `blank text is never suspected`() {
-        assertFalse(CodeSwitch.suspectsMissedChinese("", CodeSwitch.LANG_EN))
-        assertFalse(CodeSwitch.suspectsMissedChinese("   ", CodeSwitch.LANG_EN))
+        assertFalse(suspects(""))
+        assertFalse(suspects("   "))
+    }
+
+    @Test
+    fun `latin words ignore Han, digits and edge apostrophes`() {
+        assertEquals(listOf("the", "best", "in"), CodeSwitch.latinWords("the best豆花 in 430"))
+        assertEquals(listOf("what's"), CodeSwitch.latinWords("'what's'"))
     }
 }

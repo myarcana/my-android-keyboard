@@ -21,13 +21,27 @@ import org.junit.Test
  */
 class GlideRejectionsTest {
 
-    /** A plausible ranking for one ambiguous path: the classic `hello`/`gelp`/`help` cluster. */
-    private val ranked = listOf("hello", "help", "heap", "gel")
+    /**
+     * A plausible ranking for one ambiguous path: the classic `hello`/`gelp`/`help` cluster.
+     * Unsure throughout -- the best word is well short of [GlideRejections.SURE] -- because that
+     * is the case the rejection memory is for.
+     */
+    private val ranked = unsure("hello", "help", "heap", "gel")
+
+    /** The ranking a clean, deliberate redraw of `hello` gets: nothing else comes close. */
+    private val sure = listOf(
+        GlideCandidate("hello", 0.97f),
+        GlideCandidate("help", 0.02f),
+        GlideCandidate("heap", 0.01f),
+    )
+
+    private fun unsure(vararg words: String) =
+        words.map { GlideCandidate(it, 0.5f / words.size.coerceAtLeast(1)) }
 
     private fun rejections() = GlideRejections()
 
     /** One full turn: the word is offered at [start], typed, and then deleted. */
-    private fun rejectAt(r: GlideRejections, start: Int, candidates: List<String> = ranked): String {
+    private fun rejectAt(r: GlideRejections, start: Int, candidates: List<GlideCandidate> = ranked): String {
         val word = r.next(start, candidates)!!
         r.committed(start, word)
         r.rejectLast()
@@ -56,7 +70,7 @@ class GlideRejectionsTest {
     @Test
     fun `deleting repeatedly walks down the whole ranking`() {
         val r = rejections()
-        assertEquals(ranked, ranked.indices.map { rejectAt(r, 0) })
+        assertEquals(ranked.map { it.word }, ranked.indices.map { rejectAt(r, 0) })
     }
 
     /**
@@ -160,7 +174,7 @@ class GlideRejectionsTest {
     @Test
     fun `a lone candidate survives being rejected`() {
         val r = rejections()
-        val only = listOf("hello")
+        val only = unsure("hello")
         assertEquals("hello", rejectAt(r, 0, only))
         assertEquals("hello", r.next(0, only))
     }
@@ -173,7 +187,7 @@ class GlideRejectionsTest {
     fun `a shorter candidate list still offers a word`() {
         val r = rejections()
         rejectAt(r, 0)
-        assertEquals("hello", r.next(0, listOf("hello")))
+        assertEquals("hello", r.next(0, unsure("hello")))
     }
 
     /** Focus left the field; every offset now names different text. */
@@ -212,5 +226,59 @@ class GlideRejectionsTest {
         assertEquals(0 to "Hello", r.pendingCommit())
         assertTrue(r.rejectLast())
         assertEquals("help", r.next(0, ranked))
+    }
+
+    // --- when the decoder is sure -------------------------------------------------------------
+
+    /**
+     * Deleting a word and drawing it again cleanly is the user asking for it again -- to repeat
+     * it, or because the delete was about something else. A refusal must not override a decoder
+     * that has no doubt, or the word becomes impossible to glide in that spot.
+     */
+    @Test
+    fun `a confident redraw types the refused word again`() {
+        val r = rejections()
+        rejectAt(r, 0)
+        assertEquals("hello", r.next(0, sure))
+    }
+
+    /** And it keeps doing so: insisting twice is not an argument for moving on. */
+    @Test
+    fun `a confident redraw survives repeated deletes`() {
+        val r = rejections()
+        rejectAt(r, 0)
+        assertEquals("hello", rejectAt(r, 0, sure))
+        assertEquals("hello", r.next(0, sure))
+    }
+
+    /**
+     * The refusal is overridden, not forgotten. A sloppy redraw after the confident one is back
+     * to being a question the decoder cannot answer, and the delete still steers it.
+     */
+    @Test
+    fun `an unsure redraw after a confident one still moves on`() {
+        val r = rejections()
+        rejectAt(r, 0)
+        assertEquals("hello", r.next(0, sure))
+        assertEquals("help", r.next(0, ranked))
+    }
+
+    /** Just under the bar is still a guess, and a guess defers to the user's delete. */
+    @Test
+    fun `a best word just short of sure still defers to the refusal`() {
+        val r = rejections()
+        rejectAt(r, 0)
+        val almost = listOf(
+            GlideCandidate("hello", GlideRejections.SURE - 0.01f),
+            GlideCandidate("help", 0.1f),
+        )
+        assertEquals("help", r.next(0, almost))
+    }
+
+    /** Confidence never manufactures a refusal: with nothing deleted, the best word is typed. */
+    @Test
+    fun `confidence changes nothing where nothing was refused`() {
+        assertEquals("hello", rejections().next(0, sure))
+        assertEquals("hello", rejections().next(0, ranked))
     }
 }

@@ -16,6 +16,7 @@ import com.k2fsa.sherpa.onnx.OfflineSenseVoiceModelConfig
 import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
+import com.offlinekeyboard.ime.glide.LEXICON_ASSET
 import kotlin.concurrent.thread
 
 private const val TAG = "Dictation"
@@ -69,9 +70,10 @@ private const val WARMUP_DISCARD_NANOS = 120_000_000L
  *
  *  - Segments are cut on a shorter pause, so a mid-sentence language switch tends to get its own
  *    segment and therefore its own language decision.
- *  - A segment whose text carries the romanised signature is decoded a second time forced to
- *    `zh`, and [CodeSwitch.choose] keeps whichever answer is better. The `auto` result is still
- *    what ships unless the retry demonstrably beats it.
+ *  - A segment detected as anything but Chinese that contains a Latin word outside the English
+ *    lexicon is decoded a second time forced to `zh`, and [CodeSwitch.choose] keeps the retry
+ *    only when it adds Han without disturbing any English word. The `auto` result is still what
+ *    ships unless the retry is purely a repair.
  */
 class Dictation(private val context: Context) {
 
@@ -124,6 +126,13 @@ class Dictation(private val context: Context) {
     @Volatile private var zhRecognizer: OfflineRecognizer? = null
 
     /**
+     * What [CodeSwitch] counts as an English word: the glide lexicon's 40,000 words. Loaded with
+     * the models and optional in the same way [zhRecognizer] is -- without it there is no way to
+     * tell romanised Chinese from English, so the repair simply does not run.
+     */
+    @Volatile private var englishWords: Set<String>? = null
+
+    /**
      * The command channel. Optional in the same way [zhRecognizer] is: a repair layered on a
      * working recogniser, so a device where it fails to load still dictates, just with spoken
      * punctuation left to word matching.
@@ -167,6 +176,12 @@ class Dictation(private val context: Context) {
                 buildRecognizer(language = CodeSwitch.LANG_ZH)
             } catch (t: Throwable) {
                 Log.e(TAG, "no forced-zh recognizer; code-switch repair disabled", t)
+                null
+            }
+            englishWords = try {
+                assets.open(LEXICON_ASSET).use(CodeSwitch::readEnglishWords)
+            } catch (t: Throwable) {
+                Log.e(TAG, "no English lexicon; code-switch repair disabled", t)
                 null
             }
             // Loaded here for the same reason: it runs inside a segment's processing, so paying
@@ -400,12 +415,14 @@ class Dictation(private val context: Context) {
      * Decodes one segment, repairing the code-switch failure when it shows.
      *
      * The automatic pass is authoritative. The forced-Chinese pass only runs when the automatic
-     * text carries the romanised signature, and only replaces it when it is actually better --
-     * so a segment the model already got right costs exactly one decode, as before.
+     * text contains a Latin word that is not English, and only replaces it when the change is
+     * purely a repair -- so a segment of ordinary English costs exactly one decode, as before.
      */
     private fun transcribe(engine: OfflineRecognizer, samples: FloatArray): CommandMerge.Transcript {
         val auto = decode(engine, samples)
-        if (!CodeSwitch.suspectsMissedChinese(auto.text, auto.lang)) return auto.transcript
+        val words = englishWords ?: return auto.transcript
+        val isEnglish: (String) -> Boolean = { it.lowercase() in words }
+        if (!CodeSwitch.suspectsMissedChinese(auto.text, auto.lang, isEnglish)) return auto.transcript
 
         val zh = zhRecognizer ?: return auto.transcript
         val forced = try {
@@ -414,9 +431,11 @@ class Dictation(private val context: Context) {
             Log.e(TAG, "forced-zh retry failed", t)
             return auto.transcript
         }
-        val chosen = CodeSwitch.choose(auto.text, forced.text)
+        val chosen = CodeSwitch.choose(auto.text, forced.text, isEnglish)
         if (chosen != auto.text) {
             Log.i(TAG, "code-switch repair applied (auto lang=${auto.lang})")
+        } else if (Log.isLoggable(TAG, Log.DEBUG)) {
+            Log.d(TAG, "code-switch retry refused: auto=[${auto.text}] zh=[${forced.text}]")
         }
         // Whichever text won, its own tokens and timings go with it: the merge matches
         // detections against these words, and pairing one decode's text with another's
