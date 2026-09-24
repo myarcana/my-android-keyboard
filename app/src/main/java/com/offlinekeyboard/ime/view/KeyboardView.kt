@@ -23,6 +23,7 @@ import android.view.WindowManager
 import androidx.core.view.WindowInsetsCompat
 import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.TouchTrace
+import com.offlinekeyboard.ime.gesture.FlickCone
 import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.GestureConfig
 import com.offlinekeyboard.ime.gesture.GestureOutput
@@ -30,6 +31,7 @@ import com.offlinekeyboard.ime.gesture.GestureState
 import com.offlinekeyboard.ime.gesture.PathPoint
 import com.offlinekeyboard.ime.gesture.SquashDirection
 import com.offlinekeyboard.ime.gesture.TouchFsm
+import com.offlinekeyboard.ime.gesture.WordStarts
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.Metrics
 import com.offlinekeyboard.ime.layout.KeyRect
@@ -318,6 +320,15 @@ class KeyboardView @JvmOverloads constructor(
      * guess made on its behalf.
      */
     var flickContext: FlickPrior.Context = FlickPrior.Context.UNKNOWN
+
+    /**
+     * Which letters words head for after each first letter, for [FlickCone].
+     *
+     * Set by the service once the lexicon has loaded, and read once per press. Until then
+     * [WordStarts.UNKNOWN] leaves every letter below a key contested, so only the bottom row's
+     * cones open. Nothing can be glided downward from there, whatever the words say.
+     */
+    var wordStarts: WordStarts = WordStarts.UNKNOWN
 
     private val uiHandler = Handler(Looper.getMainLooper())
 
@@ -1285,7 +1296,7 @@ class KeyboardView @JvmOverloads constructor(
                         "  down id=$id -> new press on " +
                             "${g.keyForPress(event.getX(i), event.getY(i))?.key?.id}",
                     )
-                    val fsm = TouchFsm(g, config, flickPrior, flickContext)
+                    val fsm = TouchFsm(g, config, flickPrior, flickContext, wordStarts)
                     pointers[id] = fsm
                     emit(fsm.onDown(event.getX(i), event.getY(i), event.eventTime))
                     scheduleLongPress(id, fsm)

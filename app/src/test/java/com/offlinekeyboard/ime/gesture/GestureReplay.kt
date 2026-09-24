@@ -1,8 +1,11 @@
 package com.offlinekeyboard.ime.gesture
 
+import com.offlinekeyboard.ime.glide.LEXICON_ASSET
+import com.offlinekeyboard.ime.glide.Lexicon
 import com.offlinekeyboard.ime.layout.IosLayouts
 import com.offlinekeyboard.ime.layout.Layout
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import com.offlinekeyboard.ime.layout.Metrics
 import java.io.File
 
 /**
@@ -52,13 +55,14 @@ object GestureReplay {
         record: GestureRecord,
         config: GestureConfig,
         prior: FlickPrior = NO_PRIOR,
+        words: WordStarts = WORDS,
     ): GestureVerdict? {
         val layout = layoutFor(record.trace.layoutId) ?: return null
         val geometry = LayoutGeometry(layout, record.trace.widthPx)
         // No context: a recorded path has no editor behind it. See FlickPrior.Context.UNKNOWN,
         // which is exactly zero for that reason.
-        val fsm = TouchFsm(geometry, config, prior)
-        val path = record.path
+        val fsm = TouchFsm(geometry, config, prior, FlickPrior.Context.UNKNOWN, words)
+        val path = onTodaysKeys(record)
         val down = path.firstOrNull() ?: return null
         val boundaries = record.trace.strokeStarts.toSet()
 
@@ -103,6 +107,49 @@ object GestureReplay {
         val out = fsm.onUp(last.x, last.y, last.t)
         if (fsm.isSuspended) return verdictOf(fsm.onGlideResumeTimeout())
         return verdictOf(out)
+    }
+
+    /**
+     * When the suggestion strip went from 50dp to 34dp (commit 5987b26), in epoch milliseconds.
+     *
+     * That moved every key 16dp up the view, and the path is stored in view coordinates, so a
+     * gesture recorded before it replays 16dp low on today's board. That is about three
+     * quarters of a key, so a press on `i` lands on `k`. Nothing noticed while every
+     * key was judged by the same thresholds, and it became visible the moment thresholds started
+     * to differ per key: glides of `in` and `on` replayed as starting on the keys below, whose
+     * flicks are unambiguous, and were scored as broken by the change.
+     *
+     * Shifting by the known difference puts 3596 of the bank's 3600 letter presses back on the
+     * key the phone recorded them on, against 2605 without it.
+     */
+    private const val STRIP_SHRANK_AT = 1_789_903_986_000L
+    private const val STRIP_SHRANK_BY_DP = 50f - 34f
+
+    /** [record]'s path in today's view coordinates. */
+    fun onTodaysKeys(record: GestureRecord): List<PathPoint> {
+        if (record.at >= STRIP_SHRANK_AT) return record.path
+        val dy = STRIP_SHRANK_BY_DP / Metrics.REFERENCE_WIDTH * record.trace.widthPx
+        return record.path.map { it.copy(y = it.y - dy) }
+    }
+
+    /**
+     * The word statistics the phone builds from the lexicon, built here from the same asset.
+     *
+     * Unlike the caret, which a recorded path cannot carry, this *can* be reproduced exactly,
+     * so replay uses the real table rather than abstaining. [WordStarts.UNKNOWN] if the asset
+     * cannot be found, in which case the cones fall back to geometry alone.
+     */
+    val WORDS: WordStarts by lazy {
+        var dir: File? = File("").absoluteFile
+        repeat(5) {
+            val candidate = dir?.resolve("app/src/main/assets/$LEXICON_ASSET")
+            if (candidate != null && candidate.isFile) {
+                val lexicon = candidate.inputStream().use(Lexicon::load)
+                return@lazy WordStarts.of(lexicon.letters, lexicon.logFrequency)
+            }
+            dir = dir?.parentFile
+        }
+        WordStarts.UNKNOWN
     }
 
     private fun verdictOf(outputs: List<GestureOutput>): GestureVerdict? = outputs

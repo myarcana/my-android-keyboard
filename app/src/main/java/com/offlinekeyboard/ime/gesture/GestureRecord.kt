@@ -59,7 +59,31 @@ data class GestureThresholds(
     val glideResumeMs: Long = GestureConfig().glideResumeMs,
     /** How far from the lift the finger may return. See [GestureConfig.glideResumeRadiusRatio]. */
     val glideResumeRadiusRatio: Float = GestureConfig().glideResumeRadiusRatio,
+    /**
+     * The per-key flick cone's limit, in degrees. See [FlickCone].
+     *
+     * **Absent means 0, not the current default.** Every run recorded before the cone existed was
+     * decided without one, and replaying those runs under a cone would hold the harness check to
+     * verdicts no phone ever reached. The other three cone numbers only matter when this is
+     * non-zero, so they default to the build's values.
+     */
+    val flickConeMaxDegrees: Float = 0f,
+    val flickConeMarginDegrees: Float = GestureConfig().flickConeMarginDegrees,
+    val flickConeMinShare: Float = GestureConfig().flickConeMinShare,
+    val flickConeMinTravelRatio: Float = GestureConfig().flickConeMinTravelRatio,
 ) {
+    /** [base] with these thresholds applied: what the build that recorded them was running. */
+    fun applyTo(base: GestureConfig) = base.copy(
+        flickDistanceRatio = flickDistanceRatio,
+        verticalDominance = verticalDominance,
+        glideDistanceRatio = glideDistanceRatio,
+        flickToGlideRatio = flickToGlideRatio,
+        flickConeMaxDegrees = flickConeMaxDegrees,
+        flickConeMarginDegrees = flickConeMarginDegrees,
+        flickConeMinShare = flickConeMinShare,
+        flickConeMinTravelRatio = flickConeMinTravelRatio,
+    )
+
     companion object {
         fun of(config: GestureConfig) = GestureThresholds(
             flickDistanceRatio = config.flickDistanceRatio,
@@ -68,7 +92,22 @@ data class GestureThresholds(
             flickToGlideRatio = config.flickToGlideRatio,
             glideResumeMs = config.glideResumeMs,
             glideResumeRadiusRatio = config.glideResumeRadiusRatio,
+            flickConeMaxDegrees = config.flickConeMaxDegrees,
+            flickConeMarginDegrees = config.flickConeMarginDegrees,
+            flickConeMinShare = config.flickConeMinShare,
+            flickConeMinTravelRatio = config.flickConeMinTravelRatio,
         )
+
+        /** The cone fields of a decoded `thresholds` object, each absent one at its default. */
+        internal fun coneFrom(o: Map<String, Any?>, base: GestureThresholds): GestureThresholds {
+            fun f(name: String, fallback: Float) = (o[name] as? Number)?.toFloat() ?: fallback
+            return base.copy(
+                flickConeMaxDegrees = f("flickConeMaxDegrees", 0f),
+                flickConeMarginDegrees = f("flickConeMarginDegrees", base.flickConeMarginDegrees),
+                flickConeMinShare = f("flickConeMinShare", base.flickConeMinShare),
+                flickConeMinTravelRatio = f("flickConeMinTravelRatio", base.flickConeMinTravelRatio),
+            )
+        }
     }
 }
 
@@ -310,7 +349,7 @@ object GestureRecordCodec {
                     ?: GestureConfig().glideResumeMs,
                 glideResumeRadiusRatio = it["glideResumeRadiusRatio"]?.let { v -> num(v) }
                     ?: GestureConfig().glideResumeRadiusRatio,
-            )
+            ).let { base -> GestureThresholds.coneFrom(it, base) }
         }
         // Pre-v6 lines carry a label written at the moment of the gesture. It is read so the
         // old records stay scorable -- 144 of the bank's 146 symbol samples are among them, and
@@ -402,6 +441,10 @@ object GestureSessionCodec {
                     "flickToGlideRatio" to it.flickToGlideRatio,
                     "glideResumeMs" to it.glideResumeMs,
                     "glideResumeRadiusRatio" to it.glideResumeRadiusRatio,
+                    "flickConeMaxDegrees" to it.flickConeMaxDegrees,
+                    "flickConeMarginDegrees" to it.flickConeMarginDegrees,
+                    "flickConeMinShare" to it.flickConeMinShare,
+                    "flickConeMinTravelRatio" to it.flickConeMinTravelRatio,
                 )
             }
         },
@@ -423,7 +466,7 @@ object GestureSessionCodec {
                     ?: GestureConfig().glideResumeMs,
                 glideResumeRadiusRatio = (it["glideResumeRadiusRatio"] as? Number)?.toFloat()
                     ?: GestureConfig().glideResumeRadiusRatio,
-            )
+            ).let { base -> GestureThresholds.coneFrom(it, base) }
         }
         GestureSession(
             id = o["id"] as String,

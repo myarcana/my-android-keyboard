@@ -98,6 +98,48 @@ data class GestureConfig(
      */
     val verticalDominance: Float = 4.25f,
     /**
+     * The widest a key's flick cone may open, in degrees either side of straight down.
+     *
+     * [verticalDominance] is about 13 degrees, and that is what `o` needs, with `ok` leaving 25
+     * degrees off vertical. It is far stricter than `h` or `m` need, where no word leaves
+     * downward at all. [FlickCone] opens each side of each key toward this limit, and stops short
+     * of any letter a word could actually be heading for.
+     *
+     * 45 rather than more: recorded flicks lean at most 30 degrees (bottom row), and past 45 the
+     * stroke is more sideways than down, which is the start of a glide along the row. Set to 0 to
+     * get the old machine back exactly.
+     */
+    val flickConeMaxDegrees: Float = 45f,
+    /**
+     * How far short of a contested letter a cone stops, in degrees.
+     *
+     * A glide's first leg does not point straight at its second letter. In the bank, `un` leaves
+     * up to 19 degrees off the line from `u` to `n`, and `th` up to 9. 20 keeps the cone clear of
+     * the worst of those.
+     */
+    val flickConeMarginDegrees: Float = 20f,
+    /**
+     * How common a second letter must be, as a share of the words starting with this key, before
+     * it bounds that key's cone.
+     *
+     * 1%: `ib` (0.15% of i-words) does not narrow `i`, but `in` (55%) does. So does `wa` (17%)
+     * on `w`, and `kn` (24%) on `k`. A rare pair is not worth losing every leaning flick for,
+     * because a rare word glided through the widened cone still has a way out. It can start
+     * sideways, or be tapped.
+     */
+    val flickConeMinShare: Float = 0.01f,
+    /**
+     * Downward travel a flick needs when it leans past [verticalDominance] into the widened cone,
+     * as a fraction of key height.
+     *
+     * Larger than [flickDistanceRatio]'s 3 pixels because that number is safe only inside a
+     * 13-degree fence: a resting thumb does not drift three pixels straight down. A thumb rolling
+     * off a tap does drift three pixels at 30 degrees. The bank has one: a tap on `h` that
+     * moved 14px down and 4px across. 0.15 of a key clears it and every other recorded tap, and
+     * is still below the shortest recorded flick (0.23 key heights on `m`).
+     */
+    val flickConeMinTravelRatio: Float = 0.15f,
+    /**
      * How far the finger may drift and still count as holding still, as a fraction of key
      * height. Beyond this the accent popup will not open, however long the press lasts.
      *
@@ -539,6 +581,14 @@ class TouchFsm(
      * rather than under some half-informed guess.
      */
     private val context: FlickPrior.Context = FlickPrior.Context.UNKNOWN,
+    /**
+     * Which letters words head for after each first letter, for [FlickCone].
+     *
+     * Defaults to [WordStarts.UNKNOWN], which treats every letter below a key as contested.
+     * That still opens the bottom row, which has no letters below it, and leaves the rest of
+     * the board as it was. The service passes the real table once the lexicon has loaded.
+     */
+    private val words: WordStarts = WordStarts.UNKNOWN,
 ) {
     var state: GestureState = GestureState.IDLE
         private set
@@ -608,6 +658,25 @@ class TouchFsm(
      * is down, so recomputing it per move sample would burn work to get the same answer.
      */
     private var flickScale = 1f
+
+    /**
+     * How far off vertical this key's flick may lean, beyond [verticalDominance]. See [FlickCone].
+     *
+     * Computed once at the press, like [flickScale], and for the same reason: it depends only on
+     * the key and the words, neither of which change while the finger is down.
+     */
+    private var cone = FlickCone.CLOSED
+
+    /**
+     * Whether ([dx], [dy]) is far enough down the widened part of the cone to arm a flick.
+     *
+     * Asks for more travel than [flickDistance], as [GestureConfig.flickConeMinTravelRatio]
+     * explains. It is scaled by [flickScale] like every other demand for proof, so the mid-word
+     * penalty still applies here.
+     */
+    private fun inWideCone(dx: Float, dy: Float): Boolean =
+        cone.contains(dx, dy) &&
+            dy > config.flickConeMinTravelRatio * geometry.keyHeight * flickScale
 
     /**
      * Turns nats of bias into a threshold multiplier.
@@ -702,8 +771,12 @@ class TouchFsm(
             // Dominance gates getting into a flick, not staying in one: several recorded flicks
             // hook through 80 degrees at the lift, and the symbol must not fly home because the
             // thumb rolled sideways on its way off the glass.
+            // The same two tests arming uses, so the symbol only slides while the stroke could
+            // still arm, and does slide on a key whose widened cone this stroke is inside.
+            val dx = now.x - start.x
             if (state == GestureState.PRESSED &&
-                dy <= verticalDominance * abs(now.x - start.x)
+                dy <= verticalDominance * abs(dx) &&
+                !cone.contains(dx, dy)
             ) {
                 return 0f
             }
@@ -720,6 +793,11 @@ class TouchFsm(
         // change under a finger that is already down, so this is the moment the answer exists
         // and the last moment it can change.
         flickScale = scaleFor(prior.bias(key, geometry, context))
+        cone = if (key.key.secondary != null) {
+            FlickCone.of(key, geometry, words, config)
+        } else {
+            FlickCone.CLOSED
+        }
         val p = PathPoint(x, y, t)
         down = p
         path += p
@@ -789,7 +867,7 @@ class TouchFsm(
 
         return when (state) {
             GestureState.PRESSED -> onMoveWhilePressed(dx, dy)
-            GestureState.FLICK -> onMoveWhileFlicking()
+            GestureState.FLICK -> onMoveWhileFlicking(dx, dy)
             GestureState.UP_FLICK -> onMoveWhileUpFlicking(dx, dy)
             // A recalled flick can still be armed again -- the finger is on the key and may go
             // back up -- but it can no longer become a glide. Re-using the arming test alone
@@ -815,7 +893,12 @@ class TouchFsm(
             return bulkDeleteIfSwiped(dy)
         }
         if (key.key.type == KeyType.SPACE) return spaceFlick(dx, dy)
-        if (isDownward && verticallyDominant && abs(dy) > flickDistance && key.key.secondary != null) {
+        // Either the configured narrow test, exactly as it always was, or the widened cone this
+        // key earns from having no word below it on that side. See [FlickCone].
+        val flicked = isDownward && (
+            (verticallyDominant && abs(dy) > flickDistance) || inWideCone(dx, dy)
+            )
+        if (flicked && key.key.secondary != null) {
             state = GestureState.FLICK
             return listOf(GestureOutput.FlickPreview(key.key.id, key.key.secondary))
         }
@@ -924,7 +1007,11 @@ class TouchFsm(
      * Requirement 4: a flick that keeps travelling becomes a glide. The flick was only ever a
      * preview, so nothing needs to be undone in the editor -- just clear the preview.
      */
-    private fun onMoveWhileFlicking(): List<GestureOutput> {
+    private fun onMoveWhileFlicking(dx: Float, dy: Float): List<GestureOutput> {
+        // Inside a side of the cone that was opened because no word goes that way, distance is
+        // not evidence of a word. A long, confident flick down from `h` is still a flick. The
+        // stroke has to turn out of the cone first, toward somewhere a word could be going.
+        if (cone.contains(dx, dy)) return emptyList()
         if (pathLength > flickToGlideDistance) {
             state = GestureState.GLIDE
             return listOf(
@@ -1354,6 +1441,7 @@ class TouchFsm(
         // origin key to have an opinion about, and a stale multiplier would be applied to the
         // next press for the few events before onDown recomputes it.
         flickScale = 1f
+        cone = FlickCone.CLOSED
         strokeStarts.clear()
         lift = null
     }

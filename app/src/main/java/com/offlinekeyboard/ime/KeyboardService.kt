@@ -43,6 +43,7 @@ import com.offlinekeyboard.ime.capture.GestureCapture
 import com.offlinekeyboard.ime.text.GraphemeCluster
 import com.offlinekeyboard.ime.text.WordBoundary
 import com.offlinekeyboard.ime.gesture.FlickPrior
+import com.offlinekeyboard.ime.gesture.WordStarts
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
 import com.offlinekeyboard.ime.glide.GlideEngine
@@ -234,6 +235,12 @@ class KeyboardService : InputMethodService() {
      * un-discounted until then.
      */
     private var englishWords: Lexicon? = null
+
+    /**
+     * Held here as well as on the view because the system rebuilds the view whenever it pleases,
+     * and a fresh view must not fall back to [WordStarts.UNKNOWN] for the rest of the session.
+     */
+    private var wordStarts: WordStarts = WordStarts.UNKNOWN
 
     /** Letter taps held as composing text, waiting for the word to end. */
     private val pending = PendingWord()
@@ -736,6 +743,7 @@ class KeyboardService : InputMethodService() {
         keyboardView = view
         view.onOutput = ::handleOutputs
         view.onCandidate = ::commitCandidate
+        view.wordStarts = wordStarts
         // A one-handed grip is a property of how the phone is being held, which outlives the
         // input view: the system throws this view away and rebuilds it on a configuration
         // change and whenever it pleases, and a hand that squashed the board would have to do
@@ -1811,7 +1819,11 @@ class KeyboardService : InputMethodService() {
             // Warmed here, off the main thread: the suggestion bar's first prefix query would
             // otherwise sort forty thousand words on a keystroke.
             lexicon?.logPrefixProbability("a")
+            // Which second letters words head for, for the per-key flick cones. Built here with
+            // everything else read from the lexicon, since it is one pass over the same array.
+            val starts = lexicon?.let { WordStarts.of(it.letters, it.logFrequency) }
             handler.post {
+                starts?.let { wordStarts = it; keyboardView?.wordStarts = it }
                 glide = engine
                 tapDecoder = index
                 // Kept for the suggestion bar, which weighs "these letters are an English word"

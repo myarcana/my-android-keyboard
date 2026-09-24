@@ -1137,6 +1137,51 @@ prior's score beside it and says in the report that the contextual terms are inv
 bank. Settling them needs a session that records what the caret was sitting after, which is a
 change to the recording format and not to a threshold.
 
+### A flick may lean where no word goes — `gesture/FlickCone`
+
+The complaint: flicking `(` on `h` often glided `in`, `hub`, `iv` or `on` instead, and a downward
+swipe on the bottom row could glide at all, which is meaningless. The cause was that
+`verticalDominance` 4.25 (about 13° either side of straight down) applied to **every** key. That
+number is fitted to `o`, where `ok` leaves 25° off vertical and nothing else separates the two.
+On `h` no English word leaves downward (`hv`, `hm` are 0.03% of h-words together), so a flick
+leaning 20° was refused and became a glide, and the decoder had to name some word for a path no
+word makes. The bank shows the lean is normal: recorded flicks lean up to 16° on the top row, 20°
+on the home row and 30° on the bottom row.
+
+Each side of each key now gets its own half-angle, from the lexicon and the geometry: open to 45°,
+stopping 20° short of the nearest letter below that at least 1% of this key's words go to next.
+The 20° is measured: `un` leaves up to 19° off the line from `u` to `n`. The configured 13° stays
+as a floor, so `i`, `e` and `k` are exactly as strict as before, and so is `o`, except for an 8°
+side, which is too small to open anything. `h`, `j`, `f`, `g`, `l`, `y`, `q` and the whole
+bottom row open fully. `t`, `u`, `w`, `p`, `r`, `s`, `d` and `a` open on the side away from their
+words (`th`, `un`, `wa`, `pl`). With no lexicon loaded, every letter below counts as contested,
+which still opens the bottom row.
+
+Two further rules keep it safe:
+
+- **Leaning costs more travel.** 0.15 key heights instead of 3px. A tap in the bank rolled 14px
+  down at a lean on `h`, and 3px was only safe inside the 13° fence.
+- **Inside an opened side, distance no longer promotes a flick to a glide.** That was the other
+  half of the `h` complaint: a long, confident flick ran past `flickToGlideRatio` and became a
+  word. The stroke now has to turn out of the cone first. On a strict side it escapes on distance
+  as before, because there the continuation really could be `in`.
+
+Replayed over every gesture in the bank whose outcome is known, including ordinary typing, not
+just the drill: **no recorded gesture changes verdict.** That is expected, because the drill
+flicks almost nothing from `h` or the bottom row. The tests in `FlickConeTest` pin the reported
+cases. `flickConeMaxDegrees = 0` gives the old machine back, and sessions recorded before this
+carry no cone fields, which decode as 0, so the harness check still replays them as they ran.
+
+**Replay had been reading the pre-September bank 16dp low.** Finding this took the first run of
+the report above: it claimed the cone broke `in`, `on`, `ok` and `ex`. It had not. The strip
+shrank from 50dp to 34dp in 5987b26, which moved every key up by 16dp, while the bank stores view
+coordinates. So every gesture recorded before then was replayed three quarters of a key low, and
+a glide of `in` started on `k`. With one set of thresholds for every key, nobody noticed.
+`GestureReplay.onTodaysKeys` now shifts those records back, which puts 3596 of 3600 letter presses
+on their recorded key, against 2605 before. The current thresholds score **96.4% balanced**
+(symbol 142/145, word 67/73) where the same report used to say 92.5%. Some of the old
+"failures" were never the thresholds.
+
 ### The Gesture Lab as a daily habit -- `capture/LabDeck`, `capture/LabProgress`
 
 | | value | why |

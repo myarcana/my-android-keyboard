@@ -86,6 +86,7 @@ class GestureBankReplayTest {
         println("  " + describe(base))
 
         reportFlickPrior(records, base)
+        reportFlickCone(records)
 
         val best = sweep(records)
         println()
@@ -116,14 +117,10 @@ class GestureBankReplayTest {
         // it asks whether the whole path from touch to characters still behaves, rather than
         // whether an intermediate label matches an intermediate label.
         val checkable = records.filter { it.trace.thresholds != null }
-        fun configFor(record: GestureRecord) = record.trace.thresholds!!.let {
-            defaults.copy(
-                flickDistanceRatio = it.flickDistanceRatio,
-                verticalDominance = it.verticalDominance,
-                glideDistanceRatio = it.glideDistanceRatio,
-                flickToGlideRatio = it.flickToGlideRatio,
-            )
-        }
+        // Every threshold the record says was live, including the flick cone -- which a record
+        // made before the cone existed says was off. Copying only the four original numbers onto
+        // today's defaults would replay every old gesture under a cone no phone ever ran.
+        fun configFor(record: GestureRecord) = record.trace.thresholds!!.applyTo(defaults)
         val exact = checkable.filter { it.trace.verdict != null }
         val mismatches = exact.mapNotNull { record ->
             val replayed = GestureReplay.replay(record, configFor(record))
@@ -205,6 +202,55 @@ class GestureBankReplayTest {
             println("    $key: " + rows.joinToString(", ") { (r, before, after) ->
                 "${r.legacy?.intent?.name?.lowercase()} $before->$after"
             })
+        }
+    }
+
+    /**
+     * What the per-key flick cone changes, measured over *every* gesture whose outcome is known.
+     *
+     * Not only the drill. The cone is about keys like `h` and the bottom row, and the drill has
+     * almost no flicks from those. Ordinary typing is where the risk sits: a tap that rolled
+     * downward and would now read as a symbol, or a glide that now would not start. For a v6
+     * line the evidence is what it typed. A lone letter is a tap, the key's secondary is a flick,
+     * and a word of two or more letters is a glide. Anything else is not counted.
+     */
+    private fun reportFlickCone(records: List<GestureRecord>) {
+        val off = defaults.copy(flickConeMaxDegrees = 0f)
+        val moved = records.mapNotNull { record ->
+            val wanted = outcomeOf(record) ?: return@mapNotNull null
+            val before = GestureReplay.intentOf(GestureReplay.replay(record, off))
+            val after = GestureReplay.intentOf(GestureReplay.replay(record, defaults))
+            if (before == after) null else Triple(record, wanted, before to after)
+        }
+        println()
+        println("With the per-key flick cone (FlickCone), over every gesture whose outcome is known:")
+        if (moved.isEmpty()) {
+            println("  no recorded gesture changes verdict")
+            return
+        }
+        val fixed = moved.count { (_, wanted, change) -> change.second == wanted }
+        val broken = moved.count { (_, wanted, change) -> change.first == wanted }
+        println("  ${moved.size} gestures change verdict: $fixed newly correct, $broken newly wrong")
+        moved.forEach { (r, wanted, change) ->
+            println("    ${r.trace.startKeyId}  ${r.label()}  wanted $wanted: " +
+                "${change.first} -> ${change.second}")
+        }
+    }
+
+    /** What a gesture was for, from its label or from what it typed. Null when unknowable. */
+    private fun outcomeOf(record: GestureRecord): GestureIntent? {
+        if (record.voidReason != null) return null
+        record.legacy?.let { legacy ->
+            return if (legacy.promptId.startsWith("word:")) null else legacy.intent
+        }
+        val key = GestureReplay.layoutFor(record.trace.layoutId)?.rows
+            ?.flatMap { it.keys }?.firstOrNull { it.id == record.trace.startKeyId } ?: return null
+        val typed = record.typed.trim()
+        return when {
+            key.secondary != null && record.typed == key.secondary -> GestureIntent.SYMBOL
+            typed.equals(key.primary, ignoreCase = true) -> GestureIntent.LETTER
+            typed.length >= 2 && typed.all { it.isLetter() || it == '\'' } -> GestureIntent.WORD
+            else -> null
         }
     }
 
