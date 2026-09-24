@@ -171,15 +171,214 @@ internal class Decoder(
             if (seen.add(candidate.text)) out.add(candidate)
         }
 
-        // 1. Full decodings, over the few best readings. A fuzzy reading is charged here rather
-        // than in the segmenter so that it competes on the same scale as everything else.
+        // One table for every reading: they are segmentations of the same letters, so most of
+        // their spans are the same syllables at shifted positions. See [SpanTable].
+        val spans = SpanTable()
+
+        // 1. Full decodings, over the few best readings.
+        if (mode == ScriptMode.BOTH) {
+            bothScripts(readings, limit).forEach(::offer)
+        } else {
+            wholeInput(readings, limit, spans).forEach(::offer)
+        }
+
+        // 2. Prefix words: every proper prefix of the best reading, longest first.
+        val primary = readings.first()
+        for (span in minOf(primary.size, MAX_WORD_SYLLABLES) downTo 1) {
+            if (span == primary.size) continue
+            val ids = primary.ids.copyOfRange(0, span)
+            for (word in spans.at(primary.ids, 0, span).words.take(PREFIX_WORDS)) {
+                // The learned bonus has to be applied here too, not only inside the Viterbi
+                // pass. A one-syllable correction -- the commonest kind, choosing between
+                // homophones of `ta` -- arrives as a prefix candidate, and scoring it without
+                // the bonus meant the keyboard recorded the choice and then ignored it.
+                val score = word.logProb +
+                    (if (word.learned) LEARNED_BONUS else 0f) -
+                    (if (word.backoff) backoffPenalty else 0f)
+                offer(Candidate(word.text, span, score, word.learned, primary.ends[span - 1], ids))
+            }
+        }
+
+        // 3. Single characters for the first syllable, as the guaranteed floor.
+        val firstId = primary.ids.firstOrNull()
+        if (firstId != null) {
+            for (entry in charactersFor(firstId).take(CHAR_FLOOR)) {
+                // Scored against whichever corpus this mode reads, so a Traditional-only
+                // character reaches the floor in [ScriptMode.BOTH] at its Taiwan probability
+                // rather than being dropped for having no mainland weight.
+                val logProb = mode.logProbOf(entry.cn, entry.tw) ?: continue
+                offer(Candidate(entry.text, 1, logProb, false, primary.ends[0], intArrayOf(firstId)))
+            }
+        }
+
+        // A learned choice goes to the front, whichever phase produced it.
+        //
+        // The phases are ordered by *kind* -- whole-input decodings, then prefixes, then the
+        // character floor -- which is right in general but silently outranks a correction: a
+        // one-syllable choice like 他 for `ta` is a prefix candidate and sat behind every full
+        // decoding regardless of its score. Learning is only worth anything if the next
+        // keystroke shows it, so it is hoisted here rather than left to phase order. Stable, so
+        // everything else keeps the ordering the phases gave it.
+        val learned = out.filter { it.learned }.sortedByDescending { it.score }
+        if (learned.isNotEmpty()) {
+            val rest = out.filterNot { it.learned }
+            return (learned + rest).take(limit)
+        }
+        return out.take(limit)
+    }
+
+    /**
+     * Whole-input decodings for [ScriptMode.BOTH]: each script decoded on its own, then
+     * interleaved, so the English bar always offers a Traditional sentence beside the
+     * Simplified one.
+     *
+     * **Why not one Viterbi pass over both corpora**, which is what this replaced. Scoring each
+     * edge by whichever corpus likes it better lets a path change script mid-sentence, and it
+     * does: `wojinwankeyishangkema` came out as 我今晚可以上课麼 and 我今晚可以上課吗, sentences
+     * no writer of either script produces. It also meant no pure Traditional sentence ever
+     * reached the bar. The mainland corpus is 2.5x larger and far denser in multi-word phrases,
+     * so over a sentence its advantage compounds -- 1 to 3 nats a syllable, 14 nats behind for
+     * 我很喜歡你 -- and all [FULL_DECODINGS] slots went to Simplified readings and their mixed
+     * variants. Short words hid the problem, because over two syllables the gap is small enough
+     * that 麵條 still made the cut beside 面条.
+     *
+     * Comparing the two scripts' sentences on score is therefore not a fair contest, and it is
+     * also the wrong question: nothing has told the English bar which script the user writes,
+     * so its best Traditional reading is worth showing however it scores against the best
+     * Simplified one. The lists alternate, led by whichever head scores better.
+     *
+     * **The Traditional list has two sources**, pooled before the budget is applied:
+     *
+     *  - the Taiwan model's own decodings, which carry Taiwan-only words (師大, 蛋塔, 華爾滋);
+     *  - the mainland decodings converted to Taiwan Traditional by [Script], kept at their
+     *    mainland scores. For sentences these are often the better reading: the Taiwan model is
+     *    sparse enough that it decodes `wodeshoujimeidianle` as 我的收集美的安樂, while
+     *    converting 我的手机没电了 gives 我的手機沒電了. The conversion is phrase-aware and in
+     *    the Taiwan standard, so 软件 becomes 軟體 and not 軟件.
+     *
+     * Pooled and then put through [budget], rather than merged afterwards, so a converted
+     * *respelling* is held behind the literal readings exactly as it is in a single-script bar.
+     * Merging two finished lists on score skipped that rule: 當他 -- a conversion of the `dang ta`
+     * reading of `danta` -- outscored the native 蛋塔 and pushed it off the bar.
+     *
+     * A conversion that leaves the text unchanged (你好, 十大) is not added: that text is already
+     * in the Simplified pool, and it is not a second hypothesis.
+     */
+    private fun bothScripts(readings: List<Syllables.Reading>, limit: Int): List<Candidate> {
+        // A table per mode: [SpanTable] memoises [wordsFor], whose answer depends on the mode.
+        val mainland = inMode(ScriptMode.SIMPLIFIED) { decodeAll(readings, limit, SpanTable()) }
+        val taiwan = inMode(ScriptMode.TRADITIONAL) { decodeAll(readings, limit, SpanTable()) }
+        val simplified = budget(mainland).distinctBy { it.text }
+
+        // Best score per text across both sources. A text counts as a respelling if any fuzzy
+        // reading produced it, the same test [decodeAll] applies within one model.
+        val pooled = LinkedHashMap<String, Candidate>()
+        val fuzzy = HashSet<String>(taiwan.fuzzy)
+        fun pool(candidate: Candidate) {
+            val prior = pooled[candidate.text]
+            if (prior == null || candidate.score > prior.score) pooled[candidate.text] = candidate
+        }
+        taiwan.full.forEach(::pool)
+        // Only the head of the mainland pool is converted: [budget] keeps at most
+        // [FULL_DECODINGS] of it, so converting the whole beam of every reading would be work
+        // spent on candidates that cannot reach the bar.
+        for (candidate in mainland.full.take(CONVERTED_POOL)) {
+            val text = script.toTraditional(candidate.text)
+            if (text == candidate.text) continue
+            if (candidate.text in mainland.fuzzy) fuzzy.add(text)
+            pool(
+                Candidate(
+                    text,
+                    candidate.syllables,
+                    candidate.score,
+                    candidate.learned,
+                    candidate.consumed,
+                    candidate.ids,
+                ),
+            )
+        }
+        val traditional = budget(
+            Pool(pooled.values.sortedByDescending { it.score }, fuzzy),
+        ).distinctBy { it.text }
+
+        val (lead, follow) = when {
+            traditional.isEmpty() -> simplified to traditional
+            simplified.isEmpty() -> traditional to simplified
+            simplified.first().score >= traditional.first().score -> simplified to traditional
+            else -> traditional to simplified
+        }
+        val out = ArrayList<Candidate>(FULL_DECODINGS)
+        val seen = HashSet<String>()
+        var i = 0
+        var j = 0
+        var fromLead = true
+        while (out.size < FULL_DECODINGS && (i < lead.size || j < follow.size)) {
+            val next = when {
+                i >= lead.size -> follow[j++]
+                j >= follow.size -> lead[i++]
+                fromLead -> lead[i++]
+                else -> follow[j++]
+            }
+            // Only a candidate actually added hands the turn over, so a duplicate does not cost
+            // its script a slot.
+            if (seen.add(next.text)) {
+                out.add(next)
+                fromLead = !fromLead
+            }
+        }
+        return out
+    }
+
+    /**
+     * Runs [block] with [mode] temporarily set to [temporary].
+     *
+     * [mode] is read throughout the lattice code, so switching it is how one call decodes under
+     * a single corpus. Restored in `finally` so an exception cannot leave the decoder in the
+     * wrong mode for the next caller.
+     */
+    private inline fun <T> inMode(temporary: ScriptMode, block: () -> T): T {
+        val saved = mode
+        mode = temporary
+        try {
+            return block()
+        } finally {
+            mode = saved
+        }
+    }
+
+    /** Simplified-to-Taiwan conversion, for [bothScripts]. Built on first use from the asset. */
+    private val script: Script by lazy { Script(dict.conversionChars, dict.conversionPhrases) }
+
+    /**
+     * Phase 1 of [candidates] for a single-corpus mode: the best readings of the whole input,
+     * at most [FULL_DECODINGS] of them, with respellings held behind the literal readings.
+     */
+    private fun wholeInput(
+        readings: List<Syllables.Reading>,
+        limit: Int,
+        spans: SpanTable,
+    ): List<Candidate> = budget(decodeAll(readings, limit, spans))
+
+    /**
+     * Every whole-input decoding of every reading, best first, before any budget is applied.
+     *
+     * [fuzzy] names the texts a respelled reading produced; it travels with the list because
+     * which reading produced a candidate is not recoverable from the candidate itself.
+     */
+    private class Pool(val full: List<Candidate>, val fuzzy: Set<String>)
+
+    /** Decodes each reading in the current [mode] and pools the results. See [Pool]. */
+    private fun decodeAll(
+        readings: List<Syllables.Reading>,
+        limit: Int,
+        spans: SpanTable,
+    ): Pool {
+        // A fuzzy reading is charged here rather than in the segmenter so that it competes on
+        // the same scale as everything else.
         val full = ArrayList<Candidate>()
         // Tracked alongside, because which reading produced a candidate is not recoverable from
         // the candidate: the budget below spends exact and fuzzy decodings differently.
         val fromFuzzy = HashSet<String>()
-        // One table for every reading: they are segmentations of the same letters, so most of
-        // their spans are the same syllables at shifted positions. See [SpanTable].
-        val spans = SpanTable()
         for (reading in readings.take(MAX_READINGS)) {
             val penalty = reading.fuzzyCount * fuzzyPenalty
             for (candidate in decode(reading, limit, spans)) {
@@ -197,6 +396,16 @@ internal class Decoder(
             }
         }
         full.sortByDescending { it.score }
+        return Pool(full, fromFuzzy)
+    }
+
+    /**
+     * Picks the whole-input decodings worth showing out of [pool]: at most [FULL_DECODINGS],
+     * with respellings held behind the literal readings while those are any good.
+     */
+    private fun budget(pool: Pool): List<Candidate> {
+        val full = pool.full
+        val fromFuzzy = pool.fuzzy
         // Bounded, so the bar is not filled end to end with variations on one sentence.
         //
         // Sixteen readings each contributing a full beam is far more whole-input decodings than
@@ -263,54 +472,9 @@ internal class Decoder(
             val lead = exact.first().score
             val (good, weak) = exact.partition { it.score >= lead - LITERAL_GOOD }
             val rest = (weak + deferred).sortedByDescending { it.score }
-            (good + rest).take(FULL_DECODINGS).forEach(::offer)
-        } else {
-            full.take(FULL_DECODINGS).forEach(::offer)
+            return (good + rest).take(FULL_DECODINGS)
         }
-
-        // 2. Prefix words: every proper prefix of the best reading, longest first.
-        val primary = readings.first()
-        for (span in minOf(primary.size, MAX_WORD_SYLLABLES) downTo 1) {
-            if (span == primary.size) continue
-            val ids = primary.ids.copyOfRange(0, span)
-            for (word in spans.at(primary.ids, 0, span).words.take(PREFIX_WORDS)) {
-                // The learned bonus has to be applied here too, not only inside the Viterbi
-                // pass. A one-syllable correction -- the commonest kind, choosing between
-                // homophones of `ta` -- arrives as a prefix candidate, and scoring it without
-                // the bonus meant the keyboard recorded the choice and then ignored it.
-                val score = word.logProb +
-                    (if (word.learned) LEARNED_BONUS else 0f) -
-                    (if (word.backoff) backoffPenalty else 0f)
-                offer(Candidate(word.text, span, score, word.learned, primary.ends[span - 1], ids))
-            }
-        }
-
-        // 3. Single characters for the first syllable, as the guaranteed floor.
-        val firstId = primary.ids.firstOrNull()
-        if (firstId != null) {
-            for (entry in charactersFor(firstId).take(CHAR_FLOOR)) {
-                // Scored against whichever corpus this mode reads, so a Traditional-only
-                // character reaches the floor in [ScriptMode.BOTH] at its Taiwan probability
-                // rather than being dropped for having no mainland weight.
-                val logProb = mode.logProbOf(entry.cn, entry.tw) ?: continue
-                offer(Candidate(entry.text, 1, logProb, false, primary.ends[0], intArrayOf(firstId)))
-            }
-        }
-
-        // A learned choice goes to the front, whichever phase produced it.
-        //
-        // The phases are ordered by *kind* -- whole-input decodings, then prefixes, then the
-        // character floor -- which is right in general but silently outranks a correction: a
-        // one-syllable choice like 他 for `ta` is a prefix candidate and sat behind every full
-        // decoding regardless of its score. Learning is only worth anything if the next
-        // keystroke shows it, so it is hoisted here rather than left to phase order. Stable, so
-        // everything else keeps the ordering the phases gave it.
-        val learned = out.filter { it.learned }.sortedByDescending { it.score }
-        if (learned.isNotEmpty()) {
-            val rest = out.filterNot { it.learned }
-            return (learned + rest).take(limit)
-        }
-        return out.take(limit)
+        return full.take(FULL_DECODINGS)
     }
 
     /**
@@ -796,6 +960,15 @@ internal class Decoder(
          * was introduced to stop.
          */
         private const val FULL_DECODINGS = 6
+
+        /**
+         * How many of the mainland decodings, best first, [bothScripts] converts to Traditional.
+         *
+         * Four times [FULL_DECODINGS]: enough that the literal readings the budget would keep
+         * are all converted even when respellings and near-duplicates from other segmentations
+         * sit between them, without converting every path of every reading.
+         */
+        private const val CONVERTED_POOL = FULL_DECODINGS * 4
 
         /**
          * How far behind the best respelling the best literal reading may fall and still

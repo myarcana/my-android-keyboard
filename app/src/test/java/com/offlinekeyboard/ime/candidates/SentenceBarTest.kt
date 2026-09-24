@@ -110,6 +110,48 @@ class SentenceBarTest {
     }
 
     @Test
+    fun `a sentence is offered in traditional as well as simplified`() {
+        // The English bar has not been told which script the user writes, so a sentence must
+        // reach it in both. It used to be Simplified only: one Viterbi pass over both corpora let
+        // the larger mainland one win every slot as the sentence grew.
+        val cases = mapOf(
+            "nixiangchimianma" to ("你想吃面吗" to "你想吃麵嗎"),
+            "wohenxihuanni" to ("我很喜欢你" to "我很喜歡你"),
+            "wodeshoujimeidianle" to ("我的手机没电了" to "我的手機沒電了"),
+            "tadebabahentaoyanwo" to ("他的爸爸很讨厌我" to "他的爸爸很討厭我"),
+        )
+        for ((q, pair) in cases) {
+            val (simplified, traditional) = pair
+            val whole = chinese(q).filter { it.consumes == q.length }.map { it.text }
+            assertTrue("$simplified missing for `$q`: $whole", simplified in whole.take(2))
+            assertTrue("$traditional missing for `$q`: $whole", traditional in whole.take(2))
+        }
+        val kema = chinese("wojinwankeyishangkema").map { it.text }.take(3)
+        assertTrue("no Traditional sentence for `wojinwankeyishangkema`: $kema",
+            kema.any { it.startsWith("我今晚可以上課") })
+        assertTrue("no Simplified sentence for `wojinwankeyishangkema`: $kema",
+            "我今晚可以上课吗" in kema)
+    }
+
+    @Test
+    fun `a sentence does not switch script halfway`() {
+        // 上课麼 and 上課吗 are what the mixed-corpus pass produced: each character picked from
+        // whichever corpus liked it better, so no writer of either script would type them.
+        val mixed = setOf("我今晚可以上课麼", "我今晚可以上課吗", "你想吃面麼", "你想吃麵吗")
+        for (q in listOf("wojinwankeyishangkema", "nixiangchimianma")) {
+            val shown = chinese(q).map { it.text }
+            assertTrue("mixed-script sentence for `$q`: $shown", shown.none { it in mixed })
+        }
+    }
+
+    @Test
+    fun `traditional sentences use taiwan words`() {
+        // Converted in the Taiwan standard, not character by character: 軟體, not 軟件.
+        val bar = chinese("ruanjian").map { it.text }
+        assertTrue("軟體 missing: $bar", "軟體" in bar.take(2))
+    }
+
+    @Test
     fun `pinyin with no emoji is all chinese`() {
         val bar = englishBar("niuroumian")
         assertEquals("牛肉面", bar.first().text)

@@ -177,10 +177,11 @@ internal class PinyinSession(private val context: Context) {
         val seen = HashSet<String>(limit * 2)
         val out = ArrayList<UnifiedCandidates.Scored>(limit)
         for (candidate in engine.candidates(letters, limit)) {
-            // No conversion here, deliberately. In [ScriptMode.BOTH] every candidate already is
-            // the script its corpus wrote it in -- 麵條 came from the Taiwan model and 面条 from
-            // the mainland one -- so converting would rewrite the Simplified half into
-            // Traditional and collapse the two hypotheses the bar exists to show.
+            // No conversion here, deliberately. In [ScriptMode.BOTH] the decoder already returns
+            // each reading in both scripts -- 面条 from the mainland model, 麵條 from the Taiwan
+            // one or converted from the mainland sentence (see [Decoder.candidates]) -- so
+            // converting here would rewrite the Simplified half into Traditional and collapse
+            // the two hypotheses the bar exists to show.
             val display = candidate.text
             if (!seen.add(display)) continue
             out.add(

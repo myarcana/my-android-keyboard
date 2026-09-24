@@ -32,6 +32,11 @@ internal enum class ScriptMode {
      * The English bar's mode. A word present in only one corpus competes on that corpus's terms
      * rather than being dropped, so `shida` can offer 師大 (Taiwan) beside 十大 (mainland) and
      * `miantiao` can offer both 麵條 and 面条.
+     *
+     * Whole-input sentences are the exception: the decoder does not run one lattice over both
+     * corpora for those, because a path could then switch script mid-sentence and the larger
+     * mainland corpus won every slot. It decodes each script separately and interleaves them;
+     * see `Decoder.bothScripts`. Prefix words and the character floor still use this mode.
      */
     BOTH,
     ;
