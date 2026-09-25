@@ -5,12 +5,16 @@
 #   tools/demo/demo.sh boot                 start the emulator and leave it running
 #   tools/demo/demo.sh make glide           record and render one scenario
 #   tools/demo/demo.sh record glide         record only, leaving the raw capture and the log
-#   tools/demo/demo.sh render glide         render again from what was already recorded
+#   tools/demo/demo.sh render glide [opts]  render again from the take (see render.py for opts)
+#   tools/demo/demo.sh styles glide [opts]  render the take once in every finger style
+#   tools/demo/demo.sh pack glide           rebuild the take from a recording's loose files
 #   tools/demo/demo.sh install              rebuild and reinstall all four APKs
 #   tools/demo/demo.sh shutdown             stop the emulator
 #
-# Output lands in build/demo/<scenario>/: raw.mp4 straight off the device, and <scenario>.mp4
-# with the finger circles, the device frame and the captions on it.
+# Output lands in build/demo/<scenario>/. The one that matters is <scenario>.take.mkv: the raw
+# recording and every touch in it, already lined up, in one file (see take.py). Everything else
+# is rendered from it -- <scenario>.mp4 with the default fingers, <scenario>.<style>.mp4 for the
+# others -- so a take can be redrawn in a new finger style without going near the emulator.
 #
 # The pipeline, and why it has the shape it has:
 #
@@ -20,7 +24,8 @@
 #   2. plan.py turns the scenario into pointer samples with millisecond timings.
 #   3. screenrecord starts.
 #   4. DemoPlayer (instrumentation on the test pad) injects the samples.
-#   5. render.py finds the sync tap in the video, and draws.
+#   5. take.py lines the touch log up against the video and packs both into one take.
+#   6. render.py draws a finger style over the take, frames it and captions it.
 #
 # The emulator is a Pixel 6 (1080x2400, 420 dpi) called demo_pixel. `setup` creates it if it is
 # missing; see the skill in .claude/skills/demo-video/ for what it costs on disk.
@@ -284,16 +289,47 @@ record() {
 
     adb pull /sdcard/demo-raw.mp4 $take/raw.mp4 >/dev/null
     pull_from $DRIVER touches.jsonl $take/touches.jsonl
-    echo "-- recorded $take/raw.mp4"
+    pack $name
+}
+
+# The recording and its touch log, lined up and packed into the one file everything else is
+# rendered from.
+pack() {
+    local name=$1
+    local take=$OUT/$name
+    [[ -f $take/raw.mp4 ]] || { echo "nothing recorded for $name -- run: $0 record $name"; exit 1 }
+    echo "-- packing the take"
+    python $HERE/take.py pack $take $take/$name.take.mkv
+    echo "-- recorded $take/$name.take.mkv"
+}
+
+# The file a style's render goes to: the default keeps the plain name.
+rendered() {
+    local name=$1 style=$2
+    [[ $style == circles ]] && echo $OUT/$name/$name.mp4 || echo $OUT/$name/$name.$style.mp4
 }
 
 render() {
     local name=$1
-    local take=$OUT/$name
-    [[ -f $take/raw.mp4 ]] || { echo "nothing recorded for $name -- run: $0 record $name"; exit 1 }
-    python $HERE/render.py $take/raw.mp4 $take/touches.jsonl $take/plan.json \
-        $take/geometry.json $take/$name.mp4 "${@:2}"
-    echo "-- wrote $take/$name.mp4"
+    local take=$OUT/$name/$name.take.mkv
+    # A recording from before takes existed still has its loose files; pack it on first use.
+    [[ -f $take ]] || pack $name
+    local style=circles i
+    local -a opts=("${@:2}")
+    for (( i = 1; i < ${#opts}; i++ )); do
+        [[ ${opts[i]} == --fingers ]] && style=${opts[i+1]}
+    done
+    local out=$(rendered $name $style)
+    python $HERE/render.py $take $out "${opts[@]}"
+    echo "-- wrote $out"
+}
+
+styles() {
+    local name=$1 style
+    for style in $(cd $HERE/fingers && ls *.py | grep -v -e '^_' -e '^paint.py$' | sed 's/\.py$//'); do
+        echo "-- $style"
+        render $name "${@:2}" --fingers $style
+    done
 }
 
 ## ---------------------------------------------------------------- entry
@@ -313,7 +349,9 @@ case ${1:-list} in
     build) build ;;
     install) boot >/dev/null; install ;;
     record) record ${2:?which scenario} ;;
+    pack) pack ${2:?which scenario} ;;
     render) render ${2:?which scenario} "${@:3}" ;;
+    styles) styles ${2:?which scenario} "${@:3}" ;;
     make) record ${2:?which scenario}; render ${2} "${@:3}" ;;
-    *) sed -n '2,30p' $0 ;;
+    *) sed -n '2,/^set -e/p' $0 | grep '^#' ;;
 esac

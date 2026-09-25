@@ -13,14 +13,31 @@ keyboard's own pixels.
 tools/demo/demo.sh list              # the scenarios that exist
 tools/demo/demo.sh make glide        # record and render -> build/demo/glide/glide.mp4
 tools/demo/demo.sh record glide      # record only
-tools/demo/demo.sh render glide      # render again from what was recorded (cheap to iterate)
+tools/demo/demo.sh render glide      # render again from the take (cheap to iterate)
+tools/demo/demo.sh render glide --fingers dot   # same take, different fingers
+tools/demo/demo.sh styles glide      # the take once in every finger style
 tools/demo/demo.sh install           # rebuild and reinstall the four APKs
 tools/demo/demo.sh shutdown          # stop the emulator
 ```
 
 A take costs about a minute; rendering about as long again. Everything lands in
-`build/demo/<scenario>/`, which is git-ignored: `raw.mp4` off the device, `touches.jsonl`,
-`plan.json`, and the finished `<scenario>.mp4`.
+`build/demo/<scenario>/`, which is git-ignored. The file that matters is
+**`<scenario>.take.mkv`**: the recording exactly as it came off the device plus a `take.json`
+attachment holding every touch in the video's own clock, the key geometry and the captions.
+Every render is made from it -- `<scenario>.mp4` in the default `circles`, `<scenario>.<style>.mp4`
+for the rest -- so trying a new finger look never means re-recording. The loose files beside it
+(`raw.mp4`, `touches.jsonl`, `plan.json`) are what it was packed from; `demo.sh pack` rebuilds it.
+
+`tools/demo/take.py show|json <take>` prints what a take holds; `json` is also the way out to
+an editor (After Effects, Motion, a web player) that wants to draw its own fingers. Takes are
+Matroska for its attachments, so QuickTime will not open one; IINA, VLC and ffmpeg will.
+
+## Finger styles
+
+A style is one file in `tools/demo/fingers/` with a `draw(frame, gestures, t, ctx)` function;
+the contract is in `fingers/__init__.py`. `circles` is the shipped look, `dot` a precise
+pointer-trace, and `none` the clean screen for compositing a finger layer elsewhere. Size things
+in `ctx.unit` (a key width), not pixels, and a style works at any zoom and on any screen.
 
 ## Writing a scenario
 
@@ -52,7 +69,7 @@ A take costs about a minute; rendering about as long again. Everything lands in
 
 Render options: `--style bare` drops the device frame, `--zoom keyboard` crops to the keyboard
 and the line being typed, `--width 1080` scales the output, `--no-captions` leaves the text off,
-`--offset-ms N` nudges the circles later or earlier.
+`--offset-ms N` draws the fingers N ms later (negative: earlier), `--fingers <style>` picks the look.
 
 ## How it fits together
 
@@ -62,8 +79,10 @@ and the line being typed, `--width 1080` scales the output, `--no-captions` leav
    curved glide paths, speed dips at the letters, scattered taps, varied rhythm.
 3. **`tools/demo/demo.sh`** raises the keyboard, starts `screenrecord`, and runs
 4. **`DemoPlayer`** (instrumentation in `demodriver`) which injects the samples and logs them.
-5. **`tools/demo/render.py`** lines the log up against the video and draws the circles, trails,
-   ripples, device frame and captions.
+5. **`tools/demo/take.py`** lines the log up against the video, once, and packs both into the
+   take.
+6. **`tools/demo/render.py`** hands each frame of the take to a finger style, then adds the device
+   frame and captions.
 
 ## What this cost to get right, so it is not rediscovered
 
@@ -81,7 +100,7 @@ and the line being typed, `--width 1080` scales the output, `--no-captions` leav
   `onCreate`, on `am start ... --ei demoField <n>`; a tap raises a keyboard only when it *changes*
   which view has focus, and a warm relaunch is dropped silently.
 - **The video and the touch log are lined up by correlation**, not by clock arithmetic across
-  adb, which was out by more than 100 ms. `render.py` matches the whole gesture sequence against
+  adb, which was out by more than 100 ms. `take.py` matches the whole gesture sequence against
   how much the keyboard changes frame to frame.
 - **A glide must leave its first key inside ~100 ms** or the keyboard reads a long press: an
   earlier easing curve turned a glide for "sunset" into the accent popup over the s.
