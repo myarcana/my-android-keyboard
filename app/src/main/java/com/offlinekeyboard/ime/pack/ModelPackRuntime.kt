@@ -2,7 +2,6 @@ package com.offlinekeyboard.ime.pack
 
 import android.content.Context
 import android.util.Log
-import java.io.File
 
 /**
  * The Context-free half of [ModelPack].
@@ -21,9 +20,9 @@ import java.io.File
  *     error.
  *
  * Nothing here needs a Context to decide *whether* the pack exists in the ordinary case: the app
- * always calls [install] first, which resolves the pack once. The `File.isFile` check is what
- * makes a stale or half-installed pack degrade to the local copy instead of crashing on a missing
- * `.so`, which is exactly the failure mode a split payload invites.
+ * always calls [install] first, which resolves the pack once. [ModelPack.loadFromPack] returning
+ * false is what makes a stale or half-installed pack degrade to the local copy instead of crashing
+ * on a missing `.so`, which is exactly the failure mode a split payload invites.
  */
 object ModelPackRuntime {
 
@@ -45,21 +44,13 @@ object ModelPackRuntime {
      * Loads [name] from the model pack when it is there, from this APK otherwise.
      *
      * `System.loadLibrary` only searches the *calling* class's own package directory, so a library
-     * in the pack has to be loaded by absolute path. The pack's directory comes from the package
+     * in the pack has to be loaded by absolute path. The pack's location comes from the package
      * manager, not from a path we invent, so this is not a way to load arbitrary code.
      */
     @JvmStatic
     fun loadOptional(name: String) {
         val context = appContext
-        val dir = context?.let { ModelPack.nativeLibraryDir(it) }
-        if (dir != null) {
-            val file = File(dir, "lib$name.so")
-            if (file.isFile) {
-                System.load(file.absolutePath)
-                return
-            }
-            Log.w(TAG, "model pack has no lib$name.so; falling back to this APK")
-        }
+        if (context != null && ModelPack.loadFromPack(context, name)) return
         System.loadLibrary(name)
     }
 }

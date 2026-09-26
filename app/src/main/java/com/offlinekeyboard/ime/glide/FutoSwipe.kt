@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.offlinekeyboard.ime.gesture.PathPoint
 import com.offlinekeyboard.ime.layout.LayoutGeometry
+import com.offlinekeyboard.ime.pack.ModelPack
 import org.futo.ml.inference.SwipeDecoder
 import java.io.File
 
@@ -180,20 +181,22 @@ class FutoSwipe private constructor(
          */
         private fun stage(context: Context, home: File, name: String): File? {
             val target = File(home, name)
-            val names = runCatching { context.assets.list("$ASSET_DIR/$name") }.getOrNull()
+            // The models ship in the model pack in a `-Ppack` build, not in this APK.
+            val assets = ModelPack.payloadAssets(context)
+            val names = runCatching { assets.list("$ASSET_DIR/$name") }.getOrNull()
             if (names.isNullOrEmpty()) return null
             target.mkdirs()
             names.forEach { file ->
                 val asset = "$ASSET_DIR/$name/$file"
                 val out = File(target, file)
                 val expected = runCatching {
-                    context.assets.openFd(asset).use { it.length }
+                    assets.openFd(asset).use { it.length }
                 }.getOrNull()
                 val current = if (out.isFile) out.length() else -1L
                 val staged = if (expected != null) current == expected else current > 0
                 if (staged) return@forEach
                 runCatching {
-                    context.assets.open(asset).use { input ->
+                    assets.open(asset).use { input ->
                         out.outputStream().use(input::copyTo)
                     }
                     Log.i(TAG, "staged $name/$file (${out.length()} bytes)")

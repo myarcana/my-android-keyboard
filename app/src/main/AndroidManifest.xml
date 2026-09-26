@@ -15,6 +15,17 @@
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
+    <!--
+      The model pack (com.offlinekeyboard.ime.pack.ModelPack) carries the dictation and glide
+      models and native libraries in a "pack" build. Since Android 11 another package is
+      invisible unless declared here: without this, createPackageContext and getPackageInfo both
+      report the pack as not installed, and the keyboard comes up with a microphone key that does
+      nothing and glides that type nothing. A query grants visibility only, not a permission.
+    -->
+    <queries>
+        <package android:name="com.offlinekeyboard.ime.models" />
+    </queries>
+
     <application
         android:name=".KeyboardApplication"
         android:allowBackup="false"

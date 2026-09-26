@@ -17,6 +17,7 @@ import com.k2fsa.sherpa.onnx.SileroVadModelConfig
 import com.k2fsa.sherpa.onnx.Vad
 import com.k2fsa.sherpa.onnx.VadModelConfig
 import com.offlinekeyboard.ime.glide.LEXICON_ASSET
+import com.offlinekeyboard.ime.pack.ModelPack
 import kotlin.concurrent.thread
 
 private const val TAG = "Dictation"
@@ -198,7 +199,7 @@ class Dictation(private val context: Context) {
             // for it there would stall dictation mid-sentence. 5 MB against the 239 MB above.
             spotting = KeywordSpotting(assets).takeIf { it.load() }
             vad = Vad(
-                assetManager = assets,
+                assetManager = ModelPack.payloadAssets(context),
                 config = VadModelConfig(
                     sileroVadModelConfig = SileroVadModelConfig(
                         model = "asr/silero_vad.onnx",
@@ -228,7 +229,8 @@ class Dictation(private val context: Context) {
      * pin it. The native layer accepts `auto, zh, en, ja, ko, yue`, and treats "" as `auto`.
      */
     private fun buildRecognizer(language: String) = OfflineRecognizer(
-        assetManager = context.assets,
+        // The model pack's assets in a `-Ppack` build: SenseVoice is not in this APK at all.
+        assetManager = ModelPack.payloadAssets(context),
         config = OfflineRecognizerConfig(
             modelConfig = OfflineModelConfig(
                 senseVoice = OfflineSenseVoiceModelConfig(
