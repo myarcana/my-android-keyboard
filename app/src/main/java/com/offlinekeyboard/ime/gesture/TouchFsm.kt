@@ -67,8 +67,22 @@ data class GestureConfig(
      * downward, and [verticalDominance] times more vertical than horizontal. A resting thumb
      * does not drift three pixels straight down. An isotropic threshold here would be reckless;
      * this one is fenced on two other axes, and only the third had to be generous.
+     *
+     * **That last claim turned out to be false, and 0.025 went with it.** A resting thumb does
+     * not drift, but a *lifting* one does: it rolls off the glass, and the roll is straight down.
+     * The 94 still taps were slow drill taps. Once the bank held a thousand prose taps, three of
+     * them had typed a digit in the middle of a word -- `t` gave 5 after 13.5px, `r` gave 4 after
+     * 5.5px, `y` gave 6 after 3.8px. All three happened in the last ~10ms before the lift, and all
+     * were vertical to 5x or better, so the dominance fence never had a chance to object. A fast
+     * tap looks like a very short flick, and only distance can tell the two apart.
+     *
+     * So the gap between the classes is not empty. It runs from the largest tap roll at the lift
+     * (11.3px; the peak before it was 13.5px) to the shortest flick ever recorded (15.1px on `o`),
+     * or 0.094 to 0.126 of a key height. 0.11 -- 13.2px -- sits in the middle of it. Replaying
+     * every labelled gesture in the bank, it types none of the prose taps as symbols and loses no
+     * flick that 0.025 caught.
      */
-    val flickDistanceRatio: Float = 0.025f,
+    val flickDistanceRatio: Float = 0.11f,
     /**
      * How far the finger drags the key's symbol, as a fraction of key height.
      *
@@ -79,9 +93,9 @@ data class GestureConfig(
      * between an animation and a manoeuvre, and the number is therefore the view's glyph geometry
      * (0.74 - 0.28 of key height) rather than anything measured off a hand.
      *
-     * Deliberately not [flickDistanceRatio], and now a long way from it. A flick commits after
-     * three pixels, where the symbol is barely 5% of the way home, so the point of no return
-     * sits very near the top of a pull that runs on for another fifty. The letter therefore goes
+     * Deliberately not [flickDistanceRatio], and a long way from it. A flick commits after
+     * about thirteen pixels, where the symbol is under a quarter of the way home, so the point of
+     * no return sits near the top of a pull that runs on for another forty. The letter therefore goes
      * out almost as soon as the thumb does, and the symbol keeps sliding under it afterwards.
      * That is honest rather than hasty -- the commit really did happen that early -- and coming
      * back up above it still puts the letter back and gives the letter.
@@ -132,9 +146,9 @@ data class GestureConfig(
      * Downward travel a flick needs when it leans past [verticalDominance] into the widened cone,
      * as a fraction of key height.
      *
-     * Larger than [flickDistanceRatio]'s 3 pixels because that number is safe only inside a
-     * 13-degree fence: a resting thumb does not drift three pixels straight down. A thumb rolling
-     * off a tap does drift three pixels at 30 degrees. The bank has one: a tap on `h` that
+     * Larger than [flickDistanceRatio] because that number is safe only inside a 13-degree
+     * fence, and even there it had to rise once taps were seen rolling straight down at the lift.
+     * A thumb rolling off a tap at 30 degrees drifts further still. The bank has one: a tap on `h` that
      * moved 14px down and 4px across. 0.15 of a key clears it and every other recorded tap, and
      * is still below the shortest recorded flick (0.23 key heights on `m`).
      */
@@ -176,8 +190,8 @@ data class GestureConfig(
      * fraction of key height.
      *
      * Deliberately far stricter than [flickDistanceRatio] -- three quarters of a key against
-     * three pixels -- and the asymmetry is the whole design. Downward has nothing to compete
-     * with: below the letters is the bottom of the board, so three pixels of deliberate downward
+     * a ninth -- and the asymmetry is the whole design. Downward has nothing to compete
+     * with: below the letters is the bottom of the board, so a short deliberate downward
      * movement can only mean the secondary. Upward is where *words* go. Every glide that starts
      * on the bottom row leaves its first key heading up, so an upward gesture read as generously
      * as the downward one would fire copy in the middle of gliding "cat".
@@ -220,7 +234,7 @@ data class GestureConfig(
     /**
      * Downward travel on the space bar that closes the keyboard, as a fraction of key height.
      *
-     * Far larger than [flickDistanceRatio] -- three quarters of a key against three pixels --
+     * Far larger than [flickDistanceRatio] -- three quarters of a key against a ninth --
      * and the reason is that the space bar is the one key with nothing below it. A flick down
      * from any letter has the rest of the keyboard to travel through; a flick down from space
      * leaves the board almost immediately, so the gesture is made mostly of the part where the

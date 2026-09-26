@@ -729,8 +729,8 @@ class KeyboardView @JvmOverloads constructor(
      * commit point can then be felt without being explained, and the two cannot drift apart
      * because both come from the same pair of ratios.
      *
-     * Since the flick threshold came down to three pixels this is very early -- around 5% of the
-     * pull -- so the letter goes almost the moment the thumb does. That is the intended reading
+     * With the flick threshold at 0.11 of a key height this is early -- around a quarter of the
+     * pull -- so the letter goes soon after the thumb does. That is the intended reading
      * rather than a regression: the commit point moved, and this fade is only ever a report of
      * where it is. Decoupling them to keep a more leisurely fade would buy a prettier animation
      * by lying about what releasing would type.
