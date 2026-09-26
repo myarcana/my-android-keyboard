@@ -867,6 +867,49 @@ active model is zero, or both dictionaries would show up in both languages. And 
 the *stronger* of an entry's two weights, never their sum or average — averaging would have
 dropped 蚵仔煎 for being unknown in China, which is the exact failure the work existed to fix.
 
+### Place names were a missing word list, not a ranking bug
+
+`zhongxiaoxinsheng` did not produce 忠孝新生, the Taipei Metro station. Nothing was wrong with
+the decoder: none of rime-ice, McBopomofo or CC-CEDICT has the word, so the only path to it was
+忠孝 + 新生, and that path loses on both terms the decoder scores. 中小 is 5x commoner than 忠孝
+in the Taiwan corpus, and the character bigram favours 小新 (+3.7 nats) while 孝新 -- a pair no
+ordinary text contains -- gets nothing. It came fourth in Taiwan mode and not at all in
+Simplified. The same held for 忠孝敦化, 南京復興, 中山國中 and most of Taipei's 里 and streets.
+Retuning `BACKOFF` or the bigram weight to rescue it would have moved every ranking to fix one
+gap in the vocabulary.
+
+So the vocabulary was fixed instead. `tools/build_taipei_places.py` writes
+`tools/places/taipei.tsv` from government open data -- every Metro station, district, 里,
+registered road and named landmark in the city, 2,562 names -- and `build_pinyin_dict.py` merges
+it into the Taiwan model. Three things about it were learned by getting them wrong first:
+
+- **The reading has to be evidenced, never guessed.** A name entered under the wrong reading is
+  unreachable by anyone who spells it right, and the commonest reading of a character is often
+  the wrong one in a name: 重慶 is `chong qing`. The Ministry of the Interior's 地名譯寫 dataset
+  and Chunghwa Post's tables give an official Hanyu romanisation for most names, and those
+  decide; phrases and a ≥90% dominant reading settle the rest, and five names nothing settles
+  are dropped. The romanisation is also the one place a reading McBopomofo lacks may enter:
+  it has 墘 only as `qi`, while every official spelling of 港墘 says `Gangqian`, so 港墘 is
+  entered under both.
+- **The weight is the name's own frequency, counted.** Each name is counted in 2.4G characters
+  of Taiwan text (PTT and the Traditional Common Crawl, Hong Kong hosts excluded) the same way
+  McBopomofo counted phrase.occ -- every occurrence of the string -- and rescaled onto
+  phrase.occ by the median ratio over the 16k words both corpora counted well. 忠孝新生 then
+  sits where its 512 sightings put it beside 忠孝 and 中小, and 蘭雅 (320 sightings) stays under
+  藍芽 without any rule saying so. An earlier version gave each name the median count of its
+  *kind* and then had to cap it under the leading word on each key, because 31 keys changed
+  hands (蘭雅 over 藍芽, 萬興 over 萬幸); real counts made both the estimate and the cap
+  unnecessary. Eight keys now lead with a place name because the name really is commoner in
+  Taiwan text -- 萬芳 over 萬方, 新安 over 心安, 府中 over 浮腫.
+- **Place names are exempt from the size caps.** 439 names never occur in the corpus (mostly 里)
+  and sit at the one-occurrence floor, which is below the global cap's cut line; 西門站 and
+  衡陽路 had been in McBopomofo all along and were dropped that way. The caps are about asset
+  size, not ranking, and the weight already ranks them last.
+
+The cost was 2,174 entries at the global cap's floor weight (玻璃匠, 不得睡 -- ext.dict's
+unweighted tail, all at exactly 100), which fall off the end of the cut line in their place.
+No weighted word was evicted and the asset stayed 12.1 MB.
+
 ### One suggestion bar, one probability scale
 
 The strip used to be two strips wearing the same paint: emoji in English, Chinese in the CJK
@@ -1235,6 +1278,9 @@ OpenCC (the conversion backstop). **The rime-ice data is GPL-3.0 and that licenc
 if it is ever distributed** -- chosen knowingly, because the permissive alternative (CC-CEDICT)
 ships no frequencies and ranking is most of what makes candidates feel right. McBopomofo's data
 is MIT and adds no further obligation. See the README for how to undo the GPL choice.
+
+Sources now include `tools/places/taipei.tsv` (Taiwan government open data, attribution-only),
+2,564 Taipei place-name entries; see "Place names were a missing word list" above.
 
 It grew from 8.4 MB when the Taiwan model was added: 166k of its entries are Traditional words
 that no conversion of the Simplified data could have produced, and every entry now carries a

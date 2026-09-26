@@ -26,7 +26,7 @@ from dump_pinyin_dict import Reader  # noqa: E402
 # only means something against its own corpus: the mainland column is 2.5x the Taiwan one, so
 # dividing both by one number is a thumb on the scale worth ~0.9 nats.
 CN_TOTAL = 5.629e9
-TW_TOTAL = 2.280e9
+TW_TOTAL = 2.281e9
 BACKOFF = 6.0
 FUZZY_PENALTY = 2.3
 EMOJI_TOKEN_SHARE = 1 / 300.0

@@ -395,6 +395,50 @@ class PinyinTest {
         assertTrue(Syllables.isPinyinText("nihao"))
     }
 
+    // --- Taipei place names ------------------------------------------------------------------
+
+    @Test
+    fun `a taipei mrt station typed whole is the first candidate`() {
+        // No upstream dictionary has 忠孝新生, so it could only be assembled from 忠孝 + 新生,
+        // and that lost to 中小新生 twice over: 中小 is 5x commoner, and 孝新 is a pair no
+        // ordinary text contains, so context scored against it too. It came fourth in Taiwan
+        // mode and not at all in Simplified. tools/places/taipei.tsv is what fixed it.
+        assertEquals("忠孝新生", twTop("zhongxiaoxinsheng").first())
+        for ((input, station) in listOf(
+            "zhongxiaofuxing" to "忠孝復興",
+            "zhongxiaodunhua" to "忠孝敦化",
+            "nanjingfuxing" to "南京復興",
+            "zhongshanguozhong" to "中山國中",
+            "songjiangnanjing" to "松江南京",
+            "xinyianhe" to "信義安和",
+            "taibeichezhan" to "台北車站",
+            "dingpu" to "頂埔",
+        )) {
+            assertEquals(input, station, twTop(input).first())
+        }
+    }
+
+    @Test
+    fun `a taipei street takes the taiwan reading of its characters`() {
+        // 重 is `zhong` far more often than `chong`, and a name entered under the commoner
+        // reading would be unreachable by anyone who spells 重慶 correctly.
+        assertEquals("重慶南路", twTop("chongqingnanlu").first())
+        // 港墘 is read `gang qian` by every official romanisation and the Metro's announcement,
+        // though McBopomofo lists 墘 only as `qi`; both spellings must reach it.
+        assertEquals("港墘", twTop("gangqian").first())
+        assertEquals("港墘", twTop("gangqi").first())
+    }
+
+    @Test
+    fun `a place name ranks by how often it is written, not ahead of commoner words`() {
+        // Place names carry their counted frequency in Taiwan text, so a neighbourhood nobody
+        // writes much stays under the everyday word on the same keys: 藍芽 (Bluetooth) is far
+        // commoner than 蘭雅, 萬幸 than 萬興. They are still offered, just not first.
+        assertEquals("藍芽", twTop("lanya").first())
+        assertEquals("萬幸", twTop("wanxing").first())
+        assertTrue("蘭雅 missing", twTop("lanya", 6).contains("蘭雅"))
+    }
+
     @Test
     fun `the dictionary actually loaded`() {
         assertNotNull(dict)

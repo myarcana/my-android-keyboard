@@ -157,6 +157,11 @@ decoding the whole input at once, rather than from C++:
   `ruan ti` and `wang lu`, so no amount of rewriting the *output* of a `ruan jian` lookup
   reaches them. Typing `niuroumian` gives 牛肉麵 first in Taiwan mode and 牛肉面 first in
   mainland mode, because both are real entries under one key with their own corpus weights.
+- **Taipei place names**, which no upstream dictionary carries: every Metro station, district,
+  里, registered street and named landmark in the city — 2,562 names from government open data,
+  each read the way an official romanisation of it spells and weighted by how often it is
+  actually written in Taiwan text. `zhongxiaoxinsheng` gives 忠孝新生 first, where before it
+  came fourth behind 中小新生.
 - **A user dictionary**, so a correction sticks. It never leaves the device.
 
 **Zhuyin is deliberately absent.** It needs its own 37-symbol key layout, which is a keyboard
@@ -190,9 +195,16 @@ wins there.
 `app/src/main/assets/pinyin.bin` is built from [rime-ice](https://github.com/iDvel/rime-ice)
 (GPL-3.0 only), [McBopomofo](https://github.com/openvanilla/McBopomofo)'s dictionary data (MIT)
 for the Taiwan model, plus [OpenCC](https://github.com/BYVoid/OpenCC)'s conversion tables
-(Apache-2.0). rime-ice was chosen over permissively-licensed alternatives because it ships real
-usage weights and CC-CEDICT does not — and ranking is most of what makes candidates feel right.
-Only rime-ice carries a copyleft obligation; the other two add none.
+(Apache-2.0), plus the Taipei place names in `tools/places/taipei.tsv`, generated from the
+Ministry of the Interior, Taipei City and Chunghwa Post open datasets under the
+[Open Government Data License, version 1.0](https://data.gov.tw/license) (attribution only; the
+datasets are listed at the top of `tools/build_taipei_places.py`). Their weights are counts
+from [PTT-pretrain-zhtw](https://huggingface.co/datasets/yuhuanstudio/PTT-pretrain-zhtw)
+(Apache-2.0) and [Traditional Chinese Common Crawl](https://huggingface.co/datasets/jed351/Traditional-Chinese-Common-Crawl-Filtered);
+only the counts ship, not the text. rime-ice was chosen over
+permissively-licensed alternatives because it ships real usage weights and CC-CEDICT does not —
+and ranking is most of what makes candidates feel right. Only rime-ice carries a copyleft
+obligation; the others add none.
 
 The consequence is real: **GPL-3.0 would apply to this app if it were ever distributed.** That
 is an acceptable trade for a personal keyboard and is not one for an app store. To change it,

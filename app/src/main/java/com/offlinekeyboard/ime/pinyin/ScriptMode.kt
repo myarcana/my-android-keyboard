@@ -124,6 +124,6 @@ internal enum class ScriptMode {
          * Regenerate with `tools/corpus_totals.py` if the dictionary is rebuilt.
          */
         const val CN_TOTAL = 5.629e9f
-        const val TW_TOTAL = 2.280e9f
+        const val TW_TOTAL = 2.281e9f
     }
 }
