@@ -6,6 +6,7 @@ import com.offlinekeyboard.ime.layout.KeyRect
 import com.offlinekeyboard.ime.layout.KeyType
 import com.offlinekeyboard.ime.layout.LayoutGeometry
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -411,6 +412,35 @@ class TouchFsmTest {
         f.onDown(space.centerX, space.centerY, 0)
         f.onLongPressTimeout(config.longPressMs)
         return f to space
+    }
+
+    /**
+     * The slide made while waiting for the hold is part of the drag. Anchoring the trackpad
+     * where the finger happened to be when the timer fired discarded it, which is what made the
+     * first few pixels of every drag move nothing.
+     */
+    @Test
+    fun `travel before the hold takes is handed to the trackpad`() {
+        val space = key("space")
+        val f = fsm()
+        f.onDown(space.centerX, space.centerY, 0)
+        f.onMove(space.centerX + 12f, space.centerY - 4f, config.longPressMs - 1)
+        val out = f.onLongPressTimeout(config.longPressMs)
+        assertTrue(out.has<GestureOutput.TrackpadStarted>())
+        val pan = out.only<GestureOutput.TrackpadPan>()
+        assertEquals(12f * config.trackpadGainX, pan.dx, 0.01f)
+        assertEquals(-4f * config.trackpadGainY, pan.dy, 0.01f)
+        // And not counted twice: the next move is measured from where the hold took.
+        val next = f.onMove(space.centerX + 20f, space.centerY - 4f, config.longPressMs + 200)
+            .only<GestureOutput.TrackpadPan>()
+        assertEquals(8f * config.trackpadGainX, next.dx, 0.01f)
+    }
+
+    @Test
+    fun `a still hold on space starts the trackpad without a pan`() {
+        val (f, space) = trackpadFsm()
+        assertEquals(GestureState.TRACKPAD, f.state)
+        assertFalse(f.onMove(space.centerX, space.centerY, 600).has<GestureOutput.TrackpadPan>())
     }
 
     @Test

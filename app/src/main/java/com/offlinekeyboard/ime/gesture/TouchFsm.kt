@@ -825,9 +825,27 @@ class TouchFsm(
         return when {
             key.key.type == KeyType.SPACE -> {
                 state = GestureState.TRACKPAD
-                trackpadAnchor = path.last()
+                val here = path.last()
+                trackpadAnchor = here
                 trackpadSpeed = 0f
-                listOf(GestureOutput.TrackpadStarted)
+                // Travel made while waiting for the hold counts. Sliding before the timeout is
+                // the normal way in, and anchoring at the current point threw that slide away:
+                // the first few pixels of every drag moved nothing. Handed over at base gain --
+                // it was a creep, and it must not arrive as an accelerated jump.
+                val start = down ?: here
+                val dx = here.x - start.x
+                val dy = here.y - start.y
+                buildList {
+                    add(GestureOutput.TrackpadStarted)
+                    if (dx != 0f || dy != 0f) {
+                        add(
+                            GestureOutput.TrackpadPan(
+                                dx * config.trackpadGainX,
+                                dy * config.trackpadGainY,
+                            ),
+                        )
+                    }
+                }
             }
             key.key.type == KeyType.BACKSPACE -> {
                 state = GestureState.BACKSPACE

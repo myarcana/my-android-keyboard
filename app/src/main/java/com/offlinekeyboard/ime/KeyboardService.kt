@@ -318,6 +318,16 @@ class KeyboardService : InputMethodService() {
      */
     private var markerX = Float.NaN
     private var markerCenterY = Float.NaN
+    /**
+     * Finger travel that arrived before the marker had anywhere to be.
+     *
+     * The marker is seeded from the app's first caret report, which is asynchronous: a few
+     * milliseconds in most fields, a probe and a composition round trip in the ones that only
+     * report while composing. Pans in that window used to be discarded, so the start of the drag
+     * simply did not count. They are held here and applied the moment the seed lands.
+     */
+    private var unseededPanX = 0f
+    private var unseededPanY = 0f
 
     /** Caret position last reported by the app, in screen coordinates. */
     private var caretX = Float.NaN
@@ -2099,6 +2109,8 @@ class KeyboardService : InputMethodService() {
         trace("requestCursorUpdates -> $ok")
         markerX = Float.NaN
         markerCenterY = Float.NaN
+        unseededPanX = 0f
+        unseededPanY = 0f
         caretX = Float.NaN
         caretTop = Float.NaN
         pendingHorizontal = 0
@@ -2151,7 +2163,13 @@ class KeyboardService : InputMethodService() {
 
     /** The finger moves the marker, freely, in screen space. Nothing constrains it to the text. */
     private fun panMarker(dx: Float, dy: Float) {
-        if (!trackpadActive || markerX.isNaN()) return
+        if (!trackpadActive) return
+        if (markerX.isNaN()) {
+            unseededPanX += dx
+            unseededPanY += dy
+            trace("PAN before seed, banked x=$unseededPanX y=$unseededPanY")
+            return
+        }
         val metrics = resources.displayMetrics
         // Movement back the other way frees it again.
         if (verticalStuckDir != 0 && dy != 0f && (dy > 0f) != (verticalStuckDir > 0)) {
@@ -2450,8 +2468,14 @@ class KeyboardService : InputMethodService() {
 
         // Seed the marker on the caret at the start of the drag; free thereafter.
         if (trackpadActive && markerX.isNaN()) {
-            markerX = caretX
-            markerCenterY = caretTop + lineHeight / 2f
+            // Plus whatever the finger already did while the report was in flight.
+            val metrics = resources.displayMetrics
+            markerX = (caretX + unseededPanX).coerceIn(0f, metrics.widthPixels.toFloat())
+            markerCenterY = (caretTop + lineHeight / 2f + unseededPanY)
+                .coerceIn(0f, metrics.heightPixels.toFloat())
+            trace("SEED marker at caret + banked x=$unseededPanX y=$unseededPanY")
+            unseededPanX = 0f
+            unseededPanY = 0f
         }
 
         lastSelStart = selStart

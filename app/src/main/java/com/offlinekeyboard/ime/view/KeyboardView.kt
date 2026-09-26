@@ -1319,10 +1319,15 @@ class KeyboardView @JvmOverloads constructor(
                         if (fsm.state == GestureState.TRACKPAD ||
                             fsm.state == GestureState.SELECTING
                         ) {
-                            android.util.Log.d(
-                                "TP",
-                                "FINGER t=${event.eventTime} p=$id x=${event.getX(i)} y=${event.getY(i)}",
-                            )
+                            // Into the trace file too: ColorOS drops our logcat, and the raw
+                            // coordinates are the only way to tell a digitiser holding a
+                            // resting finger still from pans lost further down. Trackpad moves
+                            // only, so the volume the MOVE exclusion above guards against does
+                            // not apply.
+                            val finger =
+                                "FINGER t=${event.eventTime} p=$id x=${event.getX(i)} y=${event.getY(i)}"
+                            android.util.Log.d("TP", finger)
+                            trace(finger)
                         }
                         emit(fsm.onMove(event.getX(i), event.getY(i), event.eventTime))
                     }
