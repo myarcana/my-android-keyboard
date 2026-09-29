@@ -9,8 +9,8 @@ import kotlin.math.pow
  *
  * There is no trie here and deliberately is not one. Sorting the lexicon's glided spellings puts
  * every word sharing a prefix in one contiguous run, so descending a prefix is two binary searches
- * and carrying a prefix around is two ints. A trie over 40,000 words is about 100,000 nodes and
- * ten megabytes of children arrays to answer the same question; this is an [IntArray] of 40,000
+ * and carrying a prefix around is two ints. A trie over 70,000 words is about 185,000 nodes and
+ * ten megabytes of children arrays to answer the same question; this is an [IntArray] of 70,000
  * and a [DoubleArray] beside it.
  *
  * **The prior is prefix mass, not word frequency, and that is what stops the display flickering.**
@@ -107,7 +107,7 @@ class WordIndex private constructor(
 
     companion object {
         /**
-         * Builds the index. About 40,000 strings to sort: tens of milliseconds, on the same
+         * Builds the index. About 70,000 strings to sort: tens of milliseconds, on the same
          * background thread that parsed the lexicon in the first place.
          */
         fun of(lexicon: Lexicon): WordIndex {

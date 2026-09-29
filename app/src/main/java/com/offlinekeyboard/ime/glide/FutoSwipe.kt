@@ -142,10 +142,21 @@ class FutoSwipe private constructor(
             val decoderDir = stage(context, home, "decoder")
             val contextLm = stage(context, home, "contextlm")
 
-            val dictionaryFile = File(home, "en.combined")
+            // Named for the lexicon it was written from. It used to be plain `en.combined`, written
+            // only when absent -- so a phone that had glided once kept that first lexicon forever,
+            // and every word later added to the asset could be tapped but never glided.
+            val dictionaryFile = File(home, "en-${lexicon.fingerprint}.combined")
             if (!dictionaryFile.isFile) {
-                runCatching { lexicon.writeCombined(dictionaryFile) }
-                    .onFailure { Log.w(TAG, "could not write the dictionary", it); return null }
+                home.listFiles { f -> f.name.endsWith(".combined") }?.forEach { it.delete() }
+                val partial = File(home, dictionaryFile.name + ".tmp")
+                runCatching {
+                    lexicon.writeCombined(partial)
+                    check(partial.renameTo(dictionaryFile)) { "rename failed" }
+                }.onFailure {
+                    partial.delete()
+                    Log.w(TAG, "could not write the dictionary", it)
+                    return null
+                }
             }
 
             return runCatching {

@@ -137,7 +137,7 @@ class Dictation(private val context: Context) {
     @Volatile private var zhRecognizer: OfflineRecognizer? = null
 
     /**
-     * What [CodeSwitch] counts as an English word: the glide lexicon's 40,000 words. Loaded with
+     * What [CodeSwitch] counts as an English word: the glide lexicon's 70,000 words. Loaded with
      * the models and optional in the same way [zhRecognizer] is -- without it there is no way to
      * tell romanised Chinese from English, so the repair simply does not run.
      */

@@ -186,7 +186,7 @@ class KeyboardService : InputMethodService() {
     private var emojiLoading = false
 
     // --- glide typing ---
-    /** Loaded off the main thread: 40,000 words is a fifth of a second the keyboard cannot wait. */
+    /** Loaded off the main thread: parsing 70,000 words is time the keyboard cannot wait for. */
     private var glide: GlideEngine? = null
     private var glideLoading = false
 
@@ -1899,7 +1899,7 @@ class KeyboardService : InputMethodService() {
                 .getOrNull()
             // The lexicon is what the beam search's dictionary is generated from, and it is
             // also the language model the tap decoder reads. Building the index here rather than
-            // on its own thread is deliberate: it is a sort of the same 40,000 strings that were
+            // on its own thread is deliberate: it is a sort of the same 70,000 strings that were
             // just parsed, and doing it twice over would be two loads of the asset.
             val engine: GlideEngine? = lexicon?.let { FutoSwipe.open(applicationContext, it) }
             val index = lexicon?.let { TapDecoder(WordIndex.of(it)) }

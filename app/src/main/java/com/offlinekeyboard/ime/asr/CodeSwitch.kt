@@ -53,7 +53,7 @@ import java.io.InputStream
  *    "dohua", "hogu", "littleo", "xmaning". They match no syllable table.
  *
  * What every one of them has in common is simpler: **it is not an English word.** The shipped
- * glide lexicon (40,000 words) is the test. A segment detected as English that contains a Latin
+ * glide lexicon (about 70,000 words) is the test. A segment detected as English that contains a Latin
  * word outside it is worth a second look; that fired on 55 of 72 mixed segments.
  *
  * The price is that English proper nouns ("kubernetes", "reykjavik", "quinoa") also trigger a

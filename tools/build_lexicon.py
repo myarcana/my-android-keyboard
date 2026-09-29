@@ -7,13 +7,16 @@ decoder needs frequencies, not just a word list -- and it needs them for the wor
 will actually glide, which includes "ok", "yeah" and "I'm" and does not include the long tail of
 web2's archaic nouns.
 
-Two sources, joined:
+Three sources, joined:
 
   Norvig's count_1w.txt      333k words with counts from the Google Web Trillion Word Corpus.
                              The ranking. Punctuation is stripped in it, so contractions are
                              missing entirely and junk from crawled HTML is present.
-  /usr/share/dict/words      macOS's web2. Not a ranking and not modern, but a good answer to
-                             "is this a word at all", which is what the tail of the crawl needs.
+  /usr/share/dict/words      macOS's web2 (/usr/share/dict/web2 on Debian). Not a ranking and
+                             not modern, but a good answer to "is this a word at all", which is
+                             what the tail of the crawl needs.
+  wordfreq 3.1.1 (pip)       Used only as yes/no, and only for the long-word pass: a second
+                             corpus, so a misspelling one crawl published often is not enough.
 
 Contractions are added by hand, scored from their apostrophe-less form in the crawl -- "don't"
 gets the count of "dont", because that is the same word typed by someone whose keyboard made
@@ -34,14 +37,18 @@ import sys
 import urllib.request
 
 COUNTS = "https://norvig.com/ngrams/count_1w.txt"
-SYSTEM_DICT = pathlib.Path("/usr/share/dict/words")
+# macOS links words to web2; Debian's `dictionaries-common` moves that link aside and leaves web2
+# itself, which is the same file. Either gives the same lexicon, byte for byte.
+SYSTEM_DICTS = [pathlib.Path("/usr/share/dict/words"), pathlib.Path("/usr/share/dict/web2")]
 
 OUT = pathlib.Path(__file__).resolve().parent.parent / "app/src/main/assets/lexicon_en.tsv"
 
 # How many words survive. Glide decoding gets *worse* with a bigger lexicon past some point:
 # every rare word is another shape competing with a common one, and the words a person actually
 # glides are overwhelmingly in the first few thousand. 40k keeps the tail that matters (names,
-# plurals, "-ing" forms) without stocking the decoder with Scrabble words.
+# plurals, "-ing" forms) without stocking the decoder with Scrabble words. This is the head of
+# the lexicon, not all of it: long words from further down are added by the pass described at
+# LONG_WORD_LIMIT, which is what brings the total to about 70k.
 DEFAULT_LIMIT = 40_000
 
 # One in this many uses of "they" is assumed to be "they've", "they'll" or the like. See the
@@ -82,7 +89,35 @@ INFORMAL = {
     # entry here that the crawl never saw. "emojis" is the plural people actually write; the
     # Japanese-faithful "emoji" plural is not what a phone keyboard should be insisting on.
     "emoji": 3_000_000, "emojis": 2_000_000,
+    # The corpus was tokenized Penn Treebank style, which splits "cannot" into "can not" and
+    # "gimme"/"lemme" into "gim me"/"lem me" -- the same rule that left "gon", "wan" and "ta"
+    # in the crawl and "gonna", "wanna" and "gotta" on this list. What survives as one token is
+    # only the residue the tokenizer missed: 88k for "cannot", rank 106,594, far past the cap,
+    # so one of the commonest words in written English could not be glided at all.
+    # Scored off "can't", which the crawl does count whole (as "cant", 8.4M), times each word's
+    # frequency relative to "can't" in wordfreq 3.1 (a corpus that does not split them):
+    # cannot 10^-0.69, gimme 10^-2.23, lemme 10^-2.61.
+    "cannot": 1_700_000, "gimme": 50_000, "lemme": 20_000,
 }
+
+# Words neither source ranks, kept anyway. Not a place for vocabulary in general -- that is what
+# LONG_WORD_LIMIT is for -- only for words the crawl never saw at all, so no limit could reach
+# them. Scored at the crawl's own floor, the least a counted word can have.
+UNCOUNTED = {"heteronym", "heteronyms"}
+UNCOUNTED_COUNT = 12_000
+
+# How far down the crawl a *long* word may be found, beyond the words DEFAULT_LIMIT keeps.
+#
+# The limit above is a count, and it stops at rank ~59k -- which leaves out ordinary words the
+# crawl simply saw less of: "homophone" is rank 277k, "homophones" 151k, "palindrome" 92k. A
+# long word is not the risk a short one is: its shape is long and specific, so it cannot hide
+# inside another gesture the way "wud" hides in "would", and the decoder will only reach for it
+# when the path actually spells it. So long words get a second, much deeper pass -- but under a
+# strict test, because the deep crawl is where the junk is: the word must be a lowercase web2
+# headword or an inflection of one. No compounds (the tail is full of glued-together tokens
+# like "shoppingcart"), no capitalised entries (web2's proper nouns).
+LONG_WORD_MIN_LETTERS = 7
+LONG_WORD_LIMIT = 300_000
 
 # Contractions, scored from their bare form in the crawl. The multiplier is not tuning: the bare
 # form is what the corpus counted, and it undercounts the apostrophe spelling by an unknown
@@ -157,12 +192,93 @@ def read_guarded() -> list[str]:
     return [line.strip().lower() for line in path.read_text().splitlines() if line.strip()]
 
 
+def system_dict() -> pathlib.Path | None:
+    for path in SYSTEM_DICTS:
+        if path.exists():
+            return path
+    return None
+
+
 def read_dictionary() -> set[str]:
-    if not SYSTEM_DICT.exists():
-        print(f"warning: {SYSTEM_DICT} is missing; the crawl's tail will not be filtered",
+    path = system_dict()
+    if path is None:
+        print(f"warning: {SYSTEM_DICTS[0]} is missing; the crawl's tail will not be filtered",
               file=sys.stderr)
         return set()
-    return {w.strip().lower() for w in SYSTEM_DICT.read_text(errors="replace").splitlines()}
+    return {w.strip().lower() for w in path.read_text(errors="replace").splitlines()}
+
+
+def read_common_nouns() -> set[str]:
+    """web2's entries that are not capitalised: its common words, without its proper nouns."""
+    path = system_dict()
+    if path is None:
+        return set()
+    return {w.strip() for w in path.read_text(errors="replace").splitlines()
+            if w.strip() and w.strip()[0].islower()}
+
+
+def read_second_corpus() -> dict[str, float]:
+    """Every English word wordfreq has a frequency for, with that frequency.
+
+    The deep crawl's second filter. The suffix rules read "switchs" and "tecnologies" as
+    inflections of real words, and each is a misspelling someone published often enough to be
+    counted; a glide dictionary that holds a misspelling will type it. A second corpus built
+    from different sources (subtitles, Wikipedia, books, Reddit, news) does not share one
+    crawl's typos, and requiring both drops about 7% of the long tail, most of it junk. The
+    ranking stays count_1w's, so the scale is one corpus's.
+    """
+    try:
+        import wordfreq
+    except ImportError:
+        sys.exit("the long-word pass needs wordfreq (pip install wordfreq==3.1.1); without it "
+                 "the lexicon would silently come out different")
+    return wordfreq.get_frequency_dict("en", "large")
+
+
+# How much commoner the one-letter-shorter spelling must be before a doubled letter is read as a
+# typo. Doubling is the misspelling both corpora share -- "happenned", "writting", "openning" are
+# in wordfreq too -- so presence cannot catch it, but the ratio can: "writing" outnumbers
+# "writting" a thousandfold. 30 keeps legitimate pairs that merely differ in frequency
+# ("barrack"/"barack", "dragoons"/"dragons" sit below 10) and the British "-lled" spellings.
+DOUBLED_LETTER_RATIO = 30
+
+
+def doubled_typo(word: str, frequency: dict[str, float]) -> bool:
+    """Whether dropping one of a doubled letter gives a far commoner word."""
+    own = frequency.get(word, 0.0)
+    for i in range(1, len(word)):
+        if word[i] == word[i - 1]:
+            single = word[:i] + word[i + 1:]
+            if frequency.get(single, 0.0) > DOUBLED_LETTER_RATIO * own:
+                return True
+    return False
+
+
+def known_strictly(word: str, headwords: set[str]) -> bool:
+    """A headword, or a headword plus a suffix: `known` without the compound rule.
+
+    The suffix rules are also spelled out more exactly than `known` needs them to be, because
+    here they are the only defence the deep crawl meets. A dropped "e" comes back only before a
+    vowel ("hoping" is "hope"; "revenus" is not "revenue"), and "es" only follows the endings
+    English puts it after ("boxes", not "adultes").
+    """
+    if word in headwords:
+        return True
+    for suffix in SUFFIXES:
+        if not word.endswith(suffix) or len(word) - len(suffix) < 3:
+            continue
+        stem = word[: -len(suffix)]
+        if suffix == "es" and not stem.endswith(("s", "x", "z", "ch", "sh", "o")):
+            continue
+        if stem in headwords:
+            return True
+        if suffix[0] in "aeiou" and stem + "e" in headwords:
+            return True
+        if suffix == "ies" and stem + "y" in headwords:
+            return True
+        if len(stem) > 3 and stem[-1] == stem[-2] and stem[:-1] in headwords:
+            return True
+    return False
 
 
 # Suffixes web2 does not list separately. It is a dictionary of headwords, so it has "peep" and
@@ -287,9 +403,23 @@ def main() -> int:
             break
         if is_plausible(word, rank, dictionary, ranks):
             kept[word] = count
+    core = len(kept)
+
+    headwords = read_common_nouns()
+    attested = read_second_corpus()
+    for rank, (word, count) in enumerate(ordered[:LONG_WORD_LIMIT]):
+        if word in kept or len(word) < LONG_WORD_MIN_LETTERS or word not in attested:
+            continue
+        if doubled_typo(word, attested):
+            continue
+        if is_plausible(word, rank, dictionary, ranks) and known_strictly(word, headwords):
+            kept[word] = count
+    long_words = len(kept) - core
 
     for word, count in INFORMAL.items():
         kept[word] = max(kept.get(word, 0), count)
+    for word in UNCOUNTED:
+        kept[word] = max(kept.get(word, 0), UNCOUNTED_COUNT)
 
     added = 0
     for word in CONTRACTIONS:
@@ -331,6 +461,7 @@ def main() -> int:
     OUT.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"{OUT}: {len(rows)} words, {OUT.stat().st_size / 1024:.0f} KB")
+    print(f"  {core} from the crawl's head, {long_words} long words from its tail")
     print(f"  {added} contractions scored from their bare form, {len(DROP_BARE)} bare forms dropped")
     if dropped_by_guard:
         print(f"  {len(dropped_by_guard)} words dropped by the repository's commit guard")

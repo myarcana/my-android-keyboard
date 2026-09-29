@@ -19,7 +19,7 @@ import java.io.InputStream
  *
  * **The index is by first *and* last letter.** A glide's endpoints are the two parts of it the
  * user is most deliberate about -- the finger starts on a key and stops on a key, and the middle
- * is where it cuts corners. Bucketing on the pair turns a 40,000-word scan into roughly sixty
+ * is where it cuts corners. Bucketing on the pair turns a 70,000-word scan into roughly a hundred
  * words per bucket, which is what makes decoding cheap enough to do on the UI thread at the
  * moment the finger lifts.
  */
@@ -37,12 +37,25 @@ class Lexicon private constructor(
      * Glided form -> spellings, most frequent first.
      *
      * Only the forms that need it are stored. For the overwhelming majority the spelling is the
-     * glided form unchanged, and an entry saying so would be 40,000 strings to say nothing; the
+     * glided form unchanged, and an entry saying so would be 70,000 strings to say nothing; the
      * absent case is handled by [spellings] returning the word the decoder already had.
      */
     private val spelledAs: Map<String, List<String>> = buildSpellings()
 
     val size: Int get() = words.size
+
+    /**
+     * Identifies this lexicon's contents, for naming files derived from it. Any added, removed or
+     * rescored word changes it, so a cache keyed on it goes stale exactly when it should.
+     */
+    val fingerprint: String by lazy {
+        var h = 1125899906842597L
+        words.forEachIndexed { i, w ->
+            h = 31 * h + w.hashCode()
+            h = 31 * h + logFrequency[i]
+        }
+        "%d-%016x".format(words.size, h)
+    }
 
     /** Word indices that begin with [first] and end with [last]. Empty when there are none. */
     fun bucket(first: Char, last: Char): IntArray = buckets[key(first, last)] ?: EMPTY
@@ -234,9 +247,9 @@ class Lexicon private constructor(
         private fun key(first: Char, last: Char) = (first - 'a') * 26 + (last - 'a')
 
         fun load(input: InputStream): Lexicon {
-            val words = ArrayList<String>(48_000)
-            val letters = ArrayList<String>(48_000)
-            val frequencies = ArrayList<Int>(48_000)
+            val words = ArrayList<String>(80_000)
+            val letters = ArrayList<String>(80_000)
+            val frequencies = ArrayList<Int>(80_000)
             val grouped = HashMap<Int, MutableList<Int>>()
 
             input.bufferedReader().useLines { lines -> lines.forEach { line -> read(line, words, letters, frequencies, grouped) } }
