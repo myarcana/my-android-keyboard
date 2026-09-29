@@ -185,10 +185,19 @@ object KeyIcons {
     }
 
     /**
-     * An arrow curving back on itself: anticlockwise for undo, mirrored for redo.
+     * A U-turn arrow: a bold arrowhead pointing left along the top, with the shaft running right
+     * and turning back underneath it. Mirrored for redo, so the head points right.
      *
-     * One path for both because they are one gesture in opposite directions, and drawing them
-     * from the same code is what guarantees they stay mirror images as the shape is tuned.
+     * This replaced a 250-degree arc with a small hooked head, which could not be read. At popup
+     * size the arc looked like a circle and the head like a flaw in its stroke, so nothing said
+     * which way it went, and undo and redo looked the same. This shape is the one iOS and most
+     * editors use (`arrow.uturn.backward`). Its direction comes from where the arrowhead is,
+     * leading on the left or on the right, and that stays readable even when the curve does not.
+     *
+     * The head is a closed, filled chevron rather than two stroked lines, because a solid
+     * triangle is still clearly an arrowhead at a few millimetres across. One path serves both
+     * directions and redo is a mirror of it, so the two stay mirror images whenever the shape is
+     * tuned.
      */
     private fun undoRedo(
         canvas: Canvas,
@@ -198,28 +207,43 @@ object KeyIcons {
         p: Paint,
         mirrored: Boolean,
     ) {
-        val dir = if (mirrored) -1f else 1f
-        val r = s * 0.34f
-        val top = cy - s * 0.10f
-        // Most of a circle, open at the bottom, so the tail drops away from the arrowhead. The
-        // sweep starts at the arrowhead's own angle so the head meets the stroke exactly: drawn
-        // from a rounder number the two missed each other by a couple of degrees, which at this
-        // size is a visible nick in the line.
-        val start = if (mirrored) 180f else 0f
-        canvas.drawArc(
-            RectF(cx - r, top - r, cx + r, top + r),
-            start,
-            if (mirrored) -250f else 250f,
-            false,
-            p,
-        )
-        // The head sits where the sweep began -- the 3 o'clock point, mirrored to 9 -- and points
-        // along the direction of travel, which is upward there.
-        val tipX = cx + dir * r
-        val tipY = top
-        val head = s * 0.22f
-        canvas.drawLine(tipX, tipY, tipX + dir * head * 0.85f, tipY + head * 0.55f, p)
-        canvas.drawLine(tipX, tipY, tipX - dir * head * 0.35f, tipY + head * 0.75f, p)
+        // Vertical extent runs from the head's upper corner to the bottom of the shaft; this puts
+        // the middle of that span on cy.
+        val top = cy - s * 0.12f
+        val r = s * 0.22f
+        val bottom = top + 2f * r
+        val turnX = cx + s * 0.18f
+        val tipX = cx - s * 0.44f
+        val head = s * 0.24f
+        val tail = cx - s * 0.12f
+
+        canvas.save()
+        if (mirrored) canvas.scale(-1f, 1f, cx, cy)
+
+        // The shaft: from the tail along the bottom, round the turn, and back along the top to
+        // just behind the head, so the stroke's round cap is hidden inside the filled triangle.
+        val shaft = Path().apply {
+            moveTo(tail, bottom)
+            lineTo(turnX, bottom)
+            arcTo(RectF(turnX - r, top, turnX + r, bottom), 90f, -180f, false)
+            lineTo(tipX + head * 0.6f, top)
+        }
+        canvas.drawPath(shaft, p)
+
+        // The head, filled. The paint is borrowed rather than copied so the icon keeps whatever
+        // colour the popup is drawing in, including the white of a highlighted cell.
+        val arrow = Path().apply {
+            moveTo(tipX, top)
+            lineTo(tipX + head, top - head * 0.85f)
+            lineTo(tipX + head, top + head * 0.85f)
+            close()
+        }
+        val style = p.style
+        p.style = Paint.Style.FILL_AND_STROKE
+        canvas.drawPath(arrow, p)
+        p.style = style
+
+        canvas.restore()
     }
 
     /** Arrow that drops down then turns left, like a return key. */
