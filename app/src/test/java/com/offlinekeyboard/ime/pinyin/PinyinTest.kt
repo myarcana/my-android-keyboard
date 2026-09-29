@@ -439,6 +439,40 @@ class PinyinTest {
         assertTrue("蘭雅 missing", twTop("lanya", 6).contains("蘭雅"))
     }
 
+    // --- curated words (tools/words) --------------------------------------------------------
+
+    @Test
+    fun `a word no upstream dictionary has is typed whole`() {
+        // Neither rime-ice nor McBopomofo has 雪花冰 or 杏仁凍, so they could only be assembled
+        // from a word plus a lone character, and the backoff charged for that lone character is
+        // exactly what made 雪花宾馆 and 行人洞 win instead. tools/words/food.src is the fix.
+        assertEquals("雪花冰", first("xuehuabing"))
+        assertEquals("杏仁冻", first("xingrendong"))
+        assertEquals("雪花冰", twTop("xuehuabing").first())
+        assertEquals("杏仁凍", twTop("xingrendong").first())
+        // The English bar, where it was reported: both scripts, the right word first.
+        assertEquals("雪花冰", bothTop("xuehuabing").first())
+        assertTrue(bothTop("xingrendong", 2).containsAll(listOf("杏仁凍", "杏仁冻")))
+    }
+
+    @Test
+    fun `a 粿 word is typed with gui as well as guo`() {
+        // 粿 is ㄍㄨㄛˇ in every reading table, but people in Taiwan say and type it `gui`, after
+        // Taiwanese kué. Both spellings must reach the word.
+        assertEquals("粉粿", twTop("fengui").first())
+        assertEquals("粉粿", bothTop("fengui").first())
+        assertTrue("粉粿 missing for fenguo", twTop("fenguo", 6).contains("粉粿"))
+        assertTrue("碗粿 missing for wangui", twTop("wangui", 3).contains("碗粿"))
+    }
+
+    @Test
+    fun `curated words do not displace the everyday words on their keys`() {
+        assertEquals("雪花", first("xuehua"))
+        assertEquals("宾馆", first("binguan"))
+        assertEquals("行人", first("xingren"))
+        assertEquals("晚归", first("wangui"))
+    }
+
     @Test
     fun `the dictionary actually loaded`() {
         assertNotNull(dict)

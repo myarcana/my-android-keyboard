@@ -1,0 +1,82 @@
+# Taiwan food and dessert words that no upstream dictionary has, or has under only one script or
+# one reading. Hand-curated; `tools/build_word_list.py` validates every reading, counts each word
+# in the Taiwan corpus and writes food.tsv, which is what build_pinyin_dict.py reads.
+#
+# traditional<TAB>simplified<TAB>readings
+#   simplified  `=` when it is spelled the same, `-` when there is no mainland entry to add
+#   readings    one or more, separated by `;` -- every one a way people actually type the word
+#
+# A word already in the dictionary under some reading may still be listed: an entry only adds
+# the readings and scripts it is missing, and the builder keeps the larger of two weights.
+
+# --- shaved ice ------------------------------------------------------------------------------
+雪花冰	=	xue hua bing
+剉冰	=	cuo bing
+挫冰	=	cuo bing
+綿綿冰	绵绵冰	mian mian bing
+愛玉冰	爱玉冰	ai yu bing
+芋頭冰	芋头冰	yu tou bing
+八寶冰	八宝冰	ba bao bing
+牛奶冰	=	niu nai bing
+鳳梨冰	凤梨冰	feng li bing
+草莓冰	=	cao mei bing
+豆花冰	=	dou hua bing
+蜜豆冰	=	mi dou bing
+霜淇淋	=	shuang qi lin
+
+# --- jellies and puddings ----------------------------------------------------------------------
+杏仁凍	杏仁冻	xing ren dong
+仙草凍	仙草冻	xian cao dong
+奶凍	奶冻	nai dong
+咖啡凍	咖啡冻	ka fei dong
+茶凍	茶冻	cha dong
+龜苓膏	龟苓膏	gui ling gao
+雙皮奶	双皮奶	shuang pi nai
+豆腐腦	豆腐脑	dou fu nao
+檸檬愛玉	柠檬爱玉	ning meng ai yu
+
+# --- sweet soups and balls ---------------------------------------------------------------------
+燒仙草	烧仙草	shao xian cao
+芋圓	芋圆	yu yuan
+地瓜圓	地瓜圆	di gua yuan
+地瓜球	=	di gua qiu
+芋泥球	=	yu ni qiu
+紅豆湯圓	红豆汤圆	hong dou tang yuan
+花生湯	花生汤	hua sheng tang
+綠豆沙	绿豆沙	lv dou sha
+仙草茶	=	xian cao cha
+青蛙撞奶	=	qing wa zhuang nai
+珍奶	=	zhen nai
+
+# --- cakes and pastries ------------------------------------------------------------------------
+紅豆餅	红豆饼	hong dou bing
+車輪餅	车轮饼	che lun bing
+太陽餅	太阳饼	tai yang bing
+牛軋糖	牛轧糖	niu ga tang; niu zha tang
+蕨餅	蕨饼	jue bing
+潤餅	润饼	run bing
+蔥抓餅	葱抓饼	cong zhua bing
+
+# --- 粿: Mandarin `guo`, typed `gui` after Taiwanese kué -----------------------------------
+粉粿	=	fen guo; fen gui
+碗粿	=	wan guo; wan gui
+草仔粿	=	cao zai guo; cao zai gui
+紅龜粿	红龟粿	hong gui guo; hong gui gui
+菜頭粿	菜头粿	cai tou guo; cai tou gui
+鹹粿	咸粿	xian guo; xian gui
+芋粿	=	yu guo; yu gui
+發粿	发粿	fa guo; fa gui
+粿仔條	粿仔条	guo zai tiao; gui zai tiao
+
+# --- savoury ---------------------------------------------------------------------------------
+大腸麵線	大肠面线	da chang mian xian
+鹹粥	咸粥	xian zhou
+魷魚羹	鱿鱼羹	you yu geng
+鼎邊銼	鼎边锉	ding bian cuo
+米血	=	mi xue; mi xie
+豬血糕	猪血糕	zhu xue gao; zhu xie gao
+鹽水雞	盐水鸡	yan shui ji
+鹹水雞	咸水鸡	xian shui ji
+鹽酥雞	盐酥鸡	yan su ji
+麻辣燙	麻辣烫	ma la tang
+阿給	阿给	a gei

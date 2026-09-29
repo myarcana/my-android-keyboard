@@ -568,15 +568,18 @@ def _count_job(job: tuple) -> dict:
     return dict(counts)
 
 
-def corpus_counts(work: str, patterns: set) -> tuple[dict, int]:
+def corpus_counts(work: str, patterns: set, cache: str | None = None) -> tuple[dict, int]:
     """
     How often each pattern occurs in the Taiwan text corpus, and the corpus size in characters.
 
     Counted as McBopomofo counts phrase.occ -- every occurrence of the string, not segmented
     words -- so the two are the same measurement on different text and can be put on one scale.
-    Cached, because it takes minutes; the cache is keyed by the pattern set.
+    Cached, because it takes minutes; the cache is keyed by the pattern set. Another tool
+    counting its own word list passes its own [cache], since a recount overwrites the file with
+    only the patterns it was asked for.
     """
-    cache = os.path.join(work, "taipei", "corpus_counts.tsv")
+    cache = cache or os.path.join(work, "taipei", "corpus_counts.tsv")
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
     if os.path.exists(cache):
         cached = {}
         with open(cache, encoding="utf-8") as f:

@@ -939,6 +939,31 @@ The cost was 2,174 entries at the global cap's floor weight (玻璃匠, 不得�
 unweighted tail, all at exactly 100), which fall off the end of the cut line in their place.
 No weighted word was evicted and the asset stayed 12.1 MB.
 
+### Everyday words were missing too: the curated word lists
+
+`xuehuabing` gave 雪花宾馆, `xingrendong` 行人洞 and `fengui` 分规. Same diagnosis as the place
+names, and no decoder change: rime-ice, McBopomofo and CC-CEDICT have no 雪花冰 and no 杏仁凍,
+so each could only be built as a word plus a lone 冰 or 凍. The lone character pays `BACKOFF`
+(6 nats), and that is exactly what 宾馆 and 行人 did not pay. 粉粿 *was* present, but only as
+`fen guo`. That is 粿's reading in every table (ㄍㄨㄛˇ, as in the MOE dictionary), but in Taiwan
+people say and type it `gui`, after Taiwanese kué. A survey of Taiwan desserts and snacks found
+the same gap across the category: 剉冰, 仙草凍, 芋圓, 鹽酥雞, 綿綿冰, 霜淇淋 and more.
+
+`tools/words/food.src` is a hand-curated list: Traditional form, Simplified form, readings.
+`tools/build_word_list.py` turns it into `food.tsv`, and `build_pinyin_dict.py` merges every
+`tools/words/*.tsv` the way it merges place names. What keeps the list honest:
+
+- **Every syllable is evidenced.** A reading must be one its character has in BPMFBase or
+  rime-ice's 8105 table. The single exception is 粿 as `gui`, named in `EXTRA_READINGS`, and it
+  is added *beside* `guo`, never in place of it.
+- **The weight is counted, not chosen.** Same corpus and calibration as the place names (the
+  counting code is shared): 雪花冰 appears 1,892 times, 杏仁凍 208. The Simplified form carries
+  the same count, because there is no mainland corpus to measure it in. Wherever rime-ice
+  already weighs the Simplified word (牛轧糖, 龟苓膏), the larger weight is kept.
+- **Nothing everyday moved.** 雪花, 宾馆, 行人 and 晚归 still lead their own keys. The added
+  words win only the whole-input decodings that had no word to use before. `wangui` still leads
+  with 晚归 in Simplified, where it is far commoner; 碗粿 comes second.
+
 ### One suggestion bar, one probability scale
 
 The strip used to be two strips wearing the same paint: emoji in English, Chinese in the CJK
@@ -1330,7 +1355,9 @@ ships no frequencies and ranking is most of what makes candidates feel right. Mc
 is MIT and adds no further obligation. See the README for how to undo the GPL choice.
 
 Sources now include `tools/places/taipei.tsv` (Taiwan government open data, attribution-only),
-2,564 Taipei place-name entries; see "Place names were a missing word list" above.
+2,564 Taipei place-name entries; see "Place names were a missing word list" above. And
+`tools/words/*.tsv`, curated words upstream lacks (60 Taiwan foods, 144 entries); see "the
+curated word lists" above.
 
 It grew from 8.4 MB when the Taiwan model was added: 166k of its entries are Traditional words
 that no conversion of the Simplified data could have produced, and every entry now carries a
