@@ -40,7 +40,10 @@ import com.offlinekeyboard.ime.candidates.EmojiIndex
 import com.offlinekeyboard.ime.candidates.TypedWord
 import com.offlinekeyboard.ime.candidates.UnifiedCandidates
 import com.offlinekeyboard.ime.capture.GestureCapture
+import com.offlinekeyboard.ime.text.DeletionHistory
+import com.offlinekeyboard.ime.text.FieldState
 import com.offlinekeyboard.ime.text.GraphemeCluster
+import com.offlinekeyboard.ime.text.HistoryField
 import com.offlinekeyboard.ime.text.WordBoundary
 import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.WordStarts
@@ -137,6 +140,17 @@ private const val GRAPHEME_LOOKBEHIND = 32
  * that the flick clears what it can reach and a second flick takes the rest.
  */
 private const val LINE_LOOKBEHIND = 1024
+
+/**
+ * Text read either side of the caret to tell whether the field is still the one a deletion was
+ * recorded against. See [com.offlinekeyboard.ime.text.DeletionHistory].
+ *
+ * It only has to notice a change, not describe one, and the caret offsets carry most of that on
+ * their own, since any edit that changes the length moves them. The window is there for the
+ * edits that keep the length the same, such as one word replaced by another of equal length.
+ * Those land next to the caret, so a short window catches them.
+ */
+private const val HISTORY_WINDOW = 256
 
 private const val EMOJI_ASSET = "emoji_en.tsv"
 
@@ -857,6 +871,8 @@ class KeyboardService : InputMethodService() {
         // Nor may a rejection recorded against an offset in the last field, where the same
         // offset now names entirely different text. See [onFinishInputView].
         if (!restarting) glideRejections.clear()
+        // The same for deletions kept for undo: their offsets name text in the last field.
+        if (!restarting) deletionHistory.clear()
         glideEnd = null
         // Nor may a login offered for the last one. `restarting` means the same field is still
         // focused -- the app changed something about it -- and the chips on screen are still
@@ -1533,15 +1549,17 @@ class KeyboardService : InputMethodService() {
         flushPending()
         val ic = currentInputConnection ?: return
         ic.finishComposingText()
-        val id = when (action) {
-            EditAction.SELECT_ALL -> android.R.id.selectAll
-            EditAction.CUT -> android.R.id.cut
-            EditAction.COPY -> android.R.id.copy
-            EditAction.PASTE -> android.R.id.paste
-            EditAction.UNDO -> android.R.id.undo
-            EditAction.REDO -> android.R.id.redo
+        when (action) {
+            // Undo and redo go through the keyboard's own record of its bulk deletes, which asks
+            // the editor first and restores the text itself only where the editor did nothing --
+            // Chrome, WebView and Compose all ignore these two ids. See [DeletionHistory].
+            EditAction.UNDO -> deletionHistory.undo(historyField)
+            EditAction.REDO -> deletionHistory.redo(historyField)
+            EditAction.SELECT_ALL -> ic.performContextMenuAction(android.R.id.selectAll)
+            EditAction.CUT -> ic.performContextMenuAction(android.R.id.cut)
+            EditAction.COPY -> ic.performContextMenuAction(android.R.id.copy)
+            EditAction.PASTE -> ic.performContextMenuAction(android.R.id.paste)
         }
-        ic.performContextMenuAction(id)
         // A one-shot shift that was armed before the hold has nothing left to capitalise: the
         // gesture ended in an edit, not a letter. Leaving it armed would capitalise whatever was
         // typed next, which is the sort of stray capital nobody can trace back to its cause.
@@ -1675,16 +1693,67 @@ class KeyboardService : InputMethodService() {
      * Deletes back over any run of spaces and then the word before them, stopping at a line
      * break: a held backspace should pause at the start of each line rather than run past it.
      */
-    private fun deleteWordBackwards() {
+    private fun deleteWordBackwards(): CharSequence {
         flushPending()
-        val ic = currentInputConnection ?: return
+        val ic = currentInputConnection ?: return ""
         val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
-        if (before.isNullOrEmpty()) return
+        if (before.isNullOrEmpty()) return ""
         // Coerced to 1 so a cursor sitting directly after a line break still makes progress:
         // the scan stops at the break and would otherwise return 0, leaving a held backspace
         // spinning against it forever.
-        ic.deleteSurroundingText(WordBoundary.deleteLength(before).coerceAtLeast(1), 0)
+        val units = WordBoundary.deleteLength(before).coerceAtLeast(1).coerceAtMost(before.length)
+        ic.deleteSurroundingText(units, 0)
         refreshCandidates()
+        // What went, so the swipe that called this can offer it back to undo.
+        return before.subSequence(before.length - units, before.length)
+    }
+
+    // --- undo for the bulk deletes ----------------------------------------------------------
+
+    /**
+     * What the swipes on backspace deleted, so undo can put it back in editors whose own undo
+     * does nothing. See [DeletionHistory].
+     */
+    private val deletionHistory = DeletionHistory()
+
+    /** [DeletionHistory]'s view of the field, over whatever input connection is current. */
+    private val historyField = object : HistoryField {
+        override fun state(): FieldState? {
+            val ic = currentInputConnection ?: return null
+            val before = ic.getTextBeforeCursor(HISTORY_WINDOW, 0) ?: return null
+            val after = ic.getTextAfterCursor(HISTORY_WINDOW, 0) ?: return null
+            val selected = ic.getSelectedText(0)?.toString().orEmpty()
+            // Asked of the editor rather than taken from [editorSelStart], which lags an edit
+            // made a moment ago by however long onUpdateSelection takes to arrive -- and the
+            // whole point of this read is to see the edit that just happened. A field that will
+            // not report offsets gets -1 for both, which still compares fairly against itself.
+            val extracted = ic.getExtractedText(ExtractedTextRequest(), 0)
+            val base = extracted?.startOffset?.coerceAtLeast(0) ?: 0
+            val start = extracted?.selectionStart?.takeIf { it >= 0 }?.let { base + it } ?: -1
+            val end = extracted?.selectionEnd?.takeIf { it >= 0 }?.let { base + it } ?: -1
+            return FieldState(start, end, before.toString(), selected, after.toString())
+        }
+
+        override fun nativeUndo() {
+            currentInputConnection?.performContextMenuAction(android.R.id.undo)
+        }
+
+        override fun nativeRedo() {
+            currentInputConnection?.performContextMenuAction(android.R.id.redo)
+        }
+
+        override fun insert(text: String, at: Int, select: Boolean) {
+            val ic = currentInputConnection ?: return
+            ic.beginBatchEdit()
+            ic.commitText(text, 1)
+            if (select && at >= 0) ic.setSelection(at, at + text.length)
+            ic.endBatchEdit()
+        }
+
+        override fun remove(text: String, selected: Boolean) {
+            val ic = currentInputConnection ?: return
+            if (selected) ic.commitText("", 1) else ic.deleteSurroundingText(text.length, 0)
+        }
     }
 
     /**
@@ -1749,12 +1818,14 @@ class KeyboardService : InputMethodService() {
         if (!selected.isNullOrEmpty()) {
             ic.commitText("", 1)
             ic.endBatchEdit()
+            deletionHistory.recorded(selected, selected = true, field = historyField)
             refreshCandidates()
             return
         }
 
-        deleteWordBackwards()
+        val gone = deleteWordBackwards()
         ic.endBatchEdit()
+        deletionHistory.recorded(gone, selected = false, field = historyField)
     }
 
     /**
@@ -1790,19 +1861,25 @@ class KeyboardService : InputMethodService() {
         if (!selected.isNullOrEmpty()) {
             ic.commitText("", 1)
             ic.endBatchEdit()
+            deletionHistory.recorded(selected, selected = true, field = historyField)
             refreshCandidates()
             return
         }
 
         val before = ic.getTextBeforeCursor(LINE_LOOKBEHIND, 0)
+        var gone: CharSequence = ""
         if (!before.isNullOrEmpty()) {
             val units = WordBoundary.lineDeleteLength(before)
             if (units > 0) {
                 ic.deleteSurroundingText(units, 0)
                 deleted(units)
+                gone = before.subSequence(before.length - units, before.length)
             }
         }
         ic.endBatchEdit()
+        // After the batch closes, so the record is made against the field as the delete left it.
+        // Undo has to be able to put the line back: this is the largest thing one flick destroys.
+        deletionHistory.recorded(gone, selected = false, field = historyField)
         refreshCandidates()
     }
 

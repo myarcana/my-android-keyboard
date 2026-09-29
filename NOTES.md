@@ -703,6 +703,35 @@ that delete a word cannot drift apart.
 The threshold stays deliberately larger than the flick threshold (0.8 vs 0.45 key heights) -- a
 thumb drifting up off the key must not fire it.
 
+### Undo brings the swipe deletes back — `text/DeletionHistory`
+
+"There is no undo" (above) stopped being true once `z` gained undo, but only partly. Undo went
+through `performContextMenuAction(android.R.id.undo)`, and that reverses a swipe delete only in an
+editor that implements it. A standard `EditText` does. Chrome and WebView do not: their
+`ImeAdapterImpl.performContextMenuAction` handles select-all, cut, copy and paste, and returns
+false for anything else. Compose's `RecordingInputConnection` does not either. In those editors,
+clearing a line with the swipe was permanent.
+
+The fix is a small history kept by the keyboard, which holds what each swipe deleted and where.
+It is a fallback, and the order is the whole design:
+
+- **The editor is asked first, every time.** The history restores text only when the field is
+  unchanged after that request. If the keyboard always restored the text itself, an `EditText`
+  would log the restore as a new insert, and its next undo would delete the line again.
+- **A record counts only while the field is exactly as the delete left it.** That means the same
+  selection offsets and the same 256 characters either side, read fresh when undo is pressed.
+  Any typing, caret move or outside edit makes the record stale and clears the history, so undo
+  can never paste a line somewhere it did not come from.
+- **Records chain.** Restoring the last delete returns the field to the state the previous one
+  left, so repeated swipes can be undone one at a time, and redo reverses the restore.
+
+Only the two swipes are recorded. Plain and held backspace are left to the editor, where they
+already undo, and in Chrome they are small enough to retype.
+
+The check waits for nothing, and that is a known limit. Chrome runs the menu action on a later
+task and may reply late. That never double-restores, since Chrome ignores undo anyway. An editor
+that undoes asynchronously *and* successfully would get the text twice; none are known.
+
 ### The bar reads the editor, it does not remember what was typed
 
 Suggestions are for the word the caret sits at the end of, found by reading back through

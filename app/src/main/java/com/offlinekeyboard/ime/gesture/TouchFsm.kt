@@ -228,7 +228,9 @@ data class GestureConfig(
      * Vertical travel on backspace that deletes in bulk -- the line above the cursor on an
      * upward stroke, the word behind it on a downward one -- as a fraction of key height.
      * Larger than [flickDistanceRatio] because these gestures destroy text: a thumb drifting
-     * off the key must not trigger them, and there is nothing to undo them with.
+     * off the key must not trigger them. Undo can put the text back, including in editors that
+     * ignore the undo menu action (see [com.offlinekeyboard.ime.text.DeletionHistory]), but
+     * only if the user notices before typing on.
      */
     val bulkDeleteDistanceRatio: Float = 0.8f,
     /**
