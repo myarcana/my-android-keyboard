@@ -26,6 +26,7 @@ import android.view.inputmethod.InputConnection
 import android.widget.FrameLayout
 import android.widget.PopupWindow
 import com.offlinekeyboard.ime.view.CursorIndicatorView
+import com.offlinekeyboard.ime.cursor.PreciseCursor
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import android.view.inputmethod.InputMethodManager
@@ -326,6 +327,36 @@ class KeyboardService : InputMethodService() {
     private var indicator: CursorIndicatorView? = null
     private var indicatorPopup: PopupWindow? = null
     private var trackpadActive = false
+
+    /**
+     * The trackpad proper: maps the visible text and sets the caret absolutely. See
+     * [PreciseCursor]. Everything below it -- the marker, the chase, the arrow keys -- is the old
+     * closed-loop steering, kept only for editors that cannot be mapped at all.
+     */
+    private val precise: PreciseCursor by lazy { PreciseCursor(preciseHost) }
+
+    /** This gesture is being steered by the old loop, because the editor could not be mapped. */
+    private var legacyTrackpad = false
+
+    private val preciseHost = object : PreciseCursor.Host {
+        override val inputConnection: InputConnection? get() = currentInputConnection
+        override val editorInfo: EditorInfo? get() = currentInputEditorInfo
+        override val selectionStart: Int get() = editorSelStart
+        override val selectionEnd: Int get() = editorSelEnd
+        override fun keyboardTop(): Float {
+            val kv = keyboardView ?: return resources.displayMetrics.heightPixels.toFloat()
+            val loc = IntArray(2)
+            kv.getLocationOnScreen(loc)
+            return loc[1].toFloat().takeIf { it > 0f } ?: resources.displayMetrics.heightPixels.toFloat()
+        }
+        override fun screenWidth(): Float = resources.displayMetrics.widthPixels.toFloat()
+        override fun screenHeight(): Float = resources.displayMetrics.heightPixels.toFloat()
+        override fun mainExecutor(): java.util.concurrent.Executor = mainExecutor
+        override fun redraw() = updateIndicator()
+        override fun fallBack(bankX: Float, bankY: Float, needsComposition: Boolean) =
+            startLegacyTrackpad(bankX, bankY, needsComposition)
+        override fun trace(message: String) = this@KeyboardService.trace(message)
+    }
 
     /**
      * The granular cursor, in screen coordinates. This is what the finger drives directly, and
@@ -932,7 +963,8 @@ class KeyboardService : InputMethodService() {
         noticeGlideEdit()
         // Such an app reports nothing on its own when the caret moves; every move has to be
         // followed by asking.
-        if (trackpadActive && composingForAnchor) {
+        if (trackpadActive && !legacyTrackpad) precise.onUpdateSelection(newSelStart, newSelEnd)
+        if (trackpadActive && legacyTrackpad && composingForAnchor) {
             currentInputConnection?.requestCursorUpdates(
                 InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
             )
@@ -1051,14 +1083,22 @@ class KeyboardService : InputMethodService() {
                 is GestureOutput.CommitAccent -> commit(out.text)
                 is GestureOutput.CommitAction -> runEditAction(out.action)
                 is GestureOutput.CommitLanguage -> switchLanguage(out.languageId)
-                GestureOutput.SelectionStarted -> beginSelection()
+                GestureOutput.SelectionStarted -> {
+                    if (trackpadActive && !legacyTrackpad) {
+                        precise.beginSelection()
+                    } else {
+                        beginSelection()
+                    }
+                }
                 GestureOutput.TrackpadStarted -> startTrackpad()
                 is GestureOutput.TrackpadPan -> {
                     trace("PAN dx=${out.dx} dy=${out.dy}")
                     panMarker(out.dx, out.dy)
                 }
                 GestureOutput.TrackpadEnded -> {
-                    endSelection()
+                    // The precise cursor sets selections directly and holds no shift key, so it
+                    // has nothing to release; the selection stays where it was dragged.
+                    if (legacyTrackpad || !trackpadActive) endSelection()
                     stopTrackpad()
                 }
                 GestureOutput.BackspaceRepeatStarted -> startBackspaceRepeat()
@@ -2165,8 +2205,26 @@ class KeyboardService : InputMethodService() {
     private fun startTrackpad() {
         // The caret is about to go somewhere else entirely. Settle the word where it was typed.
         flushPending()
-        trace("=== TRACKPAD START selecting=$extendingSelection ===")
+        trace("=== TRACKPAD START ===")
         trackpadActive = true
+        legacyTrackpad = false
+        // Everything the precise cursor needs is asked for here, before the finger has moved:
+        // a map of the visible text arrives within a frame or two in the editors that give one.
+        precise.start(editorSelEnd.takeIf { it >= 0 } ?: editorSelStart)
+        updateIndicator()
+    }
+
+    /**
+     * The old steering, for an editor [PreciseCursor] could not map. [bankX]/[bankY] is the finger
+     * travel made while the map was being tried, so the start of the drag still counts.
+     */
+    private fun startLegacyTrackpad(bankX: Float, bankY: Float, needsComposition: Boolean) {
+        if (!trackpadActive) return
+        trace("=== LEGACY TRACKPAD bank=$bankX,$bankY composition=$needsComposition ===")
+        legacyTrackpad = true
+        if (needsComposition) anchorNeedsComposition = true
+        // A second finger may already have asked for a selection while the map was being tried.
+        if (precise.selecting) beginSelection()
         // IMMEDIATE as well as MONITOR. MONITOR alone only delivers when the cursor *moves*,
         // so a second trackpad gesture with no editing in between would never receive a seed
         // position, leaving the marker unplaced and the whole gesture inert. That is why it
@@ -2187,6 +2245,8 @@ class KeyboardService : InputMethodService() {
         pendingSentAt = 0L
         pendingFromOffset = -1
         verticalStuckDir = 0
+        unseededPanX = bankX
+        unseededPanY = bankY
         if (anchorNeedsComposition) holdCompositionForAnchor()
         else handler.postDelayed(anchorProbe, ANCHOR_PROBE_MS)
         updateIndicator()
@@ -2216,6 +2276,8 @@ class KeyboardService : InputMethodService() {
 
     private fun stopTrackpad() {
         trace("=== TRACKPAD END ===")
+        if (trackpadActive && !legacyTrackpad) precise.stop()
+        legacyTrackpad = false
         trackpadActive = false
         scrollPinned = false
         handler.removeCallbacks(edgeScrollTick)
@@ -2227,12 +2289,17 @@ class KeyboardService : InputMethodService() {
         markerX = Float.NaN
         markerCenterY = Float.NaN
         currentInputConnection?.requestCursorUpdates(0)
+        indicator?.clear()
         indicatorPopup?.takeIf { it.isShowing }?.let { runCatching { it.dismiss() } }
     }
 
     /** The finger moves the marker, freely, in screen space. Nothing constrains it to the text. */
     private fun panMarker(dx: Float, dy: Float) {
         if (!trackpadActive) return
+        if (!legacyTrackpad) {
+            precise.pan(dx, dy)
+            return
+        }
         if (markerX.isNaN()) {
             unseededPanX += dx
             unseededPanY += dy
@@ -2423,6 +2490,10 @@ class KeyboardService : InputMethodService() {
     }
 
     override fun onUpdateCursorAnchorInfo(info: CursorAnchorInfo) {
+        if (trackpadActive && !legacyTrackpad) {
+            precise.onCursorAnchorInfo(info)
+            return
+        }
         if (DEBUG_GESTURES) android.util.Log.d(
             TAG,
             "anchor sel=[${info.selectionStart},${info.selectionEnd}] " +
@@ -2817,46 +2888,60 @@ class KeyboardService : InputMethodService() {
         return pts
     }
 
-    /** Draws the marker wherever the finger has put it. */
+    /**
+     * Draws the marker wherever the finger has put it, and where the caret will land.
+     *
+     * The overlay covers the screen and is shown once per gesture; each move after that is only
+     * an invalidate. The old version repositioned a popup the size of the bar on every move,
+     * which is a window relayout per touch event.
+     */
     private fun updateIndicator() {
         if (!trackpadActive) return
         val kv = keyboardView ?: return
-        if (markerX.isNaN() || markerCenterY.isNaN()) return
-
-        val lh = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
+        val x: Float
+        val y: Float
+        val h: Float
+        var landing: FloatArray? = null
+        if (!legacyTrackpad) {
+            val m = precise.marker() ?: return
+            x = m[0]
+            y = m[1]
+            h = m[2].takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
+            landing = precise.landing()
+        } else {
+            if (markerX.isNaN() || markerCenterY.isNaN()) return
+            x = markerX
+            y = markerCenterY
+            h = lineHeight.takeIf { it > 1f } ?: (20f * resources.displayMetrics.density)
+        }
         val view = indicator ?: CursorIndicatorView(this).also { indicator = it }
-        view.lineHeightPx = lh.roundToInt()
-        view.measure(
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-            View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-        )
-
-        // CursorAnchorInfo's matrix yields screen coordinates, but showAtLocation places the
-        // popup relative to the parent's *window* origin -- which for an IME is the top of the
-        // keyboard, roughly 1400px down. Convert between the two explicitly.
-        val onScreen = IntArray(2)
-        val inWindow = IntArray(2)
-        kv.getLocationOnScreen(onScreen)
-        kv.getLocationInWindow(inWindow)
-
-        val x = (markerX - view.measuredWidth / 2f).roundToInt() - (onScreen[0] - inWindow[0])
-        val y = (markerCenterY - view.measuredHeight / 2f).roundToInt() - (onScreen[1] - inWindow[1])
+        view.setMarker(x, y, h)
+        if (landing != null) view.setLanding(landing[0], landing[1], landing[2])
+        else view.setLanding(Float.NaN, Float.NaN, 0f)
 
         val popup = indicatorPopup ?: PopupWindow(view).apply {
             isTouchable = false
             isFocusable = false
             isClippingEnabled = false
-            width = ViewGroup.LayoutParams.WRAP_CONTENT
-            height = ViewGroup.LayoutParams.WRAP_CONTENT
             setBackgroundDrawable(null)
             indicatorPopup = this
         }
+        if (popup.isShowing) return
+        // showAtLocation positions relative to the parent's *window*, which for an IME starts at
+        // the top of the keyboard; place the popup at the screen origin explicitly. The view
+        // itself maps screen coordinates through its own on-screen position when it draws, so a
+        // window manager that nudges the popup does not move the marks.
+        val metrics = resources.displayMetrics
+        popup.width = metrics.widthPixels
+        popup.height = metrics.heightPixels
+        val onScreen = IntArray(2)
+        val inWindow = IntArray(2)
+        kv.getLocationOnScreen(onScreen)
+        kv.getLocationInWindow(inWindow)
         runCatching {
-            if (popup.isShowing) {
-                popup.update(x, y, -1, -1)
-            } else {
-                popup.showAtLocation(kv, Gravity.NO_GRAVITY, x, y)
-            }
+            popup.showAtLocation(
+                kv, Gravity.NO_GRAVITY, -(onScreen[0] - inWindow[0]), -(onScreen[1] - inWindow[1]),
+            )
         }.onFailure {
             if (DEBUG_GESTURES) android.util.Log.d(TAG, "indicator failed: $it")
         }

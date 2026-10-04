@@ -6,6 +6,115 @@ the techniques that make that work, and the several designs that had to be disca
 Most of them exist because of a specific, non-obvious platform behaviour; those are marked
 **[platform]** and also appear in `NOTES.md`.
 
+**§0 is the current design.** §1–§12 describe the closed-loop steering that came before it. That
+code still runs, but only as the fallback for editors that cannot be mapped, and most of its
+lessons still apply.
+
+---
+
+## 0. Absolute placement from a map of the text (`cursor/`)
+
+The closed loop in §2 always lagged, because every correction waited a round trip to the app.
+It also hunted, because every estimate it steered by (character width, line pitch, where rows
+wrap) was wrong somewhere. Both problems come from the loop itself, so the loop has been
+replaced.
+
+When the hold takes, the keyboard asks the editor where every character in and around the
+visible text is drawn, and builds a **`CaretMap`**: rows of caret stops, each an offset and a
+screen x. After that, every finger movement is handled locally:
+
+1. The marker moves by the finger's travel, in pixels.
+2. `CaretMap.hit` turns the marker into an offset, with hysteresis.
+3. If the offset changed, one `setSelection` is sent.
+
+Nothing waits on the app, so the caret lands where the marker points as soon as the app redraws.
+Nothing is estimated, so there is nothing to drift. The overlay draws two marks:
+
+- **The marker**: a solid bar, continuous, at the finger's position.
+- **The landing**: a faint bar at the stop the caret is being set to. It comes from the same
+  map, so it moves in the same frame as the marker, and the app's caret then appears underneath
+  it.
+
+### Where the map comes from **[platform]**
+
+The keyboard tries these sources in order:
+
+| source | editors | how |
+|---|---|---|
+| `requestTextBoundsInfo` (API 34) | every platform `TextView`/`EditText`: Instagram, Notes-type apps, Firefox's address bar | Exact bounds for whole lines, with no side effects. The request rectangle extends a screen above and below, so the map covers some text off screen. |
+| composing-region probe | Chrome/WebView, Compose, anything that reports composing bounds | `setComposingRegion` over about 700 characters each side of the caret (cut to whole lines). Read `CursorAnchorInfo.getCharacterBounds`, then `finishComposingText`. No text changes. |
+| replacement probe | Firefox `<input>`/`<textarea>` | See below. |
+| none | terminals, games, custom views | Falls back to §1–§12. |
+
+**Firefox (GeckoView)** reports character bounds only for a composition that *Gecko* started
+(`GeckoEditableSupport::UpdateCompositionRects` queries `TextComposition`). It never starts one
+from a bare composing region; it needs composing *text*. So the text either side of the caret is
+re-set as composing text identical to itself, as a `SpannableString` so that no underline span
+is added. This is done in two halves, before and after the caret, with `newCursorPosition` set
+so the caret never moves. The two halves are aligned using the caret report that comes with
+each.
+
+This is never done in a `contenteditable`: replacing rich text with a plain string would drop
+its formatting. GeckoView gives itself away there by offering `contentMimeTypes`, which it does
+only for `contenteditable`. Those editors go to the fallback.
+
+### Keeping the map in register while the text scrolls
+
+The map is in screen coordinates, and editors scroll. Every caret report says where the caret
+at some offset is *now*; the map says where that offset *was*. Any difference is the text moving,
+so the map moves by that amount. The marker does not move. That is the only use made of the
+app's reports.
+
+A per-source baseline is subtracted first. It is measured once, while the map is known to be
+fresh, so that a caret drawn a pixel off its glyph edge does not read as a scroll. Soft-wrap
+stops are skipped as references, because editors disagree about which row they draw them on.
+
+GeckoView names no offset in its reports, so each report is matched to the single request
+outstanding, and reports during a selection are ignored. It answers only while a composing
+region exists, so a one-character region is held at whichever end of the text is far from the
+caret. Gecko will not move its caret *into* a region it did not start itself, so a region the
+caret could reach would stop the caret there.
+
+### The visible band, and edges
+
+Only rows inside the **band** are offered to the marker. The band is the editor's bounds where
+they are trustworthy (never Firefox's: see "Trackpad in Firefox" in `NOTES.md`), cut off at the top of the keyboard,
+and narrowed whenever the editor is seen scrolling to reveal a caret that was just placed. That
+scroll measures where its visible edge actually is. A caret placed in a row the user cannot see
+makes the editor scroll, which moves every row under the marker. That is the thrash this rule
+prevents.
+
+Past the band's edge, the marker parks, and a timer moves the caret one row (or one stop
+sideways, in a single-line field) beyond the edge. The rate scales with how far past the edge
+the marker is. The editor scrolls to reveal it, the map follows, and the timer repeats. When the
+map runs out but the text does not, the source is asked again for more.
+
+An editor that does not scroll to reveal a caret set by offset is detected after two
+unrevealed steps. It then gets arrow keys at the edge, which every editor scrolls for, and
+`onUpdateSelection` keeps the map's position.
+
+### Smaller rules that matter
+
+- **Rows tile the text with no shared offsets.** The offset at a soft wrap belongs to the row
+  the editor draws it on, which is the start of the next row. The end of the row above therefore
+  stops one short. A map that put it on both rows would predict the caret on a row where the
+  editor does not draw it.
+- **Partial rows are dropped.** A probe window cut part-way through a soft-wrapped row would
+  start with a fragment of that row, and the fragment would snap the caret to its first known
+  stop.
+- **Whitespace with no width has no stop of its own**; its caret is the end of the row before.
+  Browsers collapse the space at a soft wrap this way.
+- **One `setSelection` in flight.** While one is unacknowledged, only the newest target is kept.
+  An editor slower than the touch rate would otherwise replay a queue of positions, which is lag.
+- **Hysteresis** of a quarter of a character and a fifth of a row. It is small enough that the
+  caret visibly tracks, and large enough that a resting finger never flickers between two stops.
+- **Selections** are `setSelection(anchor, end)` with the dragged end second, so the editor
+  scrolls to follow that end. No shift key and no arrows are involved. The order is normalised
+  when the drag ends.
+
+The pure geometry (`CaretMap`, `CaretMapBuilder`, `CaretSteer`) has no Android dependencies and
+is covered by `CaretMapTest` and `CaretSteerTest`. `PreciseCursor` is the Android side.
+
 ---
 
 ## 1. The central inversion: the marker leads, the caret follows

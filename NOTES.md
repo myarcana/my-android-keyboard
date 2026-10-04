@@ -1455,6 +1455,18 @@ analyse` prints what the lifts actually looked like -- duration and distance, mi
 the window -- plus the statistic that decides whether the leniency is helping at all: how well
 rejoined glides decode compared with uninterrupted ones.
 
+### The trackpad maps the text instead of steering toward it
+
+The trackpad no longer chases the marker with arrow keys. When the hold takes, it asks the
+editor where every visible character is, turns that into a map of caret positions, and from then
+on sets the caret with one `setSelection` per change. The offset is looked up locally from the
+marker, so the caret never waits on a round trip and has no estimate to drift. The map comes
+from `requestTextBoundsInfo` on Android 14+ (every `EditText`). Otherwise it comes from
+composing-region bounds (Chrome, WebView, Compose). In Firefox's plain inputs and textareas, the
+text is re-set as identical composing text, because Gecko measures only compositions it started
+itself. Editors that give nothing still get the old loop. Mechanics, and the platform behaviour
+behind each rule, are in `docs/CURSOR_AND_SELECTION.md` §0.
+
 ### Trackpad in Firefox: caret reports need a composition
 
 Firefox (GeckoView) returns `true` from `requestCursorUpdates` and then sends no
