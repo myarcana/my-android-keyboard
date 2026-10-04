@@ -34,6 +34,7 @@ import com.offlinekeyboard.ime.autofill.InlineAutofill
 import com.offlinekeyboard.ime.autofill.InlineSuggestionStrip
 import com.offlinekeyboard.ime.asr.CommandMerge
 import com.offlinekeyboard.ime.asr.Dictation
+import com.offlinekeyboard.ime.asr.DictationSpacing
 import com.offlinekeyboard.ime.asr.MicrophonePermissionActivity
 import com.offlinekeyboard.ime.asr.SpokenPunctuation
 import com.offlinekeyboard.ime.candidates.EmojiIndex
@@ -587,16 +588,9 @@ class KeyboardService : InputMethodService() {
         logDictated(raw, text)
         if (text.isEmpty()) return
         val ic = currentInputConnection ?: return
-        val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
-        // Latin beside Han takes a space ("the best 豆花"), Han beside Han never does, and nothing
-        // follows a full-width mark, which already fills its own cell.
-        val first = text.first()
-        val needsSpace = before != null && !before.isWhitespace() && first.isLetterOrDigit() &&
-            when {
-                isHan(before) && isHan(first) -> false
-                isHan(first) -> before.isLetterOrDigit()
-                else -> !isFullWidthMark(before)
-            }
+        // Two characters, so a straight quote can be told apart as opening or closing.
+        val before = ic.getTextBeforeCursor(2, 0) ?: ""
+        val needsSpace = DictationSpacing.needsSpace(before, text)
         ic.beginBatchEdit()
         ic.commitText(if (needsSpace) " $text" else text, 1)
         ic.endBatchEdit()
@@ -629,8 +623,6 @@ class KeyboardService : InputMethodService() {
 
     private fun isHan(c: Char): Boolean =
         Character.UnicodeScript.of(c.code) == Character.UnicodeScript.HAN
-
-    private fun isFullWidthMark(c: Char): Boolean = c in "，。？！；：、「」『』“”（）…—"
 
     /**
      * Which script the punctuation should take, decided from the segment itself rather than from
