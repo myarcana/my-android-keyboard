@@ -106,6 +106,42 @@ INFORMAL = {
 UNCOUNTED = {"heteronym", "heteronyms"}
 UNCOUNTED_COUNT = 12_000
 
+# Nationality and people words, kept at their crawl count whatever the dictionary says.
+#
+# Past rank 15,000 a word must be in web2, and web2 is a 1934 dictionary: it has "Chinese" and
+# "Syrian" but not "Taiwanese" (rank 22,658, 1.3M uses), because Taiwan was Formosa then. Nor
+# "Bangladeshi", "Singaporean", "Kazakh" or "Zimbabwean" -- none of those states existed. Their
+# plurals fail for another reason: "syrians" is rank 60,006, just past where the 40,000 cut stops,
+# and too short for the long-word pass. Each entry here brings its "-s" plural along when the
+# crawl counts one.
+#
+# A list rather than a suffix rule, because the rule does not survive contact with the crawl:
+# place + "i"/"n"/"ian" also reads "martini" as Martin's and "staten" as a state's. Left off on
+# purpose: "lao" (three letters, and a pinyin syllable) and "nigerien", whose glide is almost
+# exactly "nigerian"'s.
+DEMONYMS = {
+    # Taiwan's own: its people and the two languages besides Mandarin most spoken there.
+    "taiwanese", "hakka", "hokkien",
+    # Missing outright: web2 predates the country or never listed the word.
+    "angolan", "bahraini", "bangladeshi", "barbadian", "belarusian", "belizean", "bhutanese",
+    "burundian", "cameroonian", "chadian", "cypriot", "emirati", "eritrean", "gabonese",
+    "gambian", "ghanaian", "grenadian", "guinean", "guyanese", "ivorian", "kazakh",
+    "kazakhstani", "kosovar", "kuwaiti", "kyrgyz", "laotian", "malawian", "malian", "maldivian",
+    "mauritanian", "mauritian", "moldovan", "montenegrin", "mozambican", "namibian",
+    "paraguayan", "qatari", "rwandan", "salvadoran", "senegalese", "singaporean", "slovakian",
+    "somalian", "surinamese", "swazi", "tanzanian", "togolese", "tongan", "trinidadian",
+    "uighur", "uyghur", "zambian", "zimbabwean",
+    # Already in, listed for their plurals: "syrians" and the rest fall past the 40,000 cut.
+    "algerian", "argentinian", "austrian", "azerbaijani", "belgian", "bolivian", "bosnian",
+    "bulgarian", "cambodian", "chilean", "colombian", "croatian", "dominican", "ecuadorian",
+    "estonian", "ethiopian", "fijian", "georgian", "guatemalan", "haitian", "honduran",
+    "hungarian", "indonesian", "jamaican", "jordanian", "kenyan", "latvian", "liberian",
+    "libyan", "lithuanian", "malaysian", "mongolian", "moroccan", "nepali", "nicaraguan",
+    "nigerian", "norwegian", "panamanian", "peruvian", "romanian", "saudi", "serbian", "slovak",
+    "slovenian", "somali", "syrian", "tunisian", "ugandan", "uruguayan", "uzbek", "venezuelan",
+    "yemeni",
+}
+
 # How far down the crawl a *long* word may be found, beyond the words DEFAULT_LIMIT keeps.
 #
 # The limit above is a count, and it stops at rank ~59k -- which leaves out ordinary words the
@@ -420,6 +456,12 @@ def main() -> int:
         kept[word] = max(kept.get(word, 0), count)
     for word in UNCOUNTED:
         kept[word] = max(kept.get(word, 0), UNCOUNTED_COUNT)
+    demonyms = 0
+    for singular in DEMONYMS:
+        for word in (singular, singular + "s"):
+            if word not in kept and counts.get(word, 0) > 0:
+                kept[word] = counts[word]
+                demonyms += 1
 
     added = 0
     for word in CONTRACTIONS:
@@ -462,6 +504,7 @@ def main() -> int:
 
     print(f"{OUT}: {len(rows)} words, {OUT.stat().st_size / 1024:.0f} KB")
     print(f"  {core} from the crawl's head, {long_words} long words from its tail")
+    print(f"  {demonyms} nationality words the dictionary check had dropped")
     print(f"  {added} contractions scored from their bare form, {len(DROP_BARE)} bare forms dropped")
     if dropped_by_guard:
         print(f"  {len(dropped_by_guard)} words dropped by the repository's commit guard")

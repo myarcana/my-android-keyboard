@@ -56,6 +56,23 @@ class LexiconCoverageTest {
     }
 
     /**
+     * web2 is a 1934 dictionary, so it has "Chinese" but not "Taiwanese", and the dictionary
+     * check past rank 15,000 dropped every demonym of a country it predates. Scored from the
+     * crawl, "taiwanese" should sit among the common words, not at the floor.
+     */
+    @Test
+    fun `nationality words web2 predates are in the lexicon`() {
+        val lexicon = lexicon ?: return
+        listOf(
+            "taiwanese", "hakka", "hokkien", "bangladeshi", "singaporean", "kazakh", "zimbabwean",
+            "syrians", "nigerians",
+        ).forEach { assertNotNull("$it is missing", lexicon.logProbability(it)) }
+        val taiwanese = lexicon.logProbability("taiwanese")!!
+        val chinese = lexicon.logProbability("chinese")!!
+        assertTrue("taiwanese $taiwanese vs chinese $chinese", chinese - taiwanese < 5f)
+    }
+
+    /**
      * The deep pass admits long words only; a short one would hide inside longer gestures, which
      * is the whole reason the short-word limits exist. And its second-corpus check keeps out the
      * misspellings the suffix rules would otherwise read as inflections.
