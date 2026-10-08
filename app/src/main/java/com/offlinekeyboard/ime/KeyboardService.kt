@@ -51,6 +51,7 @@ import com.offlinekeyboard.ime.gesture.FlickPrior
 import com.offlinekeyboard.ime.gesture.WordStarts
 import com.offlinekeyboard.ime.gesture.GestureOutput
 import com.offlinekeyboard.ime.glide.FutoSwipe
+import com.offlinekeyboard.ime.glide.GlideContext
 import com.offlinekeyboard.ime.glide.GlideEngine
 import com.offlinekeyboard.ime.glide.GlideRejections
 import com.offlinekeyboard.ime.glide.GlideSpacing
@@ -1439,8 +1440,11 @@ class KeyboardService : InputMethodService() {
         flushPending()
         val decoder = glide ?: return null
         val view = keyboardView ?: return null
-        val candidates = decoder.decode(completed.path, view.currentGeometry)
         val ic = currentInputConnection ?: return null
+        // What was typed before this word, so the context model can choose between shapes the
+        // glide alone cannot separate: `so good`, not `so god`.
+        val context = GlideContext.words(ic.getTextBeforeCursor(GlideContext.LOOKBEHIND, 0) ?: "")
+        val candidates = decoder.decode(completed.path, view.currentGeometry, context)
 
         val before = ic.getTextBeforeCursor(1, 0)?.lastOrNull()
         val needsSpace = before != null && !before.isWhitespace() && before !in OPENERS

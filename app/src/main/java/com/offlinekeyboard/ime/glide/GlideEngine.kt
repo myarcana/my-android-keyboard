@@ -32,8 +32,16 @@ interface GlideEngine {
      * the caller's business and neither engine is told that one happened: a glide with a skip in
      * it is a glide with a long straight segment, which is what a finger that kept going would
      * have drawn anyway.
+     *
+     * [context] is the words already typed before this one in the sentence, oldest first -- see
+     * [GlideContext]. It is how `so good` beats `so god`: the shapes are all but identical, and
+     * only what came before can tell them apart. Empty means a sentence start, or nothing known.
      */
-    fun decode(path: List<PathPoint>, geometry: LayoutGeometry): List<GlideCandidate>
+    fun decode(
+        path: List<PathPoint>,
+        geometry: LayoutGeometry,
+        context: List<String> = emptyList(),
+    ): List<GlideCandidate>
 }
 
 /**

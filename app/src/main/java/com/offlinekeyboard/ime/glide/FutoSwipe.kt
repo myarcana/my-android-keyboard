@@ -55,7 +55,11 @@ class FutoSwipe private constructor(
     var lastMicros: Float = 0f
         private set
 
-    override fun decode(path: List<PathPoint>, geometry: LayoutGeometry): List<GlideCandidate> {
+    override fun decode(
+        path: List<PathPoint>,
+        geometry: LayoutGeometry,
+        context: List<String>,
+    ): List<GlideCandidate> {
         if (path.size < 2) return emptyList()
         applyLayout(geometry)
 
@@ -75,6 +79,11 @@ class FutoSwipe private constructor(
         }
 
         return runCatching {
+            // Set on every decode, never accumulated: the field is the truth about what precedes
+            // the caret, and the user can move the caret, delete, or paste between any two glides.
+            // Without it the engine skips its context LM entirely -- it only reranks when handed
+            // context -- and `so good` loses to `so god` on frequency alone.
+            decoder.setContext(context)
             val results = decoder.recognize(x, y, t, topK = 5)
             lastMicros = decoder.lastTiming().totalUs
             // `score` is the library's final score: the CTC log-probability, length-normalised,
