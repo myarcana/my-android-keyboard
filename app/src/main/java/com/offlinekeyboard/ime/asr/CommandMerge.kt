@@ -99,8 +99,21 @@ object CommandMerge {
         val swallowed = mutableSetOf<Int>()
         val orphans = mutableListOf<Detection>()
 
+        // Two passes: every detection gets first claim on an exact spelling before any of them
+        // is allowed a fuzzy one. Otherwise an early detection resolved loosely could take the
+        // very word a later one spells exactly -- "comment comma" with two COMMA fires.
+        val unresolved = mutableListOf<Detection>()
         for (detection in detections.sortedBy { it.seconds }) {
             val range = findSpelling(words, detection, swallowed)
+            if (range == null) {
+                unresolved += detection
+            } else {
+                consumed[range.first] = detection.id
+                swallowed += range
+            }
+        }
+        for (detection in unresolved) {
+            val range = findResemblance(words, detection, swallowed)
             if (range == null) {
                 orphans += detection
             } else {
@@ -204,6 +217,80 @@ object CommandMerge {
 
     /** The longest command spelling, in words: "exclamation mark", 感 嘆 號. */
     private const val MAX_COMMAND_WORDS = 3
+
+    /**
+     * How closely a run of words must resemble a command to be taken as its misspelling, as
+     * 1 minus edit distance over the longer length.
+     *
+     * The spelling list cannot be complete: every new reduction of a command word is a new
+     * spelling -- "question mug", "comment" -- and each one left the misheard word in the text
+     * next to the mark the spotter correctly placed. This is the fallback for those, and it is
+     * deliberately looser than it would be anywhere else, because it is consulted only where the
+     * spotter has already fired. The question it answers is not "is this word a command" but
+     * "which word here did the recogniser write for the command we know was spoken".
+     *
+     * 0.5 accepts "comment" for comma (0.57), "common" (0.67), "column" for colon (0.67),
+     * "question mug" (0.75); it rejects unrelated neighbours like "now" (0.2) or "okay".
+     */
+    private const val RESEMBLANCE_THRESHOLD = 0.5f
+
+    /**
+     * Finds the run of words that most resembles the detected command, near its time.
+     *
+     * Highest similarity wins rather than the closest in time, because a partial run must lose to
+     * the full one: "question" alone scores 0.67 against "question mark", "question mug" 0.75,
+     * and taking the shorter would leave "mug" behind. Ties go to the nearer run.
+     */
+    private fun findResemblance(
+        words: List<TimedWord>,
+        detection: Detection,
+        taken: Set<Int>,
+    ): IntRange? {
+        val spellings = PunctuationCommands.spellingsFor(detection.id).map(::letters)
+        if (spellings.isEmpty()) return null
+        var best: IntRange? = null
+        var bestScore = RESEMBLANCE_THRESHOLD
+        var bestDistance = Float.MAX_VALUE
+        for (start in words.indices) {
+            if (start in taken) continue
+            val distance = kotlin.math.abs(words[start].start - detection.seconds)
+            if (distance > MATCH_WINDOW_SECONDS) continue
+            for (length in 1..MAX_COMMAND_WORDS) {
+                val end = start + length - 1
+                if (end >= words.size) break
+                if ((start..end).any { it in taken }) break
+                val run = letters((start..end).joinToString("") { words[it].text })
+                if (run.isEmpty()) continue
+                val score = spellings.maxOf { similarity(run, it) }
+                if (score > bestScore || (score == bestScore && best != null && distance < bestDistance)) {
+                    bestScore = score
+                    bestDistance = distance
+                    best = start..end
+                }
+            }
+        }
+        return best
+    }
+
+    /** Lower-cased letters only, so spacing and clinging punctuation do not count as edits. */
+    private fun letters(text: String): String =
+        text.lowercase().filter { it.isLetter() }
+
+    /** 1 - Levenshtein distance / longer length: 1 for identical, 0 for nothing in common. */
+    internal fun similarity(a: String, b: String): Float {
+        if (a.isEmpty() || b.isEmpty()) return 0f
+        var previous = IntArray(b.length + 1) { it }
+        var current = IntArray(b.length + 1)
+        for (i in 1..a.length) {
+            current[0] = i
+            for (j in 1..b.length) {
+                val cost = if (a[i - 1] == b[j - 1]) 0 else 1
+                current[j] = minOf(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            }
+            val swap = previous; previous = current; current = swap
+        }
+        return 1f - previous[b.length].toFloat() / maxOf(a.length, b.length)
+    }
 
     /**
      * Whether words [start]..[end] spell one of [spellings], joined the way each script writes.

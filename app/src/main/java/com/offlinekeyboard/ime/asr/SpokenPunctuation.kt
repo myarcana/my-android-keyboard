@@ -200,8 +200,28 @@ object SpokenPunctuation {
         for ((spoken, mark) in ENGLISH) {
             result = ENGLISH_WORD[spoken]!!.replace(result, quoted(mark, script))
         }
+        result = REDUCED_EXCLAMATION.replace(result, "!")
         return result
     }
+
+    /**
+     * "exclamation" followed by a reduced "mark" or "point": "exclamation mug", "exclamation
+     * muck", "exclamation pint".
+     *
+     * This is the path for when the keyword spotter misses. It has to work from the text alone,
+     * so unlike the fuzzy match in [CommandMerge] -- which runs only where the spotter has already
+     * fired -- it cannot afford to be loose. What makes it safe for this one command is the head
+     * word. "exclamation" almost never occurs in dictated prose, and it is the part of the command
+     * the recogniser gets right; the second word is short, unstressed and sentence-final, and is
+     * the part that comes back wrong. "question mug" has no equivalent rule because "question" is
+     * an everyday word and "a question more" is real prose.
+     *
+     * The second word is held to the shape of the word it stands for: one syllable, starting with
+     * the "m" of mark or the "p" of point, ending on a stop -- mug, muck, mock, mart, punt, pint,
+     * park. That rejects "an exclamation made her jump" and "exclamation more", which are prose.
+     */
+    private val REDUCED_EXCLAMATION =
+        Regex("(?<![\\p{L}])exclamation\\s+[mp][a-z]{0,3}[kgtdc]s?(?![\\p{L}'\\u2019])", RegexOption.IGNORE_CASE)
 
     /**
      * Whole words only, case-insensitive. Without the boundaries "dash" would fire inside

@@ -79,6 +79,26 @@ class SpokenPunctuationTest {
     }
 
     @Test
+    fun `a reduced exclamation mark is still an exclamation mark`() {
+        // Reported from the phone, with the spotter silent: the "mark" came back as "mug".
+        assertEquals(
+            "holy shit I have been in taiwan so long! I've seen it before",
+            en("holy shit I have been in taiwan so long exclamation mug I've seen it before"),
+        )
+        for (misheard in listOf("mug", "muck", "mock", "mart", "marks", "pint", "punt")) {
+            assertEquals("replacing $misheard", "wow!", en("wow exclamation $misheard"))
+        }
+    }
+
+    @Test
+    fun `exclamation in prose is left alone`() {
+        assertEquals("an exclamation made her jump", en("an exclamation made her jump"))
+        assertEquals("no exclamation more", en("no exclamation more"))
+        assertEquals("an exclamation", en("an exclamation"))
+        assertEquals("exclamations matter", en("exclamations matter"))
+    }
+
+    @Test
     fun `half width marks take a space after but not before`() {
         assertEquals("one, two, three", en("one comma two comma three"))
     }

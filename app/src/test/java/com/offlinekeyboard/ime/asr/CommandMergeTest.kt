@@ -57,6 +57,85 @@ class CommandMergeTest {
         assertEquals("hello , world", result)
     }
 
+    // --- misspellings no list anticipated ------------------------------------------------
+    //
+    // Reported from the phone: the spotter fired and its mark landed, but the recogniser's
+    // misspelling stayed beside it, because neither was in SPELLINGS.
+
+    @Test
+    fun `question mug is replaced by the question mark`() {
+        // "why question mark" came out as "why? question mug".
+        val t = CommandMerge.Transcript(
+            text = "why question mug",
+            tokens = listOf("why", " question", " mug"),
+            timestamps = listOf(0.0f, 0.6f, 1.1f),
+        )
+        assertEquals("why?", applied(t, CommandMerge.Detection("QUESTION_MARK", 0.5f)))
+    }
+
+    @Test
+    fun `exclamation mug is replaced by the exclamation mark`() {
+        // The same misspelling with the spotter firing: the fuzzy match must take both words.
+        val t = CommandMerge.Transcript(
+            text = "so long exclamation mug I've seen it",
+            tokens = listOf("so", " long", " exclamation", " mug", " I've", " seen", " it"),
+            timestamps = listOf(0.0f, 0.3f, 0.8f, 1.5f, 2.0f, 2.3f, 2.5f),
+        )
+        assertEquals(
+            "so long! I've seen it",
+            applied(t, CommandMerge.Detection("EXCLAMATION_MARK", 0.9f)),
+        )
+    }
+
+    @Test
+    fun `comment is replaced by the comma`() {
+        // "okay comma now what question mark" came out as "okay comment, now what?".
+        val t = CommandMerge.Transcript(
+            text = "okay comment now what question mark",
+            tokens = listOf("okay", " comment", " now", " what", " question", " mark"),
+            timestamps = listOf(0.0f, 0.6f, 1.4f, 1.8f, 2.3f, 2.8f),
+        )
+        val result = applied(
+            t,
+            CommandMerge.Detection("COMMA", 0.7f),
+            CommandMerge.Detection("QUESTION_MARK", 2.3f),
+        )
+        assertEquals("okay, now what?", result)
+    }
+
+    @Test
+    fun `a fuzzy match does not eat an unrelated neighbour`() {
+        // Nothing near the detection resembles "comma", so it is inserted, not substituted.
+        val result = merge(
+            transcript("okay", "now", "what"),
+            CommandMerge.Detection("COMMA", 1.0f),
+        )
+        assertTrue("now must survive in $result", result.contains("now"))
+        assertTrue("okay must survive in $result", result.contains("okay"))
+        assertTrue("expected a comma in $result", result.contains(","))
+    }
+
+    @Test
+    fun `an exact spelling beats a resemblance`() {
+        // Two COMMA fires: the exact "comma" must go to its own detection, and "comment" to the
+        // other, rather than the first detection taking "comma" loosely and orphaning the second.
+        val result = merge(
+            transcript("comment", "comma"),
+            CommandMerge.Detection("COMMA", 0.4f),
+            CommandMerge.Detection("COMMA", 0.9f),
+        )
+        assertEquals(", ,", result)
+    }
+
+    @Test
+    fun `similarity is edit distance over length`() {
+        assertEquals(1f, CommandMerge.similarity("comma", "comma"), 0.001f)
+        assertTrue(CommandMerge.similarity("comment", "comma") > 0.5f)
+        assertTrue(CommandMerge.similarity("questionmug", "questionmark") > 0.7f)
+        assertTrue(CommandMerge.similarity("now", "comma") < 0.5f)
+        assertTrue(CommandMerge.similarity("okay", "comma") < 0.5f)
+    }
+
     // --- placement ------------------------------------------------------------------------
 
     @Test
