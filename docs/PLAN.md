@@ -97,9 +97,10 @@ DOWN → PRESSED
 FLICK stays uncommitted until release precisely so it can still promote to GLIDE. Thresholds
 go in a debug overlay screen so they can be tuned by feel on the real device.
 
-- Spacebar trackpad: long-press space → TRACKPAD. Horizontal delta and vertical delta both
-  accumulate against a threshold and emit `DPAD_LEFT/RIGHT/UP/DOWN` key events. Vertical uses
-  key events rather than `setSelection` because only the text view knows where lines wrap.
+- Spacebar trackpad: long-press space → TRACKPAD. The keyboard maps where the visible text is
+  drawn and sets the caret absolutely with `setSelection` (see `docs/CURSOR_AND_SELECTION.md`).
+  The original plan here -- emitting `DPAD` key events per unit of travel -- was built, lagged
+  and hunted, and was removed.
 
 **Milestone: English typing feels like iOS, flick-down types symbols, space is a 2D trackpad.**
 

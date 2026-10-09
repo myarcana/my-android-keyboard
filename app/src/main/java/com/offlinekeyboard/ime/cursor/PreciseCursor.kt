@@ -7,7 +7,6 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import android.text.SpannableString
-import android.view.KeyEvent
 import android.view.inputmethod.CursorAnchorInfo
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -22,10 +21,10 @@ import kotlin.math.min
 /**
  * The spacebar trackpad, placing the caret absolutely.
  *
- * The old trackpad steered the caret toward the marker with arrow keys, closing the loop on the
- * app's caret reports. Every correction waited a round trip, so the caret always trailed the
- * marker, and every estimate it steered with -- character width, line pitch, where rows wrap --
- * was wrong somewhere, so it overshot and hunted. This replaces the loop with a map.
+ * Never steer the caret toward the marker with arrow keys and the app's caret reports: every
+ * correction waits a round trip, so the caret trails the marker, and every estimate such a loop
+ * steers with -- character width, line pitch, where rows wrap -- is wrong somewhere, so it
+ * overshoots and hunts. That design was tried and removed; this uses a map instead.
  *
  * When the hold takes, the editor is asked where every character in and around the visible text
  * is drawn ([CaretMap]). From then on each finger movement is a local lookup -- marker to offset,
@@ -46,7 +45,8 @@ import kotlin.math.min
  *    composing text identical to itself, caret held in place, and the bounds read back. Never in
  *    a rich editor (`contenteditable`), where replacing text would drop its formatting.
  *
- * When none works the host falls back to the old steering ([Host.fallBack]).
+ * There is no fallback. When none of these works, the trackpad does nothing in that field: a
+ * cursor that only approximately follows the finger is worse than none.
  *
  * The map is in screen coordinates and editors scroll, so it is kept in register by the caret
  * reports the app keeps sending: each says where the caret at some offset is *now*, the map says
@@ -68,8 +68,6 @@ class PreciseCursor(private val host: Host) {
         fun mainExecutor(): Executor
         /** The marker moved or changed size. */
         fun redraw()
-        /** Nothing here can map this editor; use the old steering, with this travel banked. */
-        fun fallBack(bankX: Float, bankY: Float, needsComposition: Boolean)
         fun trace(message: String)
     }
 
@@ -136,8 +134,6 @@ class PreciseCursor(private val host: Host) {
     private var reportedEnd = 0
 
     // --- edge scrolling --------------------------------------------------------------------------
-    /** The editor does not scroll to reveal a caret set by offset, so edges step with arrows. */
-    private var edgeViaKeys = false
     private var unrevealedSteps = 0
     private var edgeAwaiting = -1
     private var edgeSentAt = 0L
@@ -250,7 +246,6 @@ class PreciseCursor(private val host: Host) {
         selecting = false
         anchor = -1
         reportedEnd = 0
-        edgeViaKeys = false
         unrevealedSteps = 0
         edgeAwaiting = -1
         reacquiring = false
@@ -280,7 +275,8 @@ class PreciseCursor(private val host: Host) {
         }
         probe = null
         phase = Phase.FAILED
-        host.fallBack(bankX, bankY, geckoLike)
+        // Nothing to draw and nothing to move: the gesture is inert until the finger lifts.
+        host.redraw()
     }
 
     // =============================================================================================
@@ -306,6 +302,9 @@ class PreciseCursor(private val host: Host) {
         if (phase == Phase.ACTIVE && steer.seeded) {
             return floatArrayOf(steer.markerX, steer.markerY, steer.markerHeight())
         }
+        // A field that could not be mapped shows nothing: a marker that does not move the caret
+        // would be a lie.
+        if (phase != Phase.ACQUIRING) return null
         val c = caretPoint ?: return null
         val h = c[2] - c[1]
         return floatArrayOf(c[0] + bankX, (c[1] + c[2]) / 2f + bankY, h)
@@ -341,16 +340,6 @@ class PreciseCursor(private val host: Host) {
         if (awaitingAck && (selEnd == sentEnd || selStart == sentEnd)) {
             awaitingAck = false
             flushQueued()
-        }
-        if (phase == Phase.ACTIVE && probe == null && !awaitingAck && queued == null &&
-            selEnd != sentEnd && sentEnd >= 0 && edgeViaKeys
-        ) {
-            // An arrow key moved the caret at an edge; follow it, and map further when it has
-            // gone past what the map covers.
-            val at = steer.map.locate(selEnd)
-            if (at != null) steer.hit = at else reacquire()
-            sentStart = selStart
-            sentEnd = selEnd
         }
         if (phase == Phase.ACTIVE && probe == null) {
             if (geckoLike) askGecko(selEnd)
@@ -585,10 +574,26 @@ class PreciseCursor(private val host: Host) {
             InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
         )
         val gen = generation
+        pollProbe(p, gen)
         after(PROBE_TIMEOUT_MS) {
             if (gen == generation && probe === p) {
                 probeGaveNothing("timeout")
             }
+        }
+    }
+
+    /**
+     * Re-asks for a report every few frames while [p] is unanswered. An editor may answer the
+     * first request from state it had before the composing region existed, and then -- in
+     * GeckoView, always; in Chromium, when nothing else changes -- not send another.
+     */
+    private fun pollProbe(p: Probe, gen: Int) {
+        after(PROBE_POLL_MS) {
+            if (gen != generation || probe !== p) return@after
+            host.inputConnection?.requestCursorUpdates(
+                InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
+            )
+            pollProbe(p, gen)
         }
     }
 
@@ -647,7 +652,14 @@ class PreciseCursor(private val host: Host) {
 
     private fun onProbeReport(info: CursorAnchorInfo, caret: FloatArray?) {
         val p = probe ?: return
-        val composed = info.composingText ?: return
+        val composed = info.composingText
+        val cs0 = info.composingTextStart
+        trace(
+            "PROBE seen kind=${p.kind} want=${p.base}+${p.text.length} " +
+                "comp=$cs0+${composed?.length} sel=${info.selectionStart},${info.selectionEnd} " +
+                "b0=${info.getCharacterBounds(cs0)} caret=${caret?.joinToString(",")}",
+        )
+        if (composed == null) return
         // The editor's own copy of the text may differ in representation -- a contenteditable's
         // block boundaries, say -- but a report for this probe has its length.
         if (composed.length != p.text.length) return
@@ -908,6 +920,7 @@ class PreciseCursor(private val host: Host) {
             InputConnection.CURSOR_UPDATE_IMMEDIATE or InputConnection.CURSOR_UPDATE_MONITOR,
         )
         val gen = generation
+        pollProbe(p, gen)
         after(REPLACE_TIMEOUT_MS) {
             if (gen == generation && probe === p) probeGaveNothing("timeout")
         }
@@ -1045,7 +1058,12 @@ class PreciseCursor(private val host: Host) {
         }
         trace("SCROLL off=$offset dx=$dx dy=$dy")
         steer.scrolled(dx, dy)
-        if (placedHere) steer.learnEdgeFromScroll(dx, dy, offset)
+        // Only a scroll of a substantial part of a row or character reveals anything. Firefox
+        // rounds its caret to whole pixels, so a caret alternating between two offsets reports
+        // the text "moving" by one pixel and back, and learning an edge from that had the band's
+        // right side snap shut onto the caret.
+        val revealing = abs(dy) > row.height * 0.5f || abs(dx) > row.gap * 0.5f
+        if (placedHere && revealing) steer.learnEdgeFromScroll(dx, dy, offset)
         if (edgeAwaiting == offset) {
             edgeAwaiting = -1
             unrevealedSteps = 0
@@ -1064,13 +1082,11 @@ class PreciseCursor(private val host: Host) {
         unrevealedSteps++
         trace("UNREVEALED $unrevealedSteps")
         if (unrevealedSteps < 2) return
-        if (selecting) {
-            edgeScrollDisabled = true
-            steer.edgeScrollAllowed = false
-            steer.clamp()
-        } else {
-            edgeViaKeys = true
-        }
+        // This editor does not scroll to show a caret set by offset, so a caret placed past the
+        // visible edge would vanish. The marker keeps to the visible text instead.
+        edgeScrollDisabled = true
+        steer.edgeScrollAllowed = false
+        steer.clamp()
         // Bring the caret back to where the marker can see it.
         steer.hit = null
         update()
@@ -1246,44 +1262,19 @@ class PreciseCursor(private val host: Host) {
                 handler.postDelayed(this, 32)
                 return
             }
-            if (edgeViaKeys && !selecting) {
-                stepWithKey(v, hz)
-            } else {
-                val step = steer.edgeStep()
-                if (step == null) {
-                    reacquire()
-                    handler.postDelayed(this, 32)
-                    return
-                }
-                steer.hit = step
-                place(step, byEdge = true)
-                edgeAwaiting = steer.map.offsetOf(step)
-                edgeSentAt = now
+            val step = steer.edgeStep()
+            if (step == null) {
+                reacquire()
+                handler.postDelayed(this, 32)
+                return
             }
+            steer.hit = step
+            place(step, byEdge = true)
+            edgeAwaiting = steer.map.offsetOf(step)
+            edgeSentAt = now
             host.redraw()
             handler.postDelayed(this, edgeInterval())
         }
-    }
-
-    /** An arrow key, which every editor scrolls to show, for editors that do not do it for an offset. */
-    private fun stepWithKey(v: Int, h: Int) {
-        val ic = host.inputConnection ?: return
-        val code = when {
-            v > 0 -> KeyEvent.KEYCODE_DPAD_DOWN
-            v < 0 -> KeyEvent.KEYCODE_DPAD_UP
-            h > 0 -> KeyEvent.KEYCODE_DPAD_RIGHT
-            else -> KeyEvent.KEYCODE_DPAD_LEFT
-        }
-        // Down at the end of the text, or up at its start, moves focus out of the field.
-        val caret = host.selectionEnd
-        if (code == KeyEvent.KEYCODE_DPAD_UP && caret <= 0) return
-        if (code == KeyEvent.KEYCODE_DPAD_DOWN && ic.getTextAfterCursor(1, 0).isNullOrEmpty()) return
-        val now = SystemClock.uptimeMillis()
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0))
-        ic.sendKeyEvent(KeyEvent(now, now, KeyEvent.ACTION_UP, code, 0))
-        edgeSentAt = now
-        awaitingAck = false
-        queued = null
     }
 
     private fun edgeInterval(): Long {
@@ -1356,7 +1347,8 @@ class PreciseCursor(private val host: Host) {
         /** Smaller for Firefox, where measuring means re-setting the text. */
         const val REPLACE_WINDOW = 400
         const val TEXT_BOUNDS_TIMEOUT_MS = 150L
-        const val PROBE_TIMEOUT_MS = 200L
+        const val PROBE_TIMEOUT_MS = 260L
+        const val PROBE_POLL_MS = 32L
         const val REPLACE_TIMEOUT_MS = 260L
         /** How long a sent selection may go unacknowledged before the next is sent anyway. */
         const val ACK_TIMEOUT_MS = 40L
@@ -1366,7 +1358,7 @@ class PreciseCursor(private val host: Host) {
         /** How long an editor gets to scroll a caret into view before it is taken not to. */
         const val UNREVEALED_AFTER_MS = 140L
         /** Report-to-map disagreement below this is noise, not scrolling. */
-        const val SCROLL_EPSILON = 1.0f
+        const val SCROLL_EPSILON = 2.5f
         const val EDGE_AWAIT_MS = 180L
         const val EDGE_SLOWEST_MS = 260L
         const val EDGE_FASTEST_MS = 45L

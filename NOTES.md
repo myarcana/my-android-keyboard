@@ -596,35 +596,6 @@ case that is easy to miss: a multi-line field declares an action so the key can 
 with it while still wanting the line break, and ignoring the flag turns every paragraph break in
 a message app into a sent message.
 
-### Never act on a stale reading more than once
-
-Every arrow in a burst is computed from a single reading of the caret's position, so a long
-burst is dead reckoning: a row edge reached part way through it is not noticed until the whole
-burst has been sent. Tracing a real gesture showed **837 arrow keys for 73 touch events** — the
-caret leaving a row mid-burst, landing on the far side of the wrap, and restarting an enormous
-error from there, forever.
-
-Bursts are capped at 4 steps. Converging over several short rounds costs nothing, because each
-arrow produces its own position report to steer from, and it means no single decision can carry
-the caret past a boundary it cannot see.
-
-### Round to nearest, and compare strictly
-
-Stepping only after a *whole* unit of travel lets the marker lead the caret by a full character
-before it follows, and the caret then lands past it. Stepping once past *half* keeps them within
-half a unit. The comparison must be strict: at exactly half a unit, `>=` steps one way, lands on
-the opposite half boundary, and oscillates forever — an infinite loop in a touch handler.
-
-### Two tricks that are invisible to the user
-
-Both come from the same observation: Android draws a selection as `min..max`, so the *order* of
-its span is free to be used for something else.
-
-- Storing the selection **reversed** makes the app report the end being dragged rather than the
-  fixed one, which is the only way to get a feedback signal for selection at all.
-- **Swapping** that order rather than collapsing lets an arrow key act on the dragged end
-  without the highlight ever disappearing, which is what removed the per-line flicker.
-
 ---
 
 ### Canonical Unicode order is a taxonomy, not a ranking
@@ -1455,48 +1426,39 @@ analyse` prints what the lifts actually looked like -- duration and distance, mi
 the window -- plus the statistic that decides whether the leniency is helping at all: how well
 rejoined glides decode compared with uninterrupted ones.
 
-### The trackpad maps the text instead of steering toward it
+### The trackpad maps the text; there is no fallback
 
-The trackpad no longer chases the marker with arrow keys. When the hold takes, it asks the
-editor where every visible character is, turns that into a map of caret positions, and from then
-on sets the caret with one `setSelection` per change. The offset is looked up locally from the
-marker, so the caret never waits on a round trip and has no estimate to drift. The map comes
-from `requestTextBoundsInfo` on Android 14+ (every `EditText`). Otherwise it comes from
-composing-region bounds (Chrome, WebView, Compose). In Firefox's plain inputs and textareas, the
-text is re-set as identical composing text, because Gecko measures only compositions it started
-itself. Editors that give nothing still get the old loop. Mechanics, and the platform behaviour
-behind each rule, are in `docs/CURSOR_AND_SELECTION.md` §0.
+When the hold takes, the trackpad asks the editor where every visible character is, turns that
+into a map of caret positions, and from then on sets the caret with one `setSelection` per
+change. The offset is looked up locally from the marker, so the caret never waits on a round
+trip and has no estimate to drift. The map comes from `requestTextBoundsInfo` on Android 14+
+(every `EditText`). Otherwise it comes from composing-region bounds (Chrome, WebView, Compose).
+In Firefox's plain inputs and textareas, the text is re-set as identical composing text, because
+Gecko measures only compositions it started itself.
 
-### Trackpad in Firefox: caret reports need a composition
+An editor none of these can map gets no trackpad at all. The arrow-key steering that used to
+cover such editors lagged and sprayed, and has been deleted rather than kept as a fallback.
+Mechanics, and the platform behaviour behind each rule, are in `docs/CURSOR_AND_SELECTION.md`.
 
-Firefox (GeckoView) returns `true` from `requestCursorUpdates` and then sends no
-`CursorAnchorInfo` at all -- not for `IMMEDIATE`, not while monitoring -- unless a composition
-exists. The trackpad seeds its marker from the first report, so in every web textarea it was
-completely inert. With any composing region in place, each `IMMEDIATE` request is answered in
-about 5 ms with the exact caret position; the report does not arrive by itself when the caret
-moves, only when asked.
+### Firefox: three things to know
 
-So if nothing has reported 60 ms after the trackpad starts, one character is marked composing
-(`setComposingRegion`, no text changes), a fresh `IMMEDIATE` request follows every
-`onUpdateSelection`, and the region is finished when the drag ends. The need is remembered per
-field. Its reports leave `selectionStart/End` at -1, so offsets come from `onUpdateSelection`.
-
-Two things this exposed, both general:
-
-- **Line pitch is not caret height.** Vertical steering divided by the caret's height (59px)
-  while the textarea's lines are 72px apart, so a marker between two lines was claimed by both
-  and the caret flipped up and down every few milliseconds. The pitch is now measured from real
-  vertical steps.
-- **Up on the first row goes to offset 0** in Firefox (and down on the last to the end). Moved in
-  the text, same row -- which is what a scroll looks like, so it set off the repeating edge
-  scroll. Landing on the end of the text is now read as the edge.
+- **Caret reports need a composition.** GeckoView returns `true` from `requestCursorUpdates` and
+  then sends nothing -- not for `IMMEDIATE`, not while monitoring -- unless a composing region
+  exists. With one, each `IMMEDIATE` request is answered in about 5 ms. A report does not arrive
+  by itself when the caret moves, only when asked, and it leaves `selectionStart/End` at -1.
+- **Character bounds need a composition Gecko started**, which a composing region is not: hence
+  the replacement probe.
 - **Its editor bounds are wrong, so they are ignored.** A textarea whose text ran from x=38 to
   990 reported `editorBounds` of 204..912 after the matrix; in another field the caret sat at
-  x=67 inside reported bounds of 168..596. The row-edge guard stopped left arrows a character
-  inside the phantom left edge, so the marker slid on to the start of the line while the
-  caret stayed put -- the "marker moves, cursor doesn't follow" report. For an editor that
-  needs the borrowed composition, the bounds are treated as absent (left edge 0, right edge
-  learned from a wrap), the same as the test pad.
+  x=67 inside reported bounds of 168..596.
+
+### Chromium reports a caret move twice
+
+The first report after a `setSelection` has the new offset and the old position; the second, a
+frame later, has both new. ColorOS Notes is Chromium underneath and showed it plainly:
+`sel=1031 x=441`, `sel=1035 x=441`, `sel=1035 x=516`. Anything trusting the middle report
+concludes the caret did not move. `StaleReportFilter` holds such a report back and drops it when
+the moved one arrives.
 
 ### Trackpad gain and acceleration
 
@@ -1681,8 +1643,8 @@ so a buzz is the only signal that does not require looking.
 
 | parameter | value | why |
 |---|---|---|
-| trackpad step rounding | nearest, strict `>` | see above |
-| character width fallback | 0.33 × line height | average lowercase advance; measured thereafter |
-| row-edge margin | 1.2 characters | a wrapped row reaches the editor edge by definition |
-| selection horizontal cap | ±24 characters per round | bounds a correction, the loop does the rest |
-| edge scroll rate | 260 → 45 ms per line | proportional to distance past the edge |
+| stop hysteresis | 0.25 character | a resting finger never flickers between two stops |
+| row hysteresis | 0.2 row height | likewise between two rows |
+| edge scroll rate | 260 → 45 ms per row | proportional to distance past the edge (300px for full speed) |
+| stale report hold | 60 ms | Chromium's corrected report follows within a frame |
+| probe window | 700 characters each side, 160 on retry; 400 for Firefox | cut to whole lines |
