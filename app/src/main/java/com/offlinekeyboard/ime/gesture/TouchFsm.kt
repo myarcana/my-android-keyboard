@@ -460,7 +460,10 @@ sealed interface GestureOutput {
     data object BackspaceRepeatStarted : GestureOutput
     data object BackspaceRepeatEnded : GestureOutput
 
-    /** Swipe down on backspace: delete the word before the cursor. */
+    /**
+     * Swipe down on backspace: delete what a long press on the character before the cursor
+     * would select. See [com.offlinekeyboard.ime.text.WordBoundary.longPressSelectionLength].
+     */
     data object BulkDelete : GestureOutput
 
     /**

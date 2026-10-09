@@ -19,7 +19,7 @@ never touches the network. Nine requirements drive the design:
 8. Offline dictation for Taiwanese Mandarin, mainland Mandarin, and English
 9. Suggestion bar shows only emoji or Chinese candidates — never English word suggestions
 10. Switching language never destroys an unfinalized composing buffer
-11. Hold backspace to repeat; swipe down on it to delete the word before the cursor, up to clear the line
+11. Hold backspace to repeat; swipe down on it to delete what a long press on the character before the cursor would select (a word up to punctuation, a punctuation run, or a run of spaces, never crossing whitespace or a line break), up to clear the line
 
 Two decisions were settled during planning:
 

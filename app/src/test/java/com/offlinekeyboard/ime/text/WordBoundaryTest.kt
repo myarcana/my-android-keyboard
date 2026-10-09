@@ -94,6 +94,83 @@ class WordBoundaryTest {
         assertEquals("hi ", afterDelete("hi 👍🏽"))
     }
 
+    // --- swipe down: what a long press would select ----------------------------------------
+
+    /** Applies one swipe-down delete to [before] and returns what is left. */
+    private fun afterFlick(before: String): String =
+        before.dropLast(WordBoundary.longPressSelectionLength(before))
+
+    @Test
+    fun `a flick deletes the word before the cursor`() {
+        assertEquals("hello ", afterFlick("hello world"))
+        assertEquals("hello ", afterFlick("hello wor"))
+        assertEquals("", afterFlick("hello"))
+    }
+
+    /** The bug: "well done!" lost "done!" and not just the "!". */
+    @Test
+    fun `punctuation after a word is its own unit`() {
+        assertEquals("well done", afterFlick("well done!"))
+        assertEquals("wait", afterFlick("wait..."))
+        assertEquals("really", afterFlick("really?!"))
+    }
+
+    @Test
+    fun `punctuation ends a word`() {
+        assertEquals("hello-", afterFlick("hello-world"))
+        assertEquals("(", afterFlick("(aside"))
+        assertEquals("\"", afterFlick("\"quoted"))
+        assertEquals("one,", afterFlick("one,two"))
+    }
+
+    @Test
+    fun `word-internal punctuation stays inside the word`() {
+        assertEquals("I ", afterFlick("I don't"))
+        assertEquals("pi is ", afterFlick("pi is 3.14"))
+        assertEquals("x = ", afterFlick("x = foo_bar"))
+    }
+
+    /**
+     * Whitespace is never crossed. This is also what keeps the flick on its own line when the
+     * field soft-wraps: the keyboard cannot see the wrap, but it is always at a space.
+     */
+    @Test
+    fun `spaces behind the cursor go by themselves`() {
+        assertEquals("hello world", afterFlick("hello world "))
+        assertEquals("hello world", afterFlick("hello world   "))
+    }
+
+    @Test
+    fun `repeated flicks walk back one unit at a time`() {
+        var text = "Hi, there!"
+        text = afterFlick(text); assertEquals("Hi, there", text)
+        text = afterFlick(text); assertEquals("Hi, ", text)
+        text = afterFlick(text); assertEquals("Hi,", text)
+        text = afterFlick(text); assertEquals("Hi", text)
+        text = afterFlick(text); assertEquals("", text)
+    }
+
+    @Test
+    fun `a flick never crosses a hard line break`() {
+        assertEquals("first\n", afterFlick("first\nsecond"))
+        assertEquals("first\n", afterFlick("first\n   "))
+        assertEquals(0, WordBoundary.longPressSelectionLength("first\n"))
+        assertEquals(0, WordBoundary.longPressSelectionLength(""))
+    }
+
+    @Test
+    fun `a symbol or emoji goes one visible character at a time`() {
+        assertEquals("hi ", afterFlick("hi 👍🏽"))
+        assertEquals("hi 👍🏽", afterFlick("hi 👍🏽👍🏽"))
+        assertEquals("1 ", afterFlick("1 +"))
+        assertEquals("cost", afterFlick("cost$"))
+    }
+
+    @Test
+    fun `an accented letter built from a combining mark is still part of the word`() {
+        assertEquals("a ", afterFlick("a cafe\u0301"))
+    }
+
     // --- line delete ----------------------------------------------------------------------
 
     @Test

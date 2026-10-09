@@ -1729,7 +1729,9 @@ class KeyboardService : InputMethodService() {
      * Deletes back over any run of spaces and then the word before them, stopping at a line
      * break: a held backspace should pause at the start of each line rather than run past it.
      */
-    private fun deleteWordBackwards(): CharSequence {
+    private fun deleteWordBackwards(
+        boundary: (CharSequence) -> Int = WordBoundary::deleteLength,
+    ): CharSequence {
         flushPending()
         val ic = currentInputConnection ?: return ""
         val before = ic.getTextBeforeCursor(TypedWord.LOOKBEHIND, 0)
@@ -1737,7 +1739,7 @@ class KeyboardService : InputMethodService() {
         // Coerced to 1 so a cursor sitting directly after a line break still makes progress:
         // the scan stops at the break and would otherwise return 0, leaving a held backspace
         // spinning against it forever.
-        val units = WordBoundary.deleteLength(before).coerceAtLeast(1).coerceAtMost(before.length)
+        val units = boundary(before).coerceAtLeast(1).coerceAtMost(before.length)
         ic.deleteSurroundingText(units, 0)
         refreshCandidates()
         // What went, so the swipe that called this can offer it back to undo.
@@ -1826,9 +1828,13 @@ class KeyboardService : InputMethodService() {
     /**
      * Requirement 11: swipe *down* on backspace to delete the word before the cursor.
      *
-     * The smaller of the two bulk deletes; [deleteLine] is the upward one. What it destroys is
-     * bounded by something the user can see and retype, and repeating the flick walks back a
-     * word at a time.
+     * The smaller of the two bulk deletes; [deleteLine] is the upward one. "The word" is what a
+     * long press on the character behind the cursor would select
+     * ([WordBoundary.longPressSelectionLength]): a word stops at punctuation, a punctuation run
+     * or a run of spaces goes by itself, and whitespace is never crossed, so a flick at the start
+     * of a soft-wrapped line cannot reach back onto the line above. Repeating the flick walks
+     * back one unit at a time. The held backspace's acceleration keeps the coarser
+     * [WordBoundary.deleteLength], because that one is meant to cover ground.
      *
      * A selection is what the user pointed at, so it wins over the word behind the cursor -- the
      * same precedence a plain backspace uses. Inside a pinyin buffer the word is the syllable
@@ -1859,7 +1865,7 @@ class KeyboardService : InputMethodService() {
             return
         }
 
-        val gone = deleteWordBackwards()
+        val gone = deleteWordBackwards(WordBoundary::longPressSelectionLength)
         ic.endBatchEdit()
         deletionHistory.recorded(gone, selected = false, field = historyField)
     }

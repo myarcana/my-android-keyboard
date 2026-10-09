@@ -1,15 +1,18 @@
 package com.offlinekeyboard.ime.text
 
+import java.text.BreakIterator
+
 /**
  * How much text one bulk deletion should remove -- a word, or a whole line.
  *
- * [deleteLength] is shared by the two gestures that delete a word rather than a character: the
- * swipe *down* on backspace, and the held backspace once it accelerates past single characters.
- * Both ask the same question -- given the text before the cursor, how many UTF-16 code units
- * make up "the word behind me" -- so both get the same answer from here rather than each
- * scanning its own way and drifting apart. [lineDeleteLength] answers the larger version of
- * that question for the swipe *up*, and lives here beside it because the two differ only in
- * where they agree to stop.
+ * [deleteLength] is used by the held backspace once it speeds up past single characters, and
+ * it is deliberately coarse: whitespace-delimited, with the trailing spaces included, so each
+ * step removes a lot. [longPressSelectionLength] is the swipe *down* on backspace. That
+ * gesture is one deliberate flick, so it removes exactly what a long press would select.
+ * [lineDeleteLength] answers the largest version of the question, for the swipe *up*.
+ *
+ * `java.text.BreakIterator` rather than `android.icu`: it is on the JVM test classpath, and on
+ * Android it is backed by ICU anyway.
  *
  * Lives in `text/` with [GraphemeCluster] and for the same reason: it is the part of deleting
  * that is worth testing, and keeping it out of the service is what makes it testable on the
@@ -43,13 +46,144 @@ object WordBoundary {
     }
 
     /**
+     * Code units to delete backwards from the end of [before] to remove what a long press on
+     * the character behind the cursor would select. This is the swipe *down* on backspace.
+     *
+     * [deleteLength] treats a word as "anything up to whitespace", plus any spaces after it.
+     * That is too much for a gesture the user reads as "delete that word": `"well done!"` lost
+     * `"done!"`. Flicking at the start of a soft-wrapped line also removed the space the line
+     * wrapped at *and* the word on the line above, a word that is not even next to the caret on
+     * screen. A long press does neither, so the flick now deletes the same unit:
+     *
+     *  - **A word**, bounded the way the platform's word selection bounds it: by
+     *    [BreakIterator]. Punctuation and symbols end a word (`"hello-world"` gives `"world"`)
+     *    but word-internal ones do not (`"don't"`, `"3.14"`, `"foo_bar"` stay whole). On a
+     *    device the iterator is ICU, so Chinese splits into dictionary words too.
+     *  - **A run of punctuation**, such as `"!"`, `"..."` or `"?!"`, by itself, the way a long press
+     *    on one selects the run and not the word next to it.
+     *  - **A run of spaces**, and only the spaces. Whitespace never goes with the word behind
+     *    it. The keyboard cannot see where the field soft-wraps, and the space a line wrapped at
+     *    is exactly where that wrap is, so not crossing whitespace is the only way to never
+     *    cross a wrap.
+     *  - **Anything else** (a symbol, an emoji): one visible character, as [GraphemeCluster]
+     *    counts it.
+     *
+     * A hard line break is never part of a unit; with one directly behind the cursor this
+     * returns 0, as [deleteLength] does.
+     */
+    fun longPressSelectionLength(before: CharSequence): Int {
+        if (before.isEmpty()) return 0
+        val end = before.length
+        val lastCp = Character.codePointBefore(before, end)
+        if (isLineBreak(lastCp)) return 0
+
+        if (isSpace(lastCp)) {
+            var start = end
+            while (start > 0) {
+                val cp = Character.codePointBefore(before, start)
+                if (isLineBreak(cp) || !isSpace(cp)) break
+                start -= Character.charCount(cp)
+            }
+            return end - start
+        }
+
+        if (isPunctuation(lastCp)) {
+            var start = end
+            while (start > 0) {
+                val cp = Character.codePointBefore(before, start)
+                if (!isPunctuation(cp)) break
+                start -= Character.charCount(cp)
+            }
+            return end - start
+        }
+
+        // A letter followed by combining marks ("e" + U+0301) is still a letter. Classify the
+        // last visible character by the code point it is built on, not by its final mark.
+        val cluster = GraphemeCluster.lastClusterLength(before).coerceIn(1, end)
+        val base = Character.codePointAt(before, end - cluster)
+        if (!Character.isLetterOrDigit(base)) return cluster
+
+        // The word is found in two steps. The explicit rules below run first, and they are what
+        // stops a word at a hyphen, a slash or a bracket the same way on every runtime. The JDK's
+        // own word iterator keeps "hello-world" together and ICU splits it, so neither can be
+        // used alone. BreakIterator may then only *narrow* the result. On a device that is ICU,
+        // and its dictionaries are the only way to find word breaks inside a run of Chinese or
+        // Thai that has no spaces or punctuation in it.
+        var start = end - cluster
+        while (start > 0) {
+            val cp = Character.codePointBefore(before, start)
+            val prev = start - Character.charCount(cp)
+            start = when {
+                isWordPart(cp) -> prev
+                // A joiner counts only with word characters on both sides: the "'" in "don't",
+                // the "." in "3.14". The character after it is already in the word.
+                prev > 0 && joins(cp, Character.codePointBefore(before, prev), Character.codePointAt(before, start)) -> prev
+                else -> break
+            }
+        }
+
+        val words = BreakIterator.getWordInstance()
+        words.setText(before.toString())
+        val iteratorStart = words.preceding(end)
+        if (iteratorStart != BreakIterator.DONE && iteratorStart > start) start = iteratorStart
+        // Never less than the cluster itself, so a word break the iterator places inside the
+        // last character cannot split it.
+        return maxOf(end - start, cluster)
+    }
+
+    /** Letters, digits, and the marks and joiners that attach to them. */
+    private fun isWordPart(cp: Int): Boolean {
+        if (Character.isLetterOrDigit(cp)) return true
+        return when (Character.getType(cp).toByte()) {
+            Character.NON_SPACING_MARK, Character.COMBINING_SPACING_MARK, Character.ENCLOSING_MARK,
+            Character.FORMAT, Character.CONNECTOR_PUNCTUATION -> true // "_" in foo_bar, ZWJ
+            else -> false
+        }
+    }
+
+    /**
+     * Whether [mid] between [left] and [right] stays inside one word. These are UAX #29's
+     * MidLetter, MidNum and MidNumLet: an apostrophe or dot joins letters ("don't", "e.g") and
+     * a dot, comma or apostrophe joins digits ("3.14", "1,000").
+     */
+    private fun joins(mid: Int, left: Int, right: Int): Boolean {
+        val letters = Character.isLetter(left) && Character.isLetter(right)
+        val digits = Character.isDigit(left) && Character.isDigit(right)
+        return when (mid) {
+            '\''.code, 0x2019, 0x2018, '.'.code, 0x2024, 0xFE52, 0xFF07, 0xFF0E -> letters || digits
+            0x00B7, 0x0387, 0x05F4, 0x2027 -> letters
+            ','.code, 0x066C, 0xFE50, 0xFF0C -> digits
+            else -> false
+        }
+    }
+
+    private fun isSpace(cp: Int): Boolean = Character.isWhitespace(cp) || Character.isSpaceChar(cp)
+
+    /** Hard line breaks: the separators a field draws as a new line whatever its width. */
+    private fun isLineBreak(cp: Int): Boolean =
+        cp == '\n'.code || cp == '\r'.code || cp == 0x0B || cp == 0x0C ||
+            cp == 0x85 || cp == 0x2028 || cp == 0x2029
+
+    /** The general categories Android's own word selection treats as punctuation. */
+    private fun isPunctuation(cp: Int): Boolean = when (Character.getType(cp).toByte()) {
+        Character.CONNECTOR_PUNCTUATION,
+        Character.DASH_PUNCTUATION,
+        Character.START_PUNCTUATION,
+        Character.END_PUNCTUATION,
+        Character.INITIAL_QUOTE_PUNCTUATION,
+        Character.FINAL_QUOTE_PUNCTUATION,
+        Character.OTHER_PUNCTUATION -> true
+        else -> false
+    }
+
+    /**
      * Code units to delete backwards from the end of [before] to remove the rest of the line.
      *
      * Everything back to the line break, and not the break itself: deleting after
      * `"one\ntwo three"` takes `"two three"` and leaves `"one\n"`, so the cursor ends where a
      * fresh line starts rather than joined onto the line above. Structure the user cannot
      * retype by typing the words again is the one thing this must not destroy, which is the
-     * same rule [deleteLength] follows for the same reason.
+     * same rule [deleteLength] and [longPressSelectionLength] follow for the same reason.
      *
      * A cursor already sitting on an empty line returns 0 -- the line is empty, there is
      * nothing on it to clear. A caller that wants the flick to keep making progress past that
