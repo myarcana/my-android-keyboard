@@ -94,11 +94,11 @@ class WordBoundaryTest {
         assertEquals("hi ", afterDelete("hi 👍🏽"))
     }
 
-    // --- swipe down: what a long press would select ----------------------------------------
+    // --- swipe down: a word and whatever trails it -----------------------------------------
 
     /** Applies one swipe-down delete to [before] and returns what is left. */
     private fun afterFlick(before: String): String =
-        before.dropLast(WordBoundary.longPressSelectionLength(before))
+        before.dropLast(WordBoundary.flickDeleteLength(before))
 
     @Test
     fun `a flick deletes the word before the cursor`() {
@@ -107,12 +107,58 @@ class WordBoundaryTest {
         assertEquals("", afterFlick("hello"))
     }
 
-    /** The bug: "well done!" lost "done!" and not just the "!". */
+    /** With the cursor after the period, "hello." is one unit, not a "." and then a "hello". */
     @Test
-    fun `punctuation after a word is its own unit`() {
-        assertEquals("well done", afterFlick("well done!"))
-        assertEquals("wait", afterFlick("wait..."))
-        assertEquals("really", afterFlick("really?!"))
+    fun `one punctuation mark after a word goes with it`() {
+        assertEquals("", afterFlick("hello."))
+        assertEquals("well ", afterFlick("well done!"))
+        assertEquals("he said \"", afterFlick("he said \"hi\""))
+    }
+
+    /** With the cursor after the space, "hello " is one unit too. */
+    @Test
+    fun `one space after a word goes with it`() {
+        assertEquals("", afterFlick("hello "))
+        assertEquals("hello ", afterFlick("hello world "))
+    }
+
+    @Test
+    fun `one punctuation mark and then one space after a word all go with it`() {
+        assertEquals("", afterFlick("hello. "))
+        assertEquals("One. ", afterFlick("One. Two. "))
+        assertEquals("one ", afterFlick("one two, "))
+    }
+
+    /** A run of spaces was typed on purpose, so it goes by itself and the word survives. */
+    @Test
+    fun `a run of spaces goes by itself`() {
+        assertEquals("One Two", afterFlick("One Two    "))
+        assertEquals("hello world", afterFlick("hello world  "))
+        assertEquals("One. Two.", afterFlick("One. Two.  "))
+    }
+
+    /** Likewise an ellipsis or "?!" is its own unit, not an ending of the word before it. */
+    @Test
+    fun `a run of punctuation goes by itself`() {
+        assertEquals("Okay", afterFlick("Okay..."))
+        assertEquals("really really", afterFlick("really really?!"))
+        // One space after the run goes with the run; two are a run of their own.
+        assertEquals("wait", afterFlick("wait... "))
+        assertEquals("wait...", afterFlick("wait...  "))
+        assertEquals("", afterFlick("..."))
+    }
+
+    @Test
+    fun `a word-internal joiner before trailing punctuation stays in the word`() {
+        assertEquals("see ", afterFlick("see e.g."))
+        assertEquals("pi is ", afterFlick("pi is 3.14."))
+    }
+
+    @Test
+    fun `punctuation with no word behind it goes by itself`() {
+        assertEquals("", afterFlick("..."))
+        assertEquals("a ", afterFlick("a - "))
+        assertEquals("", afterFlick("   "))
     }
 
     @Test
@@ -130,23 +176,13 @@ class WordBoundaryTest {
         assertEquals("x = ", afterFlick("x = foo_bar"))
     }
 
-    /**
-     * Whitespace is never crossed. This is also what keeps the flick on its own line when the
-     * field soft-wraps: the keyboard cannot see the wrap, but it is always at a space.
-     */
     @Test
-    fun `spaces behind the cursor go by themselves`() {
-        assertEquals("hello world", afterFlick("hello world "))
-        assertEquals("hello world", afterFlick("hello world   "))
-    }
-
-    @Test
-    fun `repeated flicks walk back one unit at a time`() {
-        var text = "Hi, there!"
-        text = afterFlick(text); assertEquals("Hi, there", text)
+    fun `repeated flicks walk back one word at a time`() {
+        var text = "Hi, there! How are you?"
+        text = afterFlick(text); assertEquals("Hi, there! How are ", text)
+        text = afterFlick(text); assertEquals("Hi, there! How ", text)
+        text = afterFlick(text); assertEquals("Hi, there! ", text)
         text = afterFlick(text); assertEquals("Hi, ", text)
-        text = afterFlick(text); assertEquals("Hi,", text)
-        text = afterFlick(text); assertEquals("Hi", text)
         text = afterFlick(text); assertEquals("", text)
     }
 
@@ -154,8 +190,9 @@ class WordBoundaryTest {
     fun `a flick never crosses a hard line break`() {
         assertEquals("first\n", afterFlick("first\nsecond"))
         assertEquals("first\n", afterFlick("first\n   "))
-        assertEquals(0, WordBoundary.longPressSelectionLength("first\n"))
-        assertEquals(0, WordBoundary.longPressSelectionLength(""))
+        assertEquals("first.\n", afterFlick("first.\nsecond. "))
+        assertEquals(0, WordBoundary.flickDeleteLength("first\n"))
+        assertEquals(0, WordBoundary.flickDeleteLength(""))
     }
 
     @Test
@@ -164,6 +201,7 @@ class WordBoundaryTest {
         assertEquals("hi 👍🏽", afterFlick("hi 👍🏽👍🏽"))
         assertEquals("1 ", afterFlick("1 +"))
         assertEquals("cost", afterFlick("cost$"))
+        assertEquals("hi ", afterFlick("hi 👍🏽! "))
     }
 
     @Test

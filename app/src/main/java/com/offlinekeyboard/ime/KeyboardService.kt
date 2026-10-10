@@ -1606,12 +1606,13 @@ class KeyboardService : InputMethodService() {
     /**
      * Requirement 11: swipe *down* on backspace to delete the word before the cursor.
      *
-     * The smaller of the two bulk deletes; [deleteLine] is the upward one. "The word" is what a
-     * long press on the character behind the cursor would select
-     * ([WordBoundary.longPressSelectionLength]): a word stops at punctuation, a punctuation run
-     * or a run of spaces goes by itself, and whitespace is never crossed, so a flick at the start
-     * of a soft-wrapped line cannot reach back onto the line above. Repeating the flick walks
-     * back one unit at a time. The held backspace's acceleration keeps the coarser
+     * The smaller of the two bulk deletes; [deleteLine] is the upward one. "The word" is the
+     * word behind the cursor together with a single trailing punctuation mark and space
+     * ([WordBoundary.flickDeleteLength]), so a cursor after `"hello."` or `"hello "` takes the
+     * whole unit in one flick; a run of two or more (`"..."`, padding spaces) goes by itself
+     * first. A word still stops at punctuation inside a run (`"hello-world"`
+     * loses `"world"`), and a hard line break is never crossed. Repeating the flick walks back
+     * one word at a time. The held backspace's acceleration keeps the coarser
      * [WordBoundary.deleteLength], because that one is meant to cover ground.
      *
      * A selection is what the user pointed at, so it wins over the word behind the cursor -- the
@@ -1643,7 +1644,7 @@ class KeyboardService : InputMethodService() {
             return
         }
 
-        val gone = deleteWordBackwards(WordBoundary::longPressSelectionLength)
+        val gone = deleteWordBackwards(WordBoundary::flickDeleteLength)
         ic.endBatchEdit()
         deletionHistory.recorded(gone, selected = false, field = historyField)
     }

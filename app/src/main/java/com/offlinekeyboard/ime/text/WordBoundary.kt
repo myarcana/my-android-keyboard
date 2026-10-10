@@ -7,8 +7,8 @@ import java.text.BreakIterator
  *
  * [deleteLength] is used by the held backspace once it speeds up past single characters, and
  * it is deliberately coarse: whitespace-delimited, with the trailing spaces included, so each
- * step removes a lot. [longPressSelectionLength] is the swipe *down* on backspace. That
- * gesture is one deliberate flick, so it removes exactly what a long press would select.
+ * step removes a lot. [flickDeleteLength] is the swipe *down* on backspace. That gesture
+ * is one deliberate flick, so it removes one word and whatever trails it, and nothing more.
  * [lineDeleteLength] answers the largest version of the question, for the swipe *up*.
  *
  * `java.text.BreakIterator` rather than `android.icu`: it is on the JVM test classpath, and on
@@ -46,62 +46,69 @@ object WordBoundary {
     }
 
     /**
-     * Code units to delete backwards from the end of [before] to remove what a long press on
-     * the character behind the cursor would select. This is the swipe *down* on backspace.
+     * Code units to delete backwards from the end of [before] to remove one word together with
+     * whatever trails it. This is the swipe *down* on backspace.
      *
-     * [deleteLength] treats a word as "anything up to whitespace", plus any spaces after it.
-     * That is too much for a gesture the user reads as "delete that word": `"well done!"` lost
-     * `"done!"`. Flicking at the start of a soft-wrapped line also removed the space the line
-     * wrapped at *and* the word on the line above, a word that is not even next to the caret on
-     * screen. A long press does neither, so the flick now deletes the same unit:
+     * The unit is read backwards from the cursor in three parts, each optional:
      *
-     *  - **A word**, bounded the way the platform's word selection bounds it: by
-     *    [BreakIterator]. Punctuation and symbols end a word (`"hello-world"` gives `"world"`)
-     *    but word-internal ones do not (`"don't"`, `"3.14"`, `"foo_bar"` stay whole). On a
-     *    device the iterator is ICU, so Chinese splits into dictionary words too.
-     *  - **A run of punctuation**, such as `"!"`, `"..."` or `"?!"`, by itself, the way a long press
-     *    on one selects the run and not the word next to it.
-     *  - **A run of spaces**, and only the spaces. Whitespace never goes with the word behind
-     *    it. The keyboard cannot see where the field soft-wraps, and the space a line wrapped at
-     *    is exactly where that wrap is, so not crossing whitespace is the only way to never
-     *    cross a wrap.
-     *  - **Anything else** (a symbol, an emoji): one visible character, as [GraphemeCluster]
-     *    counts it.
+     *  1. **Spaces** behind the cursor, never a hard line break.
+     *  2. **Punctuation**, such as `"."` or `"!"`, behind those spaces.
+     *  3. **The word** behind that punctuation, bounded the way the platform's word selection
+     *     bounds it: by [BreakIterator]. Punctuation and symbols end a word (`"hello-world"`
+     *     gives `"world"`) but word-internal ones do not (`"don't"`, `"3.14"`, `"foo_bar"` stay
+     *     whole). On a device the iterator is ICU, so Chinese splits into dictionary words too.
+     *     Something that is not a word -- a symbol, an emoji -- is one visible character, as
+     *     [GraphemeCluster] counts it.
      *
-     * A hard line break is never part of a unit; with one directly behind the cursor this
-     * returns 0, as [deleteLength] does.
+     * One space or one punctuation mark is what ends a word, so it goes with the word: the
+     * cursor after `"hello."`, `"hello "` or `"hello. "` takes all of it in one flick. A *run*
+     * of two or more is something typed on purpose -- an ellipsis, `"?!"`, padding -- so it is a
+     * unit of its own and stops there: `"One Two    "` gives `"One Two"`, `"Okay..."` gives
+     * `"Okay"`, and the next flick takes the word. Punctuation *before* a word is not the
+     * word's: `"(aside"` gives `"("`.
+     *
+     * Taking the spaces does mean a flick at the start of a soft-wrapped line reaches the word
+     * at the end of the line above -- the keyboard cannot see the wrap, and it is always at a
+     * space. A hard line break is still never part of a unit; with one directly behind the
+     * cursor this returns 0, as [deleteLength] does.
      */
-    fun longPressSelectionLength(before: CharSequence): Int {
-        if (before.isEmpty()) return 0
+    fun flickDeleteLength(before: CharSequence): Int {
         val end = before.length
-        val lastCp = Character.codePointBefore(before, end)
-        if (isLineBreak(lastCp)) return 0
-
-        if (isSpace(lastCp)) {
-            var start = end
-            while (start > 0) {
-                val cp = Character.codePointBefore(before, start)
-                if (isLineBreak(cp) || !isSpace(cp)) break
-                start -= Character.charCount(cp)
-            }
-            return end - start
+        var start = end
+        var spaces = 0
+        while (start > 0) {
+            val cp = Character.codePointBefore(before, start)
+            if (isLineBreak(cp) || !isSpace(cp)) break
+            start -= Character.charCount(cp)
+            spaces++
         }
-
-        if (isPunctuation(lastCp)) {
-            var start = end
-            while (start > 0) {
-                val cp = Character.codePointBefore(before, start)
-                if (!isPunctuation(cp)) break
-                start -= Character.charCount(cp)
-            }
-            return end - start
+        if (spaces > 1) return end - start
+        var marks = 0
+        while (start > 0) {
+            val cp = Character.codePointBefore(before, start)
+            if (!isPunctuation(cp)) break
+            start -= Character.charCount(cp)
+            marks++
         }
+        if (marks > 1) return end - start
+        if (start > 0) {
+            val cp = Character.codePointBefore(before, start)
+            if (!isSpace(cp) && !isLineBreak(cp)) start = wordStart(before.subSequence(0, start))
+        }
+        return end - start
+    }
 
+    /**
+     * Where the word -- or, failing that, the one visible character -- that ends [before]
+     * begins. [before] must be non-empty and must not end in whitespace.
+     */
+    private fun wordStart(before: CharSequence): Int {
+        val end = before.length
         // A letter followed by combining marks ("e" + U+0301) is still a letter. Classify the
         // last visible character by the code point it is built on, not by its final mark.
         val cluster = GraphemeCluster.lastClusterLength(before).coerceIn(1, end)
         val base = Character.codePointAt(before, end - cluster)
-        if (!Character.isLetterOrDigit(base)) return cluster
+        if (!Character.isLetterOrDigit(base)) return end - cluster
 
         // The word is found in two steps. The explicit rules below run first, and they are what
         // stops a word at a hyphen, a slash or a bracket the same way on every runtime. The JDK's
@@ -128,7 +135,7 @@ object WordBoundary {
         if (iteratorStart != BreakIterator.DONE && iteratorStart > start) start = iteratorStart
         // Never less than the cluster itself, so a word break the iterator places inside the
         // last character cannot split it.
-        return maxOf(end - start, cluster)
+        return minOf(start, end - cluster)
     }
 
     /** Letters, digits, and the marks and joiners that attach to them. */
@@ -183,7 +190,7 @@ object WordBoundary {
      * `"one\ntwo three"` takes `"two three"` and leaves `"one\n"`, so the cursor ends where a
      * fresh line starts rather than joined onto the line above. Structure the user cannot
      * retype by typing the words again is the one thing this must not destroy, which is the
-     * same rule [deleteLength] and [longPressSelectionLength] follow for the same reason.
+     * same rule [deleteLength] and [flickDeleteLength] follow for the same reason.
      *
      * A cursor already sitting on an empty line returns 0 -- the line is empty, there is
      * nothing on it to clear. A caller that wants the flick to keep making progress past that
