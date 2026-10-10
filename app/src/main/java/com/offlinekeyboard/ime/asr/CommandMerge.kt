@@ -35,8 +35,33 @@ object CommandMerge {
      */
     data class Transcript(val text: String, val tokens: List<String>, val timestamps: List<Float>)
 
-    /** A word of the transcript with the time it started. */
-    data class TimedWord(val text: String, val start: Float)
+    /**
+     * A word of the transcript with the time it started.
+     *
+     * [detached] marks a word built from a token that *continued* the word before it -- no
+     * leading space -- but only after a pause no single word contains. See [WORD_GAP_SECONDS].
+     */
+    data class TimedWord(val text: String, val start: Float, val detached: Boolean = false)
+
+    /**
+     * The longest silence a word can contain, between two of its own tokens.
+     *
+     * SenseVoice marks a word boundary with a leading space, and usually that is the whole story.
+     * It is not when the speaker pauses before a command: the decoder can drop the command's
+     * onset and glue what is left of it -- the final "a" of "comma" -- onto the word *before the
+     * pause*, with no space. The token timings still tell the truth:
+     *
+     *     tokens  "well" "a"  " i" ...      "hel" "lo" "a"  " how" ...
+     *     times   0.12   0.90 1.20          0.06  0.24 0.84 1.14
+     *
+     * Read as one word, "wella" matches no spelling of "comma", the mark goes in beside it, and
+     * the user sees "wella, I think so" -- a stray "a" before every such comma.
+     *
+     * Measured over every intra-word token gap in `asrlab/` (148 corpus decodes plus 300 spoken-
+     * comma decodes), real words top out at 0.42 s, and every gap of 0.48 s or more was this
+     * residue. 0.45 s sits between the two.
+     */
+    private const val WORD_GAP_SECONDS = 0.45f
 
     /**
      * How far from a detection to look for the word the recogniser wrote for it.
@@ -54,19 +79,29 @@ object CommandMerge {
      * SenseVoice marks a word boundary by prefixing the token that starts a word with a space
      * (the usual sentencepiece convention), so a token without one continues the word before it.
      * Han characters are their own words and never take a joining space.
+     *
+     * A continuation token that arrives after more than [WORD_GAP_SECONDS] of silence is not
+     * part of the word before it, whatever its spacing says, and starts a [TimedWord.detached]
+     * word of its own.
      */
     fun words(tokens: List<String>, timestamps: List<Float>): List<TimedWord> {
         val out = mutableListOf<TimedWord>()
+        var previousTime = 0f
         tokens.forEachIndexed { i, rawToken ->
             val time = timestamps.getOrElse(i) { timestamps.lastOrNull() ?: 0f }
             val startsWord = rawToken.startsWith(" ") || rawToken.startsWith("\u2581")
             val token = rawToken.removePrefix("\u2581").removePrefix(" ")
             if (token.isEmpty()) return@forEachIndexed
             val han = token.any { isHan(it) }
-            if (out.isEmpty() || startsWord || han || out.last().text.any { isHan(it) }) {
-                out += TimedWord(token, time)
-            } else {
-                out[out.lastIndex] = out.last().copy(text = out.last().text + token)
+            val gap = time - previousTime
+            previousTime = time
+            when {
+                out.isEmpty() || startsWord || han || out.last().text.any { isHan(it) } ->
+                    out += TimedWord(token, time)
+                gap > WORD_GAP_SECONDS ->
+                    out += TimedWord(token, time, detached = true)
+                else ->
+                    out[out.lastIndex] = out.last().copy(text = out.last().text + token)
             }
         }
         return out
@@ -113,7 +148,8 @@ object CommandMerge {
             }
         }
         for (detection in unresolved) {
-            val range = findResemblance(words, detection, swallowed)
+            val range = findResidue(words, detection, swallowed)
+                ?: findResemblance(words, detection, swallowed)
             if (range == null) {
                 orphans += detection
             } else {
@@ -130,6 +166,13 @@ object CommandMerge {
             when {
                 consumed.containsKey(i) -> pieces += i to SpokenPunctuation.markFor(consumed[i]!!, script)
                 i in swallowed -> Unit // a later word of a multi-word command
+                // A detached word that turned out not to be a command's residue goes back where
+                // the recogniser put it, joined to its word, so the split costs nothing when it
+                // was wrong.
+                word.detached && pieces.lastOrNull()?.first == i - 1 && (i - 1) !in consumed -> {
+                    val (at, text) = pieces.removeAt(pieces.lastIndex)
+                    pieces += at to text + word.text
+                }
                 else -> pieces += i to word.text
             }
         }
@@ -270,6 +313,38 @@ object CommandMerge {
             }
         }
         return best
+    }
+
+    /**
+     * Finds the leftover tail of a command word the recogniser cut short: the "a" of "comma",
+     * split off by [words] as [TimedWord.detached].
+     *
+     * Edit distance cannot find it -- "a" against "comma" scores 0.2 -- but it needs no
+     * resemblance threshold, because the evidence is structural. The token carried no leading
+     * space, so the recogniser did not write it as a word of its own; it came after a pause no
+     * word contains; the spotter heard this command right there; and its letters are how the
+     * command ends. A genuine article "a" fails the first test: it arrives as " a".
+     */
+    private fun findResidue(
+        words: List<TimedWord>,
+        detection: Detection,
+        taken: Set<Int>,
+    ): IntRange? {
+        val spellings = PunctuationCommands.spellingsFor(detection.id).map(::letters)
+        var best: Int? = null
+        var bestDistance = Float.MAX_VALUE
+        words.forEachIndexed { i, word ->
+            if (!word.detached || i in taken) return@forEachIndexed
+            val distance = kotlin.math.abs(word.start - detection.seconds)
+            if (distance > MATCH_WINDOW_SECONDS || distance >= bestDistance) return@forEachIndexed
+            val tail = letters(word.text)
+            if (tail.isEmpty() || spellings.none { it.length > tail.length && it.endsWith(tail) }) {
+                return@forEachIndexed
+            }
+            best = i
+            bestDistance = distance
+        }
+        return best?.let { it..it }
     }
 
     /** Lower-cased letters only, so spacing and clinging punctuation do not count as edits. */

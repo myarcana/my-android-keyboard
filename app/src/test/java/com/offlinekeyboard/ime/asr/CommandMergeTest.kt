@@ -62,6 +62,69 @@ class CommandMergeTest {
     // Reported from the phone: the spotter fired and its mark landed, but the recogniser's
     // misspelling stayed beside it, because neither was in SPELLINGS.
 
+    // --- the residue of a clipped command ------------------------------------------------
+    //
+    // Reported from the phone: an "a" before a comma. With a pause before "comma", the decoder
+    // can drop its onset and glue the leftover "a" onto the word before the pause, with no
+    // space. These token streams are real SenseVoice output, from `asrlab/comma/`.
+
+    @Test
+    fun `the tail of a clipped comma is not left glued to the word before it`() {
+        val t = CommandMerge.Transcript(
+            text = "wella i think so",
+            tokens = listOf("well", "a", " i", " think", " so"),
+            timestamps = listOf(0.12f, 0.90f, 1.20f, 1.38f, 1.68f),
+        )
+        assertEquals("well, I think so", applied(t, CommandMerge.Detection("COMMA", 0.72f)))
+    }
+
+    @Test
+    fun `a clipped comma does not eat the word after it`() {
+        // Worse than a stray letter: "luncha" was unrecognisable, so the fuzzy match took the
+        // nearest word that half-resembled "comma" -- "call" -- and "call me back" lost "call".
+        val t = CommandMerge.Transcript(
+            text = "after luncha call me back",
+            tokens = listOf("after", " lunch", "a", " call", " me", " back"),
+            timestamps = listOf(0.06f, 0.42f, 1.20f, 1.50f, 1.74f, 1.98f),
+        )
+        assertEquals("after lunch, call me back", applied(t, CommandMerge.Detection("COMMA", 1.04f)))
+    }
+
+    @Test
+    fun `a clipped comma split mid word is caught too`() {
+        val t = CommandMerge.Transcript(
+            text = "helloa how are you",
+            tokens = listOf("hel", "lo", "a", " how", " are", " you"),
+            timestamps = listOf(0.06f, 0.24f, 0.84f, 1.14f, 1.32f, 1.44f),
+        )
+        assertEquals("hello, how are you", applied(t, CommandMerge.Detection("COMMA", 0.68f)))
+    }
+
+    @Test
+    fun `a slow word is rejoined when no command claims its tail`() {
+        // The gap alone splits it off; with no command to claim it, the split must cost nothing.
+        val t = CommandMerge.Transcript(
+            text = "sorrya i missed your call",
+            tokens = listOf("s", "or", "ry", "a", " i", " missed", " your", " call"),
+            timestamps = listOf(0.12f, 0.18f, 0.30f, 0.84f, 1.08f, 1.32f, 1.50f, 1.74f),
+        )
+        assertEquals(
+            "sorrya I missed your call.",
+            applied(t, CommandMerge.Detection("PERIOD", 2.5f)),
+        )
+    }
+
+    @Test
+    fun `a spoken article a is never taken for a command's tail`() {
+        // " a" carries a leading space: the recogniser wrote it as a word, so it stays one.
+        val t = CommandMerge.Transcript(
+            text = "i want a comma here",
+            tokens = listOf("i", " want", " a", " comm", "a", " here"),
+            timestamps = listOf(0.0f, 0.2f, 0.9f, 1.1f, 1.3f, 1.6f),
+        )
+        assertEquals("I want a, here", applied(t, CommandMerge.Detection("COMMA", 1.2f)))
+    }
+
     @Test
     fun `question mug is replaced by the question mark`() {
         // "why question mark" came out as "why? question mug".
