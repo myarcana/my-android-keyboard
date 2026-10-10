@@ -46,6 +46,15 @@ class LexiconCoverageTest {
         assertTrue("cannot $cannot vs can't $cant", cant - cannot < 2.5f)
     }
 
+    /** The crawl predates them, so they have no count and only the INFORMAL list keeps them. */
+    @Test
+    fun `words newer than the crawl are in the lexicon`() {
+        val lexicon = lexicon ?: return
+        listOf("emoji", "emojis", "github").forEach {
+            assertNotNull("$it is missing", lexicon.logProbability(it))
+        }
+    }
+
     @Test
     fun `long words past the head of the crawl are in the lexicon`() {
         val lexicon = lexicon ?: return

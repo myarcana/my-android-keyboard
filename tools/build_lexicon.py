@@ -89,6 +89,11 @@ INFORMAL = {
     # entry here that the crawl never saw. "emojis" is the plural people actually write; the
     # Japanese-faithful "emoji" plural is not what a phone keyboard should be insisting on.
     "emoji": 3_000_000, "emojis": 2_000_000,
+    # The same gap: GitHub launched in 2008, after the crawl, so it has no count at all and could
+    # not be glided. Scored off wordfreq 3.1 (10^-5.82) times the crawl's median count per unit of
+    # wordfreq frequency (6.5e11, over wordfreq ranks 2k-12k), which lands at ~1M -- beside
+    # "gotham" and well under "guitar", the words sharing its endpoints.
+    "github": 1_000_000,
     # The corpus was tokenized Penn Treebank style, which splits "cannot" into "can not" and
     # "gimme"/"lemme" into "gim me"/"lem me" -- the same rule that left "gon", "wan" and "ta"
     # in the crawl and "gonna", "wanna" and "gotta" on this list. What survives as one token is
