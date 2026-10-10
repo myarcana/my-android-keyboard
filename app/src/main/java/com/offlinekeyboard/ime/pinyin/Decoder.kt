@@ -49,6 +49,10 @@ internal class Decoder(
      * typist means a respelling rather than the syllable they actually typed.
      */
     private val fuzzyPenalty: Float = FUZZY_PENALTY,
+    /** Charged per typing slip undone by [Typos]; see [TYPO_PENALTY]. */
+    private val typoPenalty: Float = TYPO_PENALTY,
+    /** Off only in tests, to measure what typo correction changes; see [Typos]. */
+    private val correctTypos: Boolean = true,
 ) {
 
     /**
@@ -172,7 +176,12 @@ internal class Decoder(
      * a full decoding and a prefix appears once, at its better rank.
      */
     fun candidates(input: String, limit: Int = 20): List<Candidate> {
-        val readings = Syllables.readings(input)
+        val literal = Syllables.readings(input)
+        // Readings with one slip undone, for letters that do not parse as typed -- `lupbogao`
+        // for 萝卜糕. Empty whenever the input reads cleanly, so they never compete with a
+        // correctly spelled word; see [Typos].
+        val corrected = if (correctTypos) Typos.readings(input, literal) else emptyList()
+        val readings = literal.take(MAX_READINGS) + corrected
         if (readings.isEmpty()) return emptyList()
 
         val out = ArrayList<Candidate>(limit * 2)
@@ -193,7 +202,8 @@ internal class Decoder(
             wholeInput(readings, limit, spans).forEach(::offer)
         }
 
-        // 2. Prefix words: every proper prefix of the best reading, longest first.
+        // 2. Prefix words: every proper prefix of the best reading, longest first. Always a
+        // reading of the letters as typed: corrections are only made for input that has one.
         val primary = readings.first()
         for (span in minOf(primary.size, MAX_WORD_SYLLABLES) downTo 1) {
             if (span == primary.size) continue
@@ -388,22 +398,25 @@ internal class Decoder(
         // the same scale as everything else.
         val full = ArrayList<Candidate>()
         // Tracked alongside, because which reading produced a candidate is not recoverable from
-        // the candidate: the budget below spends exact and fuzzy decodings differently.
+        // the candidate: the budget below spends exact and fuzzy decodings differently. A typo
+        // correction counts as a respelling here: it is a guess at what the user meant rather
+        // than a reading of what they typed, and is held back by the same rule.
         val fromFuzzy = HashSet<String>()
-        val considered = readings.take(MAX_READINGS)
+        // Already bounded by [candidates]: [MAX_READINGS] literal readings plus the corrections.
+        val considered = readings
         // A one-syllable reading decodes to single characters, which the character floor offers
         // anyway; left uncapped they fill every whole-input slot, and `xian` lost 西安 to a sixth
         // homophone of 先. Capped only when a real multi-syllable reading is there to use the
         // room: for `ma` the only rival is the abbreviation `m a`, whose 买啊 and 毛啊 are worse
         // than the next homophone, so there the characters keep every slot.
         val rivalReading = considered.any { r ->
-            r.size > 1 && r.fuzzyCount == 0 && r.ids.none(Syllables::isInitial)
+            r.size > 1 && r.fuzzyCount == 0 && r.typos == 0 && r.ids.none(Syllables::isInitial)
         }
         for (reading in considered) {
-            val penalty = reading.fuzzyCount * fuzzyPenalty
+            val penalty = reading.fuzzyCount * fuzzyPenalty + reading.typos * typoPenalty
             val take = if (reading.size == 1 && rivalReading) SINGLE_SYLLABLE_DECODINGS else limit
             for (candidate in decode(reading, minOf(limit, take), spans)) {
-                if (reading.fuzzyCount > 0) fromFuzzy.add(candidate.text)
+                if (reading.fuzzyCount > 0 || reading.typos > 0) fromFuzzy.add(candidate.text)
                 full.add(
                     Candidate(
                         candidate.text,
@@ -926,6 +939,18 @@ internal class Decoder(
          * on both sides.
          */
         private const val FUZZY_PENALTY = 4.0f
+
+        /**
+         * Charged per typing slip undone by [Typos], in nats.
+         *
+         * Only ever paid by input that does not parse as typed, so this is not the price of
+         * overruling a spelling -- there is no clean spelling to overrule -- but of ranking a
+         * guess against the abbreviation readings the segmenter makes of the broken letters.
+         * Those are junk by construction (`lupbogao` as `lu p bo gao` gives 路拼搏港澳 at -36.7
+         * against 萝卜糕 at -14.7), so the gap is wide and this only has to be large enough that
+         * a correction does not beat a genuine mixed abbreviation the user typed on purpose.
+         */
+        private const val TYPO_PENALTY = 5.0f
 
         /** A word the user has chosen before is worth this much extra. */
         /**

@@ -42,6 +42,12 @@ internal object Syllables {
         val ends: IntArray,
         /** How many syllables in this reading were matched fuzzily rather than exactly. */
         val fuzzyCount: Int = 0,
+        /**
+         * How many typing slips were undone to reach this reading; see [typoReadings]. Its
+         * [ends] are still positions in the letters *as typed*, so a candidate from it consumes
+         * the slip along with everything else.
+         */
+        val typos: Int = 0,
     ) {
         val size: Int get() = ids.size
     }

@@ -815,6 +815,12 @@ that looked like a different bug:
   discarded any fuzzy variant that collided with a real syllable, which threw away 394 of them —
   every pair worth having, since `zong`/`zhong` and `nan`/`lan` are exactly the confusions fuzzy
   pinyin exists for. They are kept and ordered instead: exact first, fuzzy charged a penalty.
+- **A slip of the finger is not a fuzzy spelling.** `lupbogao` -- one key off 萝卜糕 -- led with
+  路拼搏港澳, because the stray `p` could only be read as an abbreviation. `pinyin/Typos` tries
+  one slip (neighbouring key, swap, stray or dropped letter) near the break, but only when the
+  letters parse *badly*: a bare consonant with spelled syllables after it. Clean pinyin is never
+  second-guessed, and letters with no reading at all are left alone -- in the English bar they are
+  English (`will`, `find`), and correcting them invented 起来了 and 新的.
 - **The candidate bar has to leave room for prefixes.** Offering every whole-input decoding
   filled the strip with 北京大学, 北京大雪, 北京大削, 北极难过大学 and no 北京 — so a phrase could
   be typed whole or not at all, and committing it a word at a time was impossible.
@@ -1358,6 +1364,7 @@ letters.
 | `FUZZY_PENALTY` | 2.3 nats | "about ten times less likely" per fuzzily-matched syllable |
 | `LEARNED_BONUS` | 12.0 nats | sized to the gaps `unigram` actually produces; 3 did nothing |
 | `MAX_READINGS` | 16 | fuzzy readings sort last, and cutting at 4 dropped them entirely |
+| `TYPO_PENALTY` | 5.0 nats | per slip undone; only paid by input that parses badly, see `pinyin/Typos` |
 | `FULL_DECODINGS` | 5 | leaves room on the bar for prefix words |
 
 ### Tap decoding -- `tap/SpatialModel`, `tap/WordIndex`
